@@ -139,10 +139,10 @@ the extension, and the Dockerfile stops if they come to have it: libplacebo
 is updated then.
 
 The Windows build's dependency image, BtbN's, is pinned by digest and
-copied once to `ghcr.io/pley-media-server/ffmpeg-builds-win64-gpl`, which
-CI builds from, since BtbN's registry doesn't keep every digest.
+pulled from BtbN's registry, which doesn't keep every digest. A published
+build is never rebuilt, so a digest that goes only matters when the recipe
+changes: `DEPS_IMAGE` then moves to a current one.
 
 GitHub makes a package private when it is first published: make
-`pley-ffmpeg`, `pley-ffmpeg-windows` and `ffmpeg-builds-win64-gpl` public
-in their settings, so that anyone can build the Pley image and the
-installers.
+`pley-ffmpeg` and `pley-ffmpeg-windows` public in their settings, so that
+anyone can build the Pley image and the installers.
