@@ -115,10 +115,8 @@
   "settings": {
     "label": "Playback settings",
     "fel": {
-      "title": "Dolby Vision FEL",
+      "enable": "Enable FEL rebuild",
       "experimental": "Experimental",
-      "baseLayer": "Base layer",
-      "fullPicture": "Full picture",
       "playsAs": {
         "sdr": "Plays as SDR",
         "hdr10": "Plays as HDR10",

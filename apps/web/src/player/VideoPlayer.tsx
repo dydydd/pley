@@ -376,7 +376,7 @@ export function VideoPlayer({ item, startMs, fileId, audio: initialAudio, sub: i
   const [quality, setQuality] = useLocalStorage<string>("pley.quality", "auto");
   // Dolby Vision profile 7's full enhancement layer, where the server offers it: kept for this
   // device, asked for in every play, and ignored where not offered (experimental).
-  const [fullLayer, setFullLayer] = useLocalStorage<boolean>("pley.fullLayer", false);
+  const [felRebuild, setFelRebuild] = useLocalStorage<boolean>("pley.felRebuild", false);
   // One menu: the original plays the best way the browser can, Automatic
   // plays it unless it doesn't play well, every other quality is a
   // transcode. A remembered quality this file doesn't need (an 8 Mbps cap
@@ -826,7 +826,7 @@ export function VideoPlayer({ item, startMs, fileId, audio: initialAudio, sub: i
           caps: videoCaps(),
           controls: videoControls(hasNext, audioStreams.length),
           ...deviceFields(),
-          ...(fullLayer ? { enhancement_layer: true } : {}),
+          ...(felRebuild ? { enhancement_layer: true } : {}),
           ...(alongside ? { keep_previous: true } : {}),
         });
       let pinfo: PlaybackInfo;
@@ -1014,7 +1014,7 @@ export function VideoPlayer({ item, startMs, fileId, audio: initialAudio, sub: i
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [item.id, file?.id, audioIndex, burnIndex, playingQuality.id, loadToken, autoReady, fullLayer]);
+  }, [item.id, file?.id, audioIndex, burnIndex, playingQuality.id, loadToken, autoReady, felRebuild]);
 
   // Final teardown on unmount: report "stopped" and release the transcode.
   useEffect(() => {
@@ -1678,11 +1678,11 @@ export function VideoPlayer({ item, startMs, fileId, audio: initialAudio, sub: i
     setQuality(id);
     if (fellBackBefore) setLoadToken((t) => t + 1);
   };
-  const changeFullLayer = (on: boolean) => {
-    if (on === fullLayer) return;
+  const changeFelRebuild = (on: boolean) => {
+    if (on === felRebuild) return;
     startMsRef.current = currentMs();
     prepareNext.current = true;
-    setFullLayer(on);
+    setFelRebuild(on);
   };
   const changeSubtitle = (index: number | null) => {
     const s = subStreams.find((x) => x.index === index);
@@ -2246,8 +2246,8 @@ export function VideoPlayer({ item, startMs, fileId, audio: initialAudio, sub: i
             autoWhy={autoWhy}
 
             onQuality={changeQuality}
-            fullLayer={info?.enhancement_layer ? { on: fullLayer, playsAs: info.enhancement_layer_as ?? "sdr" } : null}
-            onFullLayer={changeFullLayer}
+            felRebuild={info?.enhancement_layer ? { on: felRebuild, playsAs: info.enhancement_layer_as ?? "sdr" } : null}
+            onFelRebuild={changeFelRebuild}
             audioStreams={audioStreams}
             audioIndex={audioIndex ?? info?.audio_index ?? null}
             onAudio={changeAudio}

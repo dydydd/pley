@@ -62,21 +62,32 @@ describe("SettingsPopover", () => {
     expect(props.setOpen).toHaveBeenCalledWith(false);
   });
 
-  it("offers Dolby Vision FEL's full picture below the qualities only where the server does", async () => {
+  it("offers to rebuild Dolby Vision FEL below the qualities only where the server does", async () => {
     const user = userEvent.setup();
     renderPopover();
     await user.click(screen.getByRole("button", { name: /Quality/ }));
-    expect(screen.queryByText(/Dolby Vision FEL/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitemcheckbox")).not.toBeInTheDocument();
 
-    const onFullLayer = vi.fn();
-    renderPopover({ fullLayer: { on: false, playsAs: "sdr" }, onFullLayer });
+    const onFelRebuild = vi.fn();
+    renderPopover({ felRebuild: { on: false, playsAs: "sdr" }, onFelRebuild });
     await user.click(screen.getAllByRole("button", { name: /Quality/ }).at(-1)!);
-    expect(screen.getByText("Dolby Vision FEL · Experimental")).toBeInTheDocument();
-    expect(screen.getByRole("menuitemradio", { name: "Base layer" })).toHaveAttribute("aria-checked", "true");
-    const full = screen.getByRole("menuitemradio", { name: /Full picture/ });
-    expect(full).toHaveTextContent("Plays as SDR");
-    await user.click(full);
-    expect(onFullLayer).toHaveBeenCalledWith(true);
+    const rebuild = screen.getByRole("menuitemcheckbox", { name: /Enable FEL rebuild/ });
+    expect(rebuild).toHaveAttribute("aria-checked", "false");
+    expect(rebuild).toHaveTextContent("Experimental · Plays as SDR");
+    await user.click(rebuild);
+    expect(onFelRebuild).toHaveBeenCalledWith(true);
+  });
+
+  it("turns the FEL rebuild off again", async () => {
+    const user = userEvent.setup();
+    const onFelRebuild = vi.fn();
+    renderPopover({ felRebuild: { on: true, playsAs: "hdr10" }, onFelRebuild });
+    await user.click(screen.getByRole("button", { name: /Quality/ }));
+    const rebuild = screen.getByRole("menuitemcheckbox", { name: /Enable FEL rebuild/ });
+    expect(rebuild).toHaveAttribute("aria-checked", "true");
+    expect(rebuild).toHaveTextContent("Plays as HDR10");
+    await user.click(rebuild);
+    expect(onFelRebuild).toHaveBeenCalledWith(false);
   });
 
   it("says what Automatic plays, and why when lower", async () => {
