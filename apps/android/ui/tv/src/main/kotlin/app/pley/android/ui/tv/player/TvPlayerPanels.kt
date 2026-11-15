@@ -151,6 +151,14 @@ private fun ChoicePanel(
     )
     val original = stringResource(R.string.tv_player_play_original)
     val originalHint = stringResource(R.string.tv_player_play_original_hint)
+    val felTitle = stringResource(R.string.tv_player_fel_title)
+    val felBase = stringResource(R.string.tv_player_fel_base_layer)
+    val felFull = stringResource(R.string.tv_player_fel_full_picture)
+    val felPlaysAs = when (s.fullLayer?.playsAs) {
+        "hdr10" -> stringResource(R.string.tv_player_fel_plays_hdr10)
+        "hlg" -> stringResource(R.string.tv_player_fel_plays_hlg)
+        else -> stringResource(R.string.tv_player_fel_plays_sdr)
+    }
     val style = SubtitleStyleTexts(
         size = stringResource(R.string.tv_settings_subtitle_size),
         sizes = SubtitleSizeLabels.map { stringResource(it) },
@@ -270,6 +278,22 @@ private fun ChoicePanel(
                     controller.selectQuality(s.qualities[i].id)
                     ui.closePanel()
                 }
+                // Dolby Vision FEL's full picture, where the server offers it for this title (experimental).
+                s.fullLayer?.let { fel ->
+                    item(key = "fel-title") { PanelNote(felTitle) }
+                    item(key = "fel-base") {
+                        PanelRow(felBase, onClick = {
+                            controller.selectFullLayer(false)
+                            ui.closePanel()
+                        }, checked = !fel.on)
+                    }
+                    item(key = "fel-full") {
+                        PanelRow(felFull, onClick = {
+                            controller.selectFullLayer(true)
+                            ui.closePanel()
+                        }, checked = fel.on, supporting = felPlaysAs)
+                    }
+                }
             }
             PlayerPanel.Info -> Unit
         }
@@ -343,6 +367,7 @@ private data class PanelData(
     val subtitles: List<app.pley.android.player.TrackChoice>,
     val audio: List<app.pley.android.player.TrackChoice>,
     val qualities: List<app.pley.android.player.QualityChoice>,
+    val fullLayer: app.pley.android.player.FullLayerChoice?,
     val note: String?,
     val canPlayOriginal: Boolean,
     val subtitleSync: Boolean,
@@ -360,6 +385,7 @@ private data class PanelData(
             subtitles = s.subtitles,
             audio = s.audio,
             qualities = s.qualities,
+            fullLayer = s.fullLayer,
             note = s.note,
             canPlayOriginal = s.canPlayOriginal,
             subtitleSync = s.subtitleSync,

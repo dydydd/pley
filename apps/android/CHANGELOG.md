@@ -8,6 +8,12 @@ describes how they are made.
 
 ## [Unreleased]
 
+### Added
+
+- On Android TV, the player's Quality panel offers Dolby Vision FEL's full
+  picture, marked experimental, where the server offers it, and says what
+  it plays as. The choice is kept on the device.
+
 ## [0.1.13] - 2026-11-14
 
 ### Changed
