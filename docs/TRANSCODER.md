@@ -51,8 +51,8 @@ pley-transcoder [OPTIONS]
 Other environment variables:
 
 - `PLEY_VAAPI_DEVICE`: the VAAPI render node (default: the first Intel or
-  AMD one), and Quick Sync's on Linux (default: the first Intel one;
-  [Quick Sync on Linux](#quick-sync-on-linux)).
+  AMD one), and Quick Sync's on Linux unless it is another maker's GPU
+  (default: the first Intel one; [Quick Sync on Linux](#quick-sync-on-linux)).
 
 ### Managed and external mode
 
@@ -825,7 +825,8 @@ Each candidate encoder is test-encoded at start, not just listed:
 #### Quick Sync on Linux
 
 Quick Sync's device is made from VAAPI's on the first Intel render node
-(`PLEY_VAAPI_DEVICE` names another), in jobs and their start-up tests alike:
+(`PLEY_VAAPI_DEVICE` names another, unless it is an AMD or NVIDIA GPU's),
+in jobs and their start-up tests alike:
 
 ```
 -init_hw_device vaapi=va:<render node>,driver=iHD -init_hw_device qsv=qs@va
@@ -978,8 +979,8 @@ available tone mapper:
   metadata, and applies Dolby Vision's reshaping. Where it lists BT.2390
   (`opencl_bt2390`, also jellyfin-ffmpeg's), OpenCL tone maps with
   `tonemap=bt2390:tonemap_mode=max`: Hable came out a fifth too dark
-  there, and on Sol Levante this mode was as bright as the SDR grade
-  with the fewest highlights clipped. FFmpeg's own keeps Hable. HDR10
+  there, and against a film's own SDR grade this mode was as bright as
+  the grade with the fewest highlights clipped. FFmpeg's own keeps Hable. HDR10
   whose frames carry no mastering display is tone mapped there from
   1000 cd/m² too (`peak=10`, in 100 cd/m²), as libplacebo does it; a
   stream with content light levels alone is taken for 1000 cd/m² as well.

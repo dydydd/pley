@@ -525,6 +525,7 @@ mod tests {
             amf_upload: false,
             vui_primaries: None,
             hw_decode: None,
+            qsv_fallback_decode: None,
             gpu_scale: None,
             deinterlace: false,
             preset: String::new(),

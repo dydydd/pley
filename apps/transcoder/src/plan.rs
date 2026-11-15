@@ -302,7 +302,7 @@ const OPENCL_HABLE: &str = "tonemap=hable:desat=0";
 
 /// The curve where `tonemap_opencl` has BT.2390 ([`Capabilities::opencl_bt2390`]),
 /// which tone maps by the stream's metadata: Hable comes out a fifth too
-/// dark there. Against a film's SDR grade (Sol Levante's) BT.2390 on the
+/// dark there. Against a film's own SDR grade, BT.2390 on the
 /// brightest channel came out as bright as the grade, with the fewest
 /// highlights clipped (7.5 % of pixels against 16 to 19 % for the other
 /// modes; the grade clips 2 %).
@@ -463,6 +463,10 @@ pub struct VideoOut {
     /// take BT.2020 for 4K.
     pub vui_primaries: Option<u8>,
     pub hw_decode: Option<String>,
+    /// The decoder that takes over where Quick Sync's own (`hw_decode` "qsv")
+    /// fails: FFmpeg's paired with the encoder, or the CPU's (`None`). See
+    /// [`Plan::without_quick_sync_decoding`].
+    pub qsv_fallback_decode: Option<String>,
     /// The GPU that decodes the frames scales them too, before they come to
     /// memory for the CPU's filters or encoder ([`VideoOut::scales_on_gpu`]):
     /// NVIDIA's (`scale_cuda`), VAAPI's (`scale_vaapi`) or Quick Sync's
@@ -806,6 +810,7 @@ impl Plan {
                         amf_upload: false,
                         vui_primaries: None,
                         hw_decode: None,
+                        qsv_fallback_decode: None,
                         gpu_scale: None,
                         deinterlace: false,
                         preset: String::new(),
@@ -935,18 +940,19 @@ impl Plan {
                     // at all, and VAAPI's scales none in 10 bits. Not 8-bit
                     // video kept at its size: Quick Sync's copy to memory
                     // costs the CPU more than Direct3D's.
-                    // Nor Dolby Vision or HDR10+ that libplacebo tone maps:
-                    // Quick Sync's decoder reads neither's metadata, and
-                    // profile 5's colours are only in it.
+                    // Nor Dolby Vision or HDR10+ that libplacebo or OpenCL
+                    // tone maps: Quick Sync's decoder reads neither's
+                    // metadata, and profile 5's colours are only in it.
                     let resized = (width, height) != (src_width, src_height);
-                    let scene_metadata = tonemap == Some(Tonemapper::Libplacebo)
-                        && ((range == DynamicRange::DolbyVision && !fel_base)
-                            || range == DynamicRange::Hdr10plus
-                            || src.hdr10plus == Some(true));
+                    let has_scene_metadata = (range == DynamicRange::DolbyVision && !fel_base)
+                        || range == DynamicRange::Hdr10plus
+                        || src.hdr10plus == Some(true);
+                    let scene_metadata = has_scene_metadata && tonemap == Some(Tonemapper::Libplacebo);
                     let qsv_first = qsv_decodes(encoder.accel)
                         && !deinterlace
                         && !turned
-                        && !scene_metadata
+                        && !(has_scene_metadata
+                            && matches!(tonemap, Some(Tonemapper::Libplacebo | Tonemapper::Opencl)))
                         && (resized || ten_bits || src.bit_depth.unwrap_or(8) > 8);
                     // What Quick Sync could take over where the computer
                     // falls behind: the HDR10 picture under that metadata.
@@ -1010,6 +1016,10 @@ impl Plan {
                         && encoder.hardware
                         && !deinterlace
                         && !turned;
+                    // Also where a share hands Quick Sync the base layer.
+                    let qsv_fallback_decode = (hw_decode.as_deref() == Some("qsv") || qsv_base_layer)
+                        .then(|| pick_hw_decoder(ff, &encoder))
+                        .flatten();
                     let encoder = match pipeline {
                         Pipeline::Vulkan { encode_on_gpu: true } => vulkan_encoder(),
                         _ => encoder,
@@ -1044,6 +1054,7 @@ impl Plan {
                         .then(|| if tonemap.is_some() { Some(1) } else { h264_primaries(src) })
                         .flatten(),
                         hw_decode,
+                        qsv_fallback_decode,
                         gpu_scale,
                         deinterlace,
                         pipeline,
@@ -1332,12 +1343,12 @@ impl Plan {
     /// Quick Sync's own, where that one failed on the video
     /// ([`Plan::decodes_on_quick_sync`]): FFmpeg decodes on the CPU what
     /// that decoder can't, and the frames come to memory whole.
-    pub fn without_quick_sync_decoding(&self, ff: &Ffmpeg) -> Plan {
+    pub fn without_quick_sync_decoding(&self) -> Plan {
         let mut plan = self.clone();
         if plan.decodes_on_quick_sync()
             && let Some(v) = plan.video.as_mut()
         {
-            v.hw_decode = v.encoder.as_ref().and_then(|e| pick_hw_decoder(ff, e));
+            v.hw_decode = v.qsv_fallback_decode.clone();
             v.gpu_scale = None;
         }
         plan
@@ -3494,6 +3505,16 @@ mod tests {
                 assert!(!args.contains("-hwaccel qsv") && !args.contains("vpp_qsv"), "{args}");
             }
         }
+        // Nor profile 5 that OpenCL tone maps by its metadata (BT.2390,
+        // Pley's FFmpeg) where there's no Vulkan.
+        let mut ff = intel(HwAccel::Qsv, false);
+        ff.caps.opencl_bt2390 = true;
+        let plan = Plan::build(&request(), &p5, &ff, None).unwrap();
+        let v = plan.video.as_ref().unwrap();
+        assert_eq!(v.tonemap, Some(Tonemapper::Opencl));
+        assert_ne!(v.hw_decode.as_deref(), Some("qsv"));
+        let args = args_string(&plan, 0, 2);
+        assert!(!args.contains("-hwaccel qsv") && !args.contains("vpp_qsv"), "{args}");
     }
 
     /// Picture subtitles are burned in on the CPU. Quick Sync decodes and

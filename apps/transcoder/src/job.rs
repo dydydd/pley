@@ -1242,7 +1242,9 @@ impl JobManager {
                 let mut read = media.clone();
                 self.prober.read_first_frames(input, &mut read).await;
                 let has = read.video().and_then(|v| v.hdr10_metadata);
-                if let Some(stamp) = stamp {
+                // A read that found no frames (a share that didn't answer in
+                // time) is tried again by the file's next job.
+                if let Some(stamp) = stamp.filter(|_| has.is_some()) {
                     let mut cache = self.hdr10_metadata.lock();
                     // A library's worth, then started again.
                     if cache.len() >= 4096 {
@@ -1518,7 +1520,7 @@ impl JobManager {
         let adjusted = (share.is_some() || bitrate.is_some() || qsv_decode_failed).then(|| {
             let mut plan = share.map_or_else(|| plan.clone(), |s| plan.with_share(s));
             if qsv_decode_failed {
-                plan = plan.without_quick_sync_decoding(&self.ff);
+                plan = plan.without_quick_sync_decoding();
             }
             if let (Some(kbps), Some(v)) = (bitrate, plan.video.as_mut()) {
                 v.bitrate_kbps = kbps;
@@ -2425,7 +2427,8 @@ impl Job {
             && self.plan.decodes_on_quick_sync()
             && let Some(v) = video.as_mut()
         {
-            v.decoder = Some(if cfg!(windows) { "d3d11va" } else { "vaapi" }.into());
+            let fallback = self.plan.video.as_ref().and_then(|p| p.qsv_fallback_decode.clone());
+            v.decoder = Some(fallback.unwrap_or_else(|| "cpu".into()));
         }
         // Quick Sync took the decoding over from the decoder that failed.
         let quick_sync_decodes = rt.quick_sync_decodes(&self.plan);
@@ -3265,12 +3268,14 @@ mod tests {
         let mut media = MediaInfo::default();
         media.streams.push(MediaStream { kind: pley_transcoder_api::StreamKind::Video, ..Default::default() });
 
-        // No ffprobe here: read, nothing known, and remembered as such.
+        // No ffprobe here: nothing read, so nothing remembered, and the
+        // next job reads again.
         let read = mgr.with_hdr10_metadata(&input, &media).await;
         assert_eq!(read.video().unwrap().hdr10_metadata, None);
-        assert_eq!(mgr.hdr10_metadata.lock().len(), 1);
-        // What a read would have said is what the next job gets, unread.
-        mgr.hdr10_metadata.lock().values_mut().for_each(|(_, has)| *has = Some(true));
+        assert!(mgr.hdr10_metadata.lock().is_empty());
+        // What a read said is what the next job gets, unread.
+        let file = std::fs::metadata(&input).unwrap();
+        mgr.hdr10_metadata.lock().insert(input.clone(), ((file.len(), file.modified().ok()), Some(true)));
         let again = mgr.with_hdr10_metadata(&input, &media).await;
         assert_eq!(again.video().unwrap().hdr10_metadata, Some(true));
         // A changed file is read again.
@@ -4210,14 +4215,16 @@ mod tests {
             assert_eq!(rt.failures.get(&1), None, "the segment is tried again");
         }
         // FFmpeg's decoder from then on, the frames whole to memory.
-        let taken = job.plan.without_quick_sync_decoding(&ff);
+        let taken = job.plan.without_quick_sync_decoding();
         let v = taken.video.as_ref().unwrap();
         let paired = if cfg!(windows) { Some("d3d11va") } else { None };
         assert_eq!((v.hw_decode.as_deref(), v.gpu_scale), (paired, None));
         assert!(!taken.decodes_on_quick_sync());
         let status = job.status();
         assert!(status.warnings.iter().any(|w| w == QSV_DECODING_FAILED), "{:?}", status.warnings);
-        assert_ne!(status.video.unwrap().decoder.as_deref(), Some("qsv"));
+        // The status names the decoder that took over: the CPU where FFmpeg
+        // has no hardware decoder to pair with the encoder.
+        assert_eq!(status.video.unwrap().decoder.as_deref(), Some(paired.unwrap_or("cpu")));
         // Quick Sync takes neither the tone mapping nor the base layer.
         let jobs = manager_with(dir.path(), iris_xe(dir.path()));
         let share = jobs.gpu_share(&job, true).unwrap();
