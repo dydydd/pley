@@ -187,7 +187,7 @@
       "tonemapInstead": "{{reason}}: {{fallback}}",
       "tonemapWithAnother": "{{reason}}: las transcodificaciones usan otro mapeo de tonos en su lugar.",
       "fel": "Dolby Vision FEL",
-      "felHint": "Perfil 7 con una capa de mejora completa, como en muchos Blu-ray UHD. FFmpeg, tal como se publica, no lee esa capa, así que las transcodificaciones usan la imagen HDR10 que hay debajo. Activado, los reproductores cuya pantalla muestra Dolby Vision, y que no reproducen esa capa por sí mismos, ofrecen la imagen completa de cada uno de esos títulos: reconstruida a partir de las dos capas, como hace un reproductor Dolby Vision. Esa transcodificación se hace en el procesador.",
+      "felHint": "Permite a los reproductores conectados a un televisor Dolby Vision ofrecer la imagen completa de los títulos en perfil 7 FEL, como en muchos Blu-ray UHD. El servidor la reconstruye en el procesador.",
       "felFull": "Ofrecer la capa de mejora completa",
       "felFullUnavailable": "Necesita el FFmpeg propio de Pley, que sabe leer la capa de mejora.",
       "experimental": "Experimental",

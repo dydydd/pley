@@ -186,7 +186,7 @@
       "tonemapInstead": "{{reason}}: {{fallback}}",
       "tonemapWithAnother": "{{reason}}: transcodes tone map with another instead.",
       "fel": "Dolby Vision FEL",
-      "felHint": "Profile 7 with a full enhancement layer, as on many UHD Blu-rays. FFmpeg as released doesn't read that layer, so transcodes use the HDR10 picture under it. Turned on, players whose screen shows Dolby Vision, and that can't play the layer themselves, offer each such title's full picture: rebuilt from both layers, as a Dolby Vision player does. That transcode runs on the CPU.",
+      "felHint": "Lets players on Dolby Vision TVs offer the full picture of profile 7 FEL titles, as on many UHD Blu-rays. The server rebuilds it on the CPU.",
       "felFull": "Offer the full enhancement layer",
       "felFullUnavailable": "Needs Pley's own FFmpeg, which can read the enhancement layer.",
       "experimental": "Experimental",
