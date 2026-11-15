@@ -69,7 +69,7 @@ describe("TranscoderSettings' form", () => {
     expect(full).not.toBeChecked();
     expect(screen.getByText("Experimental")).toBeInTheDocument();
     // Players on Dolby Vision screens offer it; the server alone doesn't use it.
-    expect(screen.getByText(/players on Dolby Vision TVs/)).toBeInTheDocument();
+    expect(screen.getByText(/Clients must support Dolby Vision/)).toBeInTheDocument();
     await user.click(full);
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(requests.find((r) => r.method === "PUT")?.body).toEqual({ dolby_vision_fel_full: true }));

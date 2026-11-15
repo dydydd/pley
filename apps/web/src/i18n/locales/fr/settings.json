@@ -187,7 +187,7 @@
       "tonemapInstead": "{{reason}} : {{fallback}}",
       "tonemapWithAnother": "{{reason}} : les transcodages utilisent un autre mappage tonal à la place.",
       "fel": "Dolby Vision FEL",
-      "felHint": "Permet aux lecteurs branchés sur un téléviseur Dolby Vision de proposer l’image complète des titres en profil 7 FEL, comme sur beaucoup de Blu-ray UHD. Le serveur la reconstitue sur le processeur.",
+      "felHint": "Permet au transcodeur de reconstituer l’image complète des titres FEL. Les clients doivent prendre en charge le Dolby Vision.",
       "felFull": "Proposer la couche d’amélioration complète",
       "felFullUnavailable": "Nécessite le FFmpeg de Pley, qui sait lire la couche d’amélioration.",
       "experimental": "Expérimental",

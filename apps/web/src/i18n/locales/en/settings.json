@@ -186,7 +186,7 @@
       "tonemapInstead": "{{reason}}: {{fallback}}",
       "tonemapWithAnother": "{{reason}}: transcodes tone map with another instead.",
       "fel": "Dolby Vision FEL",
-      "felHint": "Lets players on Dolby Vision TVs offer the full picture of profile 7 FEL titles, as on many UHD Blu-rays. The server rebuilds it on the CPU.",
+      "felHint": "Allow the transcoder to rebuild the full picture for FEL titles. Clients must support Dolby Vision.",
       "felFull": "Offer the full enhancement layer",
       "felFullUnavailable": "Needs Pley's own FFmpeg, which can read the enhancement layer.",
       "experimental": "Experimental",
