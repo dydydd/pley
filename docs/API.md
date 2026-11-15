@@ -508,9 +508,11 @@ interface PlaybackInfo {
   enhancement_layer?: "offered" | "used"; // Dolby Vision profile 7's full enhancement layer: "offered" where the
                                     // player may ask for it, "used" where this transcode is made from it. Offered
                                     // where the server has `dolby_vision_fel_full` on and its transcoder can,
-                                    // converts video, the stream has a full layer that is there, the screen
+                                    // converts video, the stream says it carries a full layer
+                                    // (`dv_el_present`), the screen
                                     // shows HDR (HDR10, HDR10+ or Dolby Vision in `caps.hdr_types`; `caps.hdr`
-                                    // for version 1 players), and the player can't play profile 7 itself (no
+                                    // and `caps.hdr_display` for version 1 players), and the player can't play
+                                    // profile 7 itself (no
                                     // profile 7 in `caps.dolby_vision_profiles`); never for a download or a
                                     // compatibility API. A player shows the choice in its Quality menu, marked
                                     // experimental, and keeps it per device. Left out otherwise
@@ -2217,6 +2219,8 @@ removed or reordered (`400`).
     video_codecs: string[];       // ["h264","hevc","vp9","av1"]
     audio_codecs: string[];       // ["aac","mp3","opus","flac","vorbis"]
     hdr?: boolean;                // shows HDR10 and HLG without tone mapping
+    hdr_display?: boolean;        // the screen itself is HDR, where `hdr` is also true of a browser tone
+                                  // mapping for an SDR screen: what offers `enhancement_layer` (default false)
     dolby_vision?: boolean;       // decodes Dolby Vision (needed for profile 5)
     // Version 2 (the Android and Apple apps); every field optional. Codec names are ffprobe's.
     caps_version?: 2;

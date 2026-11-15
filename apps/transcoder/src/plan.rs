@@ -857,11 +857,12 @@ impl Plan {
                     // Experimental: the full picture rebuilt from both layers,
                     // where FFmpeg can (Pley's own). `dovi_compose` takes
                     // frames from memory, so the CPU decodes both layers.
-                    // Not where the stream says it has no enhancement layer,
-                    // only its metadata: FFmpeg would wait for that layer's
+                    // Only where the stream says it carries the enhancement
+                    // layer (its configuration record): with the layer's
+                    // metadata alone, FFmpeg would wait for that layer's
                     // frames to the end of the file.
                     let fel_compose = fel
-                        && src.dv_el_present != Some(false)
+                        && src.dv_el_present == Some(true)
                         && req.options.dolby_vision_fel_full
                         && ff.caps.dolby_vision_fel_full;
                     let fel_base = fel;
@@ -1335,6 +1336,24 @@ impl Plan {
         if matches!(self.burn, Some(Burn::ImageFile { .. })) { 2 } else { 1 }
     }
 
+    /// Whether this plan rebuilds Dolby Vision FEL's full picture
+    /// ([`VideoOut::fel_compose`], experimental).
+    pub fn composes_fel(&self) -> bool {
+        self.video.as_ref().is_some_and(|v| v.fel_compose && !v.copy)
+    }
+
+    /// This plan with the video made from its HDR10 base layer alone, where
+    /// rebuilding the full picture failed ([`Plan::composes_fel`]): already
+    /// decoded on the CPU and made as HDR10, it only loses the second input
+    /// and `dovi_compose`.
+    pub fn without_fel_compose(&self) -> Plan {
+        let mut plan = self.clone();
+        if let Some(v) = plan.video.as_mut() {
+            v.fel_compose = false;
+        }
+        plan
+    }
+
     /// Whether Quick Sync could decode this video's HDR10 base layer in
     /// place of FFmpeg's own decoder ([`VideoOut::qsv_base_layer`]): what
     /// relieves a CPU that decodes it, the GPU's decoder having failed.
@@ -1791,7 +1810,7 @@ impl Plan {
         }
         // Dolby Vision's full enhancement layer: the file again, its video
         // split down to that layer, seeking where the first input does.
-        if let Some(v) = self.video.as_ref().filter(|v| v.fel_compose && !v.copy) {
+        if let Some(v) = self.video.as_ref().filter(|_| self.composes_fel()) {
             if seek_ms > 0 {
                 a.push_all(["-ss", &secs(seek_ms)]);
             }
@@ -3834,6 +3853,7 @@ mod tests {
         let mut fel = ten_bit(media(DynamicRange::DolbyVision, Some(7)));
         fel.streams[0].dv_bl_compat = Some(6);
         fel.streams[0].dv_el = Some(DolbyVisionLayer::Fel);
+        fel.streams[0].dv_el_present = Some(true);
         fel.streams[0].hdr10_metadata = Some(true);
         let mut req = request();
         req.options.dolby_vision_fel_full = true;
@@ -3857,6 +3877,13 @@ mod tests {
         assert!(args.contains(":apply_dolbyvision=0"), "{args}");
         // Never handed to Quick Sync's tone mapping: its frames are in memory.
         assert!(!plan.quick_sync_could_tonemap(&fel, true));
+        // Where the rebuild failed: the base layer, one input, as before.
+        assert!(plan.composes_fel());
+        let base = plan.without_fel_compose();
+        assert!(!base.composes_fel() && base.video.as_ref().unwrap().base_layer_only);
+        let args = args_string(&base, 2, 4);
+        assert!(!args.contains("dovi_split") && !args.contains("dovi_compose"), "{args}");
+        assert_eq!(args.matches("-i file:/media/movie.mkv").count(), 1, "{args}");
 
         // After a picture subtitles' file, the third input.
         let mut burned = req.clone();
@@ -3872,10 +3899,10 @@ mod tests {
         mel.streams[0].dv_el = Some(DolbyVisionLayer::Mel);
         assert!(!Plan::build(&req, &mel, &ff, None).unwrap().video.as_ref().unwrap().fel_compose);
 
-        // A full layer's metadata without the layer (the stream says so):
-        // nothing to compose, its base layer alone. Said to be there, or
-        // not said (probed by an older transcoder): composed.
-        for (present, composed) in [(Some(false), false), (Some(true), true), (None, true)] {
+        // Composed only where the stream says the layer is there: not with
+        // a full layer's metadata alone, nor where it isn't said (probed by
+        // an older transcoder).
+        for (present, composed) in [(Some(false), false), (Some(true), true), (None, false)] {
             let mut stream = fel.clone();
             stream.streams[0].dv_el_present = present;
             let plan = Plan::build(&req, &stream, &ff, None).unwrap();
@@ -4203,6 +4230,7 @@ mod tests {
         // memory.
         let mut fel = p7.clone();
         fel.streams[0].dv_el = Some(DolbyVisionLayer::Fel);
+        fel.streams[0].dv_el_present = Some(true);
         let plan = Plan::build(&request(), &fel, &ff, None).unwrap();
         assert!(!plan.opencl_could_tonemap() && plan.quick_sync_could_tonemap(&fel, true));
         let mut req = request();

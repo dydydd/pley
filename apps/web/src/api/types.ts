@@ -586,6 +586,8 @@ export interface ClientCaps {
   audio_codecs: string[];
   /** Shows HDR10 / HLG without tone mapping. */
   hdr?: boolean;
+  /** The screen itself is HDR, where `hdr` is also true of a browser tone mapping for an SDR screen. */
+  hdr_display?: boolean;
   /** Decodes Dolby Vision (needed for profile 5). */
   dolby_vision?: boolean;
   /** HLS: `variants` moves between a multivariant playlist's sizes by itself (adaptive bitrate). */
@@ -1035,7 +1037,7 @@ export interface Settings {
   /** Keep transcodes' segments in RAM where the transcoder can, else on disk. Throttled transcodes only. */
   transcode_in_memory: boolean;
   /**
-   * Experimental: players on Dolby Vision screens offer profile 7's full
+   * Experimental: players on HDR screens offer profile 7's full
    * enhancement layer, the full picture rebuilt from both layers where the
    * transcoder's FFmpeg can. Absent from servers before it.
    */

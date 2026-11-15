@@ -221,7 +221,8 @@ pub struct MediaStream {
     /// its configuration record says (`el_present_flag`). A profile 7 track
     /// can keep a full layer's metadata without the layer itself (some
     /// remuxes drop it); there is nothing then to rebuild the full picture
-    /// from. `None`: not said, or probed by an older transcoder.
+    /// from, which is rebuilt only where this is `Some(true)`. `None`: not
+    /// said, or probed by an older transcoder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dv_el_present: Option<bool>,
     /// Dolby Vision found only in the frames (their RPUs): the file doesn't

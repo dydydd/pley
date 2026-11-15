@@ -68,7 +68,7 @@ describe("TranscoderSettings' form", () => {
     await waitFor(() => expect(full).toBeEnabled());
     expect(full).not.toBeChecked();
     expect(screen.getByText("Experimental")).toBeInTheDocument();
-    // Players on Dolby Vision screens offer it; the server alone doesn't use it.
+    // Players on HDR screens offer it; the server alone doesn't use it.
     expect(screen.getByText(/Clients must support HDR/)).toBeInTheDocument();
     await user.click(full);
     await user.click(screen.getByRole("button", { name: "Save" }));

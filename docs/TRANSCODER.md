@@ -1030,12 +1030,15 @@ the base layer's own static metadata, the Dolby Vision metadata unread
   describes that picture, and goes on with it as HDR10+ (`dovi_compose`'s
   `scene`), so made SDR it is tone mapped scene by scene, as a Dolby Vision
   player would. The server asks for it only for a player that asked
-  ([API.md](API.md), `enhancement_layer`). It isn't done where the stream
-  says it carries no enhancement layer, only its metadata
-  (`MediaStream.dv_el_present: false`, from the configuration record's
-  `el_present_flag`): FFmpeg would wait for that layer's frames to the end
-  of the file. Blu-ray transport streams and dual-track MP4s, where the
-  layer is a stream of its own, aren't composed.
+  ([API.md](API.md), `enhancement_layer`). It is done only where the
+  stream says it carries the enhancement layer
+  (`MediaStream.dv_el_present: true`, from the configuration record's
+  `el_present_flag`): with the layer's metadata alone, FFmpeg would wait
+  for that layer's frames to the end of the file. Files probed before
+  probes said so are probed again. The file is read twice, once for each
+  layer. A rebuild that fails before its first segment gives way to the
+  base layer for the rest of the job, with a warning. Files that carry the
+  layer as a video stream of its own (two video tracks) aren't composed.
 
 #### libplacebo quality
 

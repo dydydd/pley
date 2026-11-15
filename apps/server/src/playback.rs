@@ -47,6 +47,12 @@ pub struct Caps {
     /// it itself (desktop Chromium does on SDR screens).
     #[serde(default)]
     pub hdr: bool,
+    /// The screen itself is HDR (the web app's `(dynamic-range: high)`),
+    /// which [`Caps::hdr`] doesn't say where the browser tone maps for an
+    /// SDR screen: what offers the experimental FEL rebuild to a version 1
+    /// player ([`enhancement_layer_offered`]).
+    #[serde(default)]
+    pub hdr_display: bool,
     /// Client decodes Dolby Vision (including profile 5, which has no HDR10
     /// or SDR base layer).
     #[serde(default)]
@@ -216,9 +222,15 @@ impl Caps {
     }
 
     /// The screen shows HDR: HDR10, HDR10+ or Dolby Vision for a version 2
-    /// player, and for a version 1 one (the web app's) what its `hdr` says.
+    /// player, and for a version 1 one (the web app's) an HDR screen that
+    /// plays HDR ([`Caps::hdr_display`]), not a browser tone mapping for an
+    /// SDR one.
     fn shows_hdr(&self) -> bool {
-        if self.is_v2() { ["hdr10", "hdr10plus", "dolby_vision"].iter().any(|r| self.shows(r)) } else { self.hdr }
+        if self.is_v2() {
+            ["hdr10", "hdr10plus", "dolby_vision"].iter().any(|r| self.shows(r))
+        } else {
+            self.hdr && self.hdr_display
+        }
     }
 
     /// The version 2 player shows these subtitles itself.
@@ -793,7 +805,7 @@ pub fn enhancement_layer_offered(v: &MediaStream, req: &PlaybackRequest) -> bool
         && v.dynamic_range() == DynamicRange::DolbyVision
         && v.dv_profile == Some(7)
         && v.dv_el == Some(DolbyVisionLayer::Fel)
-        && v.dv_el_present != Some(false)
+        && v.dv_el_present == Some(true)
 }
 
 /// The lines of adaptive bitrate's renditions below a transcode's own size,
@@ -3759,6 +3771,7 @@ mod tests {
     fn the_full_enhancement_layer_is_offered_to_hdr_screens_that_ask() {
         let mut fel = dolby_vision(7, 6);
         fel.streams[0].dv_el = Some(DolbyVisionLayer::Fel);
+        fel.streams[0].dv_el_present = Some(true);
         let mut req = request();
         req.caps = sideloading_v2();
         req.hdr_transcodes = true;
@@ -3795,7 +3808,7 @@ mod tests {
             (Some(EnhancementLayer::Used), Some(OutputRange::Hdr10))
         );
         let web = PlaybackRequest {
-            caps: Caps { hdr: true, video_codecs: vec!["h264".into(), "hevc".into()], ..browser() },
+            caps: Caps { hdr: true, hdr_display: true, video_codecs: vec!["h264".into(), "hevc".into()], ..browser() },
             ..req.clone()
         };
         let d = play(&web, &fel);
@@ -3809,21 +3822,27 @@ mod tests {
         // video.
         let mut sdr_screen = hdr10_screen.clone();
         sdr_screen.caps.hdr_types = Some(Vec::new());
-        let sdr_web = PlaybackRequest { caps: Caps { hdr: false, ..web.caps.clone() }, ..req.clone() };
+        let sdr_web =
+            PlaybackRequest { caps: Caps { hdr: false, hdr_display: false, ..web.caps.clone() }, ..req.clone() };
+        // Desktop Chromium plays HDR on an SDR screen, tone mapping it: no HDR screen.
+        let tone_mapping_web = PlaybackRequest { caps: Caps { hdr_display: false, ..web.caps.clone() }, ..req.clone() };
         let mut coreelec = req.clone();
         coreelec.caps.dolby_vision_profiles =
             Some([7, 8].map(|profile| DolbyVisionDecoder { profile, max_level: None }).to_vec());
         let download = PlaybackRequest { download: true, ..req.clone() };
         let copy_only = PlaybackRequest { copy_video_only: true, ..req.clone() };
-        for other in [&sdr_screen, &sdr_web, &coreelec, &download, &copy_only] {
+        for other in [&sdr_screen, &sdr_web, &tone_mapping_web, &coreelec, &download, &copy_only] {
             assert_eq!(play(other, &fel).enhancement_layer, None);
         }
-        // Nor for a stream that says it lacks the layer, or a minimal one.
+        // Nor for a stream that says it lacks the layer, one that doesn't say
+        // (probed by an older transcoder), or a minimal layer.
         let mut no_layer = fel.clone();
         no_layer.streams[0].dv_el_present = Some(false);
+        let mut not_said = fel.clone();
+        not_said.streams[0].dv_el_present = None;
         let mut mel = fel.clone();
         mel.streams[0].dv_el = Some(DolbyVisionLayer::Mel);
-        for other in [&no_layer, &mel] {
+        for other in [&no_layer, &not_said, &mel] {
             assert_eq!(play(&req, other).enhancement_layer, None);
         }
     }
