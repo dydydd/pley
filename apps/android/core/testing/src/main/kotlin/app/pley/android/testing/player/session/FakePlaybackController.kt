@@ -9,7 +9,7 @@ import app.pley.android.model.PlaybackMethod
 import app.pley.android.player.ChapterMark
 import app.pley.android.player.DetailRow
 import app.pley.android.player.FoundSubtitle
-import app.pley.android.player.FullLayerChoice
+import app.pley.android.player.FelRebuildChoice
 import app.pley.android.player.PlayRequest
 import app.pley.android.player.PlaybackController
 import app.pley.android.player.PlaybackDetailsUi
@@ -90,7 +90,7 @@ class FakePlaybackController(initial: PlayerUiState = PlayerUiState()) : Playbac
 
     override fun selectQuality(name: String) = record("selectQuality", name)
 
-    override fun selectFullLayer(on: Boolean) = record("selectFullLayer", on)
+    override fun selectFelRebuild(on: Boolean) = record("selectFelRebuild", on)
 
     override fun setSubtitleOffset(offsetMs: Long) = record("setSubtitleOffset", offsetMs)
 
@@ -176,7 +176,7 @@ class FakePlaybackController(initial: PlayerUiState = PlayerUiState()) : Playbac
                 QualityChoice("original", "Original", "4K · 62 Mbps", false),
                 QualityChoice("4m", "4 Mbps 720p", null, true),
             ),
-            fullLayer = FullLayerChoice(on = true, playsAs = "hdr10"),
+            felRebuild = FelRebuildChoice(on = true, playsAs = "hdr10"),
             method = "Transcoding",
             playbackMethod = PlaybackMethod.Transcode,
             note = "The original didn't play smoothly on this device.",

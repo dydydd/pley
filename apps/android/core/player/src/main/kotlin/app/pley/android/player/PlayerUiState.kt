@@ -60,7 +60,7 @@ data class QualityChoice(
  * for this title (docs/API.md, `enhancement_layer`): whether it is asked for,
  * and what the full picture plays as ("sdr", "hdr10", "hlg"). Experimental.
  */
-data class FullLayerChoice(val on: Boolean, val playsAs: String)
+data class FelRebuildChoice(val on: Boolean, val playsAs: String)
 
 /** A chapter for the chapters menu and the seek bar's ticks. */
 data class ChapterMark(
@@ -218,7 +218,7 @@ data class PlayerUiState(
     val quality: String = "Original",
     val qualities: List<QualityChoice> = emptyList(),
     /** The Quality panel's Dolby Vision FEL choice; `null` where the server doesn't offer it. */
-    val fullLayer: FullLayerChoice? = null,
+    val felRebuild: FelRebuildChoice? = null,
     /** "Direct play", "Direct stream", "Transcoding"; `null` before the server answered. */
     val method: String? = null,
     /** The way [method] names, for its badge's colour: a download plays as it is ([PlaybackMethod.Direct]). */

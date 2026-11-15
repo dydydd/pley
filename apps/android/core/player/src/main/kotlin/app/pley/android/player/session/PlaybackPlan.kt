@@ -213,7 +213,7 @@ object PlaybackPlan {
         /** Pictures are side-loaded by the player: none to burn in. */
         val sideload: Boolean = false,
         /** Dolby Vision profile 7's full enhancement layer is asked for, where the server offers it. */
-        val fullLayer: Boolean = false,
+        val felRebuild: Boolean = false,
     )
 
     /**
@@ -247,7 +247,7 @@ object PlaybackPlan {
             mode = choices.mode,
             clientId = clientId,
             keepPrevious = true.takeIf { keepPrevious },
-            enhancementLayer = true.takeIf { choices.fullLayer },
+            enhancementLayer = true.takeIf { choices.felRebuild },
             caps = caps?.report ?: ClientCaps(),
             controls = controls,
         )

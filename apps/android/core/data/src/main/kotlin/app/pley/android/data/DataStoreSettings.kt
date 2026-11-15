@@ -72,7 +72,7 @@ internal class DataStoreSettings(
                 allowSoftwareVideo = p[SOFTWARE_VIDEO] ?: defaults.allowSoftwareVideo,
                 downloadOnMobileData = p[DOWNLOAD_ON_MOBILE] ?: defaults.downloadOnMobileData,
                 downloadQuality = p[DOWNLOAD_QUALITY] ?: defaults.downloadQuality,
-                fullEnhancementLayer = p[FULL_LAYER] ?: defaults.fullEnhancementLayer,
+                felRebuild = p[FEL_REBUILD] ?: defaults.felRebuild,
             ),
         )
     }
@@ -101,7 +101,7 @@ internal class DataStoreSettings(
         p.keep(SOFTWARE_VIDEO, s.allowSoftwareVideo, d.allowSoftwareVideo)
         p.keep(DOWNLOAD_ON_MOBILE, s.downloadOnMobileData, d.downloadOnMobileData)
         p.keep(DOWNLOAD_QUALITY, s.downloadQuality, d.downloadQuality)
-        p.keep(FULL_LAYER, s.fullEnhancementLayer, d.fullEnhancementLayer)
+        p.keep(FEL_REBUILD, s.felRebuild, d.felRebuild)
     }
 
     private fun <T : Any> MutablePreferences.keep(key: Preferences.Key<T>, value: T?, default: T?) {
@@ -130,7 +130,7 @@ internal class DataStoreSettings(
         private val SOFTWARE_VIDEO = booleanPreferencesKey("allow_software_video")
         private val DOWNLOAD_ON_MOBILE = booleanPreferencesKey("download_on_mobile_data")
         private val DOWNLOAD_QUALITY = stringPreferencesKey("download_quality")
-        private val FULL_LAYER = booleanPreferencesKey("full_enhancement_layer")
+        private val FEL_REBUILD = booleanPreferencesKey("fel_rebuild")
 
         private fun passthroughKey(format: String) = stringPreferencesKey("passthrough:$format")
 

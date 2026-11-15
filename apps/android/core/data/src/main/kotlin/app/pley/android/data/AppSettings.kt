@@ -84,7 +84,7 @@ data class Settings(
      * offers it: its full picture rather than its base layer (experimental,
      * chosen in the player's Quality panel).
      */
-    val fullEnhancementLayer: Boolean = false,
+    val felRebuild: Boolean = false,
 ) {
     /** The frame-rate matching a phone ([tv] false) or a TV uses: the choice, if it is one of the device's, else its default. */
     fun frameRateMatching(tv: Boolean): FrameRateMatching =

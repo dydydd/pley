@@ -76,7 +76,7 @@ class PlaybackPlanTest {
     @Test
     fun `the full enhancement layer is asked for only when chosen`() {
         assertNull(PlaybackPlan.request(70, choices(), "c", tv).enhancementLayer)
-        val asked = PlaybackPlan.request(70, choices().copy(fullLayer = true), "c", tv)
+        val asked = PlaybackPlan.request(70, choices().copy(felRebuild = true), "c", tv)
         assertEquals(true, asked.enhancementLayer)
     }
 

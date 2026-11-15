@@ -151,10 +151,9 @@ private fun ChoicePanel(
     )
     val original = stringResource(R.string.tv_player_play_original)
     val originalHint = stringResource(R.string.tv_player_play_original_hint)
-    val felTitle = stringResource(R.string.tv_player_fel_title)
-    val felBase = stringResource(R.string.tv_player_fel_base_layer)
-    val felFull = stringResource(R.string.tv_player_fel_full_picture)
-    val felPlaysAs = when (s.fullLayer?.playsAs) {
+    val felEnable = stringResource(R.string.tv_player_fel_enable)
+    val felExperimental = stringResource(R.string.tv_player_fel_experimental)
+    val felPlaysAs = when (s.felRebuild?.playsAs) {
         "hdr10" -> stringResource(R.string.tv_player_fel_plays_hdr10)
         "hlg" -> stringResource(R.string.tv_player_fel_plays_hlg)
         else -> stringResource(R.string.tv_player_fel_plays_sdr)
@@ -278,20 +277,13 @@ private fun ChoicePanel(
                     controller.selectQuality(s.qualities[i].id)
                     ui.closePanel()
                 }
-                // Dolby Vision FEL's full picture, where the server offers it for this title (experimental).
-                s.fullLayer?.let { fel ->
-                    item(key = "fel-title") { PanelNote(felTitle) }
-                    item(key = "fel-base") {
-                        PanelRow(felBase, onClick = {
-                            controller.selectFullLayer(false)
+                // Dolby Vision FEL rebuilt in full, where the server offers it for this title (experimental).
+                s.felRebuild?.let { fel ->
+                    item(key = "fel-rebuild") {
+                        PanelRow(felEnable, onClick = {
+                            controller.selectFelRebuild(!fel.on)
                             ui.closePanel()
-                        }, checked = !fel.on)
-                    }
-                    item(key = "fel-full") {
-                        PanelRow(felFull, onClick = {
-                            controller.selectFullLayer(true)
-                            ui.closePanel()
-                        }, checked = fel.on, supporting = felPlaysAs)
+                        }, checked = fel.on, supporting = "$felExperimental · $felPlaysAs")
                     }
                 }
             }
@@ -367,7 +359,7 @@ private data class PanelData(
     val subtitles: List<app.pley.android.player.TrackChoice>,
     val audio: List<app.pley.android.player.TrackChoice>,
     val qualities: List<app.pley.android.player.QualityChoice>,
-    val fullLayer: app.pley.android.player.FullLayerChoice?,
+    val felRebuild: app.pley.android.player.FelRebuildChoice?,
     val note: String?,
     val canPlayOriginal: Boolean,
     val subtitleSync: Boolean,
@@ -385,7 +377,7 @@ private data class PanelData(
             subtitles = s.subtitles,
             audio = s.audio,
             qualities = s.qualities,
-            fullLayer = s.fullLayer,
+            felRebuild = s.felRebuild,
             note = s.note,
             canPlayOriginal = s.canPlayOriginal,
             subtitleSync = s.subtitleSync,
