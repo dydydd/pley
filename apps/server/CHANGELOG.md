@@ -12,9 +12,9 @@ describes how they are made.
 ### Added
 
 - Settings → Transcoder has an experimental Dolby Vision FEL option: with
-  Pley's own FFmpeg, players on HDR screens can ask for the full picture of
-  profile 7 with a full enhancement layer, rebuilt from both layers. The
-  web and desktop apps offer it in their Quality menu.
+  Pley's own FFmpeg, players on HDR screens can turn on Enable FEL rebuild
+  in their Quality menu to play profile 7's full picture, rebuilt from its
+  enhancement layer. The web and desktop apps offer it.
 
 ### Changed
 

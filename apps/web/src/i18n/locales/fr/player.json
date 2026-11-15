@@ -116,10 +116,8 @@
   "settings": {
     "label": "Paramètres de lecture",
     "fel": {
-      "title": "Dolby Vision FEL",
+      "enable": "Activer la reconstruction FEL",
       "experimental": "Expérimental",
-      "baseLayer": "Couche de base",
-      "fullPicture": "Image complète",
       "playsAs": {
         "sdr": "Lu en SDR",
         "hdr10": "Lu en HDR10",

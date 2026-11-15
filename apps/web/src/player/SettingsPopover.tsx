@@ -29,21 +29,24 @@ function GroupLabel({ children }: { children: ReactNode }) {
   return <div className="px-4 pb-1 pt-2 text-xs font-medium text-white/50">{children}</div>;
 }
 
+/** A choice among others; `checkbox`: one that turns on and off by itself. */
 function Option({
   selected,
   onClick,
   hint,
+  checkbox,
   children,
 }: {
   selected: boolean;
   onClick: () => void;
   hint?: string;
+  checkbox?: boolean;
   children: ReactNode;
 }) {
   return (
     <button
       type="button"
-      role="menuitemradio"
+      role={checkbox ? "menuitemcheckbox" : "menuitemradio"}
       aria-checked={selected}
       onClick={onClick}
       className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm transition-colors hover:bg-white/10"
@@ -158,8 +161,8 @@ export interface SettingsPopoverProps {
    * Dolby Vision profile 7's full enhancement layer, where the server offers it for this title:
    * whether it is asked for, and what it plays as (experimental). Below the qualities.
    */
-  fullLayer?: { on: boolean; playsAs: "sdr" | "hdr10" | "hlg" } | null;
-  onFullLayer?: (on: boolean) => void;
+  felRebuild?: { on: boolean; playsAs: "sdr" | "hdr10" | "hlg" } | null;
+  onFelRebuild?: (on: boolean) => void;
   audioStreams: MediaStream[];
   audioIndex: number | null;
   onAudio: (index: number) => void;
@@ -195,7 +198,7 @@ export interface SettingsPopoverProps {
 export function SettingsPopover(props: SettingsPopoverProps) {
   const { t } = useTranslation(["player", "common"]);
   const { open, setOpen, details, qualities, quality, originalHint, autoNow, autoWhy, onQuality } = props;
-  const { fullLayer, onFullLayer } = props;
+  const { felRebuild, onFelRebuild } = props;
   const { audioStreams, audioIndex, onAudio, subtitleStreams, subtitleIndex, onSubtitle } = props;
   const { subtitleStyle, onSubtitleStyle, subtitleOffset, onSubtitleOffset, picturesMovable, speed, onSpeed } = props;
   const { sleep, sleepLeft, sleepEndLabel, onSleep } = props;
@@ -339,30 +342,19 @@ export function SettingsPopover(props: SettingsPopoverProps) {
                     </Option>
                   ))
                 : null}
-              {panel === "quality" && fullLayer && onFullLayer ? (
+              {panel === "quality" && felRebuild && onFelRebuild ? (
                 <>
                   <div className="my-1 h-px bg-white/10" />
-                  <GroupLabel>
-                    {t("settings.fel.title")} · {t("settings.fel.experimental")}
-                  </GroupLabel>
                   <Option
-                    selected={!fullLayer.on}
+                    checkbox
+                    selected={felRebuild.on}
+                    hint={`${t("settings.fel.experimental")} · ${t(`settings.fel.playsAs.${felRebuild.playsAs}`)}`}
                     onClick={() => {
-                      onFullLayer(false);
+                      onFelRebuild(!felRebuild.on);
                       close();
                     }}
                   >
-                    {t("settings.fel.baseLayer")}
-                  </Option>
-                  <Option
-                    selected={fullLayer.on}
-                    hint={t(`settings.fel.playsAs.${fullLayer.playsAs}`)}
-                    onClick={() => {
-                      onFullLayer(true);
-                      close();
-                    }}
-                  >
-                    {t("settings.fel.fullPicture")}
+                    {t("settings.fel.enable")}
                   </Option>
                 </>
               ) : null}
