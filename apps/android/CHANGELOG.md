@@ -8,6 +8,12 @@ describes how they are made.
 
 ## [Unreleased]
 
+### Added
+
+- On Android TV, the player's Quality panel has an experimental Enable FEL
+  rebuild switch where the server offers it, which says what the title
+  plays as. The device keeps it on or off.
+
 ## [0.1.13] - 2026-11-14
 
 ### Changed
