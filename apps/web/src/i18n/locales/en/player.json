@@ -114,6 +114,17 @@
   },
   "settings": {
     "label": "Playback settings",
+    "fel": {
+      "title": "Dolby Vision FEL",
+      "experimental": "Experimental",
+      "baseLayer": "Base layer",
+      "fullPicture": "Full picture",
+      "playsAs": {
+        "sdr": "Plays as SDR",
+        "hdr10": "Plays as HDR10",
+        "hlg": "Plays as HLG"
+      }
+    },
     "panel": {
       "quality": "Quality",
       "audio": "Audio",

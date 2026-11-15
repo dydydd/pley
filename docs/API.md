@@ -509,10 +509,14 @@ interface PlaybackInfo {
                                     // player may ask for it, "used" where this transcode is made from it. Offered
                                     // where the server has `dolby_vision_fel_full` on and its transcoder can,
                                     // converts video, the stream has a full layer that is there, the screen
-                                    // shows Dolby Vision (`caps.hdr_types`), and the player can't play profile
-                                    // 7 itself (no profile 7 in `caps.dolby_vision_profiles`); never for a
-                                    // download or a compatibility API. A player shows the choice beside its
-                                    // Quality menu, per title, and keeps it per device. Left out otherwise
+                                    // shows HDR (HDR10, HDR10+ or Dolby Vision in `caps.hdr_types`; `caps.hdr`
+                                    // for version 1 players), and the player can't play profile 7 itself (no
+                                    // profile 7 in `caps.dolby_vision_profiles`); never for a download or a
+                                    // compatibility API. A player shows the choice in its Quality menu, marked
+                                    // experimental, and keeps it per device. Left out otherwise
+  enhancement_layer_as?: "sdr" | "hdr10" | "hlg"; // what the full picture plays as where it is offered: what
+                                    // this player's transcodes keep of HDR (SDR for version 1 players, the web
+                                    // app's). Left out otherwise
   pts_offset_ms?: number | null;    // how far the stream's timestamps run ahead of the file's (its start
                                     // taken off, as `.mks` subtitles are timed): 1400 for HLS in MPEG-TS,
                                     // wherever it started, 0 in fMP4 (fMP4 segments); null for a direct
@@ -4480,8 +4484,8 @@ interface Settings {
                                     // Turning it on where `transcoder.memory.available` is false: 400;
                                     // saved on before, it stays
   dolby_vision_fel_full: boolean;   // experimental: Dolby Vision profile 7's full enhancement layer (FEL),
-                                    // which FFmpeg as released doesn't read, is offered to players that can
-                                    // use it (PlaybackRequest's `enhancement_layer`), the full picture rebuilt
+                                    // which FFmpeg as released doesn't read, is offered to players on HDR
+                                    // screens (PlaybackRequest's `enhancement_layer`), the full picture rebuilt
                                     // from both layers where the transcoder's FFmpeg can
                                     // (`transcoder.dolby_vision_fel_full`); default false. Otherwise
                                     // transcodes use its HDR10 base layer (TRANSCODER.md)

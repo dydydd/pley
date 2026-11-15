@@ -154,6 +154,12 @@ export interface SettingsPopoverProps {
   /** Why Automatic plays lower, when it does ("Lowered for your connection"). */
   autoWhy?: string | null;
   onQuality: (id: string) => void;
+  /**
+   * Dolby Vision profile 7's full enhancement layer, where the server offers it for this title:
+   * whether it is asked for, and what it plays as (experimental). Below the qualities.
+   */
+  fullLayer?: { on: boolean; playsAs: "sdr" | "hdr10" | "hlg" } | null;
+  onFullLayer?: (on: boolean) => void;
   audioStreams: MediaStream[];
   audioIndex: number | null;
   onAudio: (index: number) => void;
@@ -189,6 +195,7 @@ export interface SettingsPopoverProps {
 export function SettingsPopover(props: SettingsPopoverProps) {
   const { t } = useTranslation(["player", "common"]);
   const { open, setOpen, details, qualities, quality, originalHint, autoNow, autoWhy, onQuality } = props;
+  const { fullLayer, onFullLayer } = props;
   const { audioStreams, audioIndex, onAudio, subtitleStreams, subtitleIndex, onSubtitle } = props;
   const { subtitleStyle, onSubtitleStyle, subtitleOffset, onSubtitleOffset, picturesMovable, speed, onSpeed } = props;
   const { sleep, sleepLeft, sleepEndLabel, onSleep } = props;
@@ -332,6 +339,33 @@ export function SettingsPopover(props: SettingsPopoverProps) {
                     </Option>
                   ))
                 : null}
+              {panel === "quality" && fullLayer && onFullLayer ? (
+                <>
+                  <div className="my-1 h-px bg-white/10" />
+                  <GroupLabel>
+                    {t("settings.fel.title")} · {t("settings.fel.experimental")}
+                  </GroupLabel>
+                  <Option
+                    selected={!fullLayer.on}
+                    onClick={() => {
+                      onFullLayer(false);
+                      close();
+                    }}
+                  >
+                    {t("settings.fel.baseLayer")}
+                  </Option>
+                  <Option
+                    selected={fullLayer.on}
+                    hint={t(`settings.fel.playsAs.${fullLayer.playsAs}`)}
+                    onClick={() => {
+                      onFullLayer(true);
+                      close();
+                    }}
+                  >
+                    {t("settings.fel.fullPicture")}
+                  </Option>
+                </>
+              ) : null}
               {panel === "audio"
                 ? audioStreams.map((s) => (
                     <Option

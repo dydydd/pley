@@ -187,7 +187,7 @@
       "tonemapInstead": "{{reason}} : {{fallback}}",
       "tonemapWithAnother": "{{reason}} : les transcodages utilisent un autre mappage tonal à la place.",
       "fel": "Dolby Vision FEL",
-      "felHint": "Permet au transcodeur de reconstituer l’image complète des titres FEL. Les clients doivent prendre en charge le Dolby Vision.",
+      "felHint": "Permet au transcodeur de reconstituer l’image complète des titres FEL. Les clients doivent prendre en charge le HDR.",
       "felFull": "Proposer la couche d’amélioration complète",
       "felFullUnavailable": "Nécessite le FFmpeg de Pley, qui sait lire la couche d’amélioration.",
       "experimental": "Expérimental",

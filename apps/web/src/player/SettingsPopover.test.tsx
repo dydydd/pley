@@ -62,6 +62,23 @@ describe("SettingsPopover", () => {
     expect(props.setOpen).toHaveBeenCalledWith(false);
   });
 
+  it("offers Dolby Vision FEL's full picture below the qualities only where the server does", async () => {
+    const user = userEvent.setup();
+    renderPopover();
+    await user.click(screen.getByRole("button", { name: /Quality/ }));
+    expect(screen.queryByText(/Dolby Vision FEL/)).not.toBeInTheDocument();
+
+    const onFullLayer = vi.fn();
+    renderPopover({ fullLayer: { on: false, playsAs: "sdr" }, onFullLayer });
+    await user.click(screen.getAllByRole("button", { name: /Quality/ }).at(-1)!);
+    expect(screen.getByText("Dolby Vision FEL · Experimental")).toBeInTheDocument();
+    expect(screen.getByRole("menuitemradio", { name: "Base layer" })).toHaveAttribute("aria-checked", "true");
+    const full = screen.getByRole("menuitemradio", { name: /Full picture/ });
+    expect(full).toHaveTextContent("Plays as SDR");
+    await user.click(full);
+    expect(onFullLayer).toHaveBeenCalledWith(true);
+  });
+
   it("says what Automatic plays, and why when lower", async () => {
     const user = userEvent.setup();
     renderPopover({ quality: "auto", autoNow: "Original" });

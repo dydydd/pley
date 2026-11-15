@@ -215,10 +215,10 @@ impl Caps {
         self.hdr_types.as_deref().is_some_and(|types| listed(types, range))
     }
 
-    /// The screen shows Dolby Vision: the Dolby Vision FEL setting is for
-    /// its transcodes ([`crate::settings::Settings::transcode_options_for`]).
-    pub fn shows_dolby_vision(&self) -> bool {
-        self.shows("dolby_vision")
+    /// The screen shows HDR: HDR10, HDR10+ or Dolby Vision for a version 2
+    /// player, and for a version 1 one (the web app's) what its `hdr` says.
+    fn shows_hdr(&self) -> bool {
+        if self.is_v2() { ["hdr10", "hdr10plus", "dolby_vision"].iter().any(|r| self.shows(r)) } else { self.hdr }
     }
 
     /// The version 2 player shows these subtitles itself.
@@ -555,6 +555,11 @@ pub struct PlaybackInfo {
     /// `used` where this transcode is made from it. Left out otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enhancement_layer: Option<EnhancementLayer>,
+    /// What the full picture plays as where it is offered: `sdr`, `hdr10`
+    /// or `hlg`, for the player to say so beside the choice. Left out
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enhancement_layer_as: Option<OutputRange>,
 }
 
 /// The reason a play has when it asked for a quality or a transcode of a
@@ -751,6 +756,9 @@ pub struct Decision {
     /// offers it to this player ([`enhancement_layer_offered`]): offered,
     /// or used for this transcode.
     pub enhancement_layer: Option<EnhancementLayer>,
+    /// What the full picture plays as where it is offered: what this
+    /// player's transcodes of the video keep of its HDR.
+    pub enhancement_layer_as: Option<OutputRange>,
 }
 
 /// What a play says of Dolby Vision profile 7's full enhancement layer
@@ -766,12 +774,13 @@ pub enum EnhancementLayer {
 
 /// Whether the server offers profile 7's full enhancement layer for `v` to
 /// this player: the server rebuilds it ([`PlaybackRequest::full_layer`]),
-/// the stream has the layer, the screen shows Dolby Vision, and the
-/// player can't play profile 7 itself (CoreELEC can, with its layer).
-/// Never for a download or a compatibility API's stream. What it gives a
-/// Dolby Vision screen is a trade: the picture both layers make, as HDR10,
-/// where the video would otherwise be copied as profile 8.1 without the
-/// layer.
+/// the stream has the layer, the screen shows HDR, and the player can't
+/// play profile 7 itself (CoreELEC can, with its layer). Never for a
+/// download or a compatibility API's stream. It is a trade the viewer
+/// makes: the picture both layers make, transcoded on the CPU and kept as
+/// HDR as far as the player's transcodes keep it, where the video would
+/// otherwise play as it is or be copied (as profile 8.1 without the layer,
+/// on a Dolby Vision screen).
 pub fn enhancement_layer_offered(v: &MediaStream, req: &PlaybackRequest) -> bool {
     let caps = &req.caps;
     let plays_profile_7 = caps.dolby_vision_profiles.iter().flatten().any(|d| d.profile == 7);
@@ -779,7 +788,7 @@ pub fn enhancement_layer_offered(v: &MediaStream, req: &PlaybackRequest) -> bool
         && !req.copy_video_only
         && !req.download
         && !req.stream_only
-        && caps.shows_dolby_vision()
+        && caps.shows_hdr()
         && !plays_profile_7
         && v.dynamic_range() == DynamicRange::DolbyVision
         && v.dv_profile == Some(7)
@@ -1503,6 +1512,7 @@ pub fn decide(file: &FileRow, info: Option<&MediaInfo>, streams: &[MediaStream],
             variants: Vec::new(),
             segment_format,
             enhancement_layer: None,
+            enhancement_layer_as: None,
         };
     };
 
@@ -1655,6 +1665,7 @@ pub fn decide(file: &FileRow, info: Option<&MediaInfo>, streams: &[MediaStream],
             variants: Vec::new(),
             segment_format,
             enhancement_layer: offered.then_some(EnhancementLayer::Offered),
+            enhancement_layer_as: offered.then_some(hdr_out),
         };
     }
 
@@ -1784,6 +1795,7 @@ pub fn decide(file: &FileRow, info: Option<&MediaInfo>, streams: &[MediaStream],
         variants,
         segment_format,
         enhancement_layer: offered.then_some(if used { EnhancementLayer::Used } else { EnhancementLayer::Offered }),
+        enhancement_layer_as: offered.then_some(hdr_out),
     }
 }
 
@@ -3739,11 +3751,12 @@ mod tests {
     }
 
     /// Dolby Vision profile 7's full enhancement layer is offered where the
-    /// server rebuilds it, to a player whose screen shows Dolby Vision and
-    /// that can't play profile 7 itself. Asked for, the video is transcoded
-    /// from it, HDR10 kept, rather than copied as profile 8.1.
+    /// server rebuilds it, to a player whose screen shows HDR and that
+    /// can't play profile 7 itself, saying what it plays as. Asked for, the
+    /// video is transcoded from it, HDR10 kept, rather than copied as
+    /// profile 8.1.
     #[test]
-    fn the_full_enhancement_layer_is_offered_to_dolby_vision_screens_that_ask() {
+    fn the_full_enhancement_layer_is_offered_to_hdr_screens_that_ask() {
         let mut fel = dolby_vision(7, 6);
         fel.streams[0].dv_el = Some(DolbyVisionLayer::Fel);
         let mut req = request();
@@ -3761,6 +3774,7 @@ mod tests {
         req.full_layer = true;
         let d = play(&req, &fel);
         assert_eq!(d.enhancement_layer, Some(EnhancementLayer::Offered));
+        assert_eq!(d.enhancement_layer_as, Some(OutputRange::Hdr10));
         assert_eq!(d.video.as_ref().unwrap().mode, VideoMode::Copy);
         // Asked for: transcoded from the full layer, HDR10 kept.
         req.enhancement_layer = true;
@@ -3770,17 +3784,38 @@ mod tests {
         assert_eq!((v.mode, v.dynamic_range), (VideoMode::Transcode, OutputRange::Hdr10));
         assert!(d.reasons.iter().any(|r| r.contains("full enhancement layer")), "{:?}", d.reasons);
 
-        // Not offered to a player that plays profile 7 with its layer
-        // itself, nor to a screen without Dolby Vision, nor for a download
-        // or on a server that converts no video.
+        // An HDR10 screen gets it as HDR10 too; the web app, whose
+        // transcodes are SDR, as SDR.
+        let mut hdr10_screen = req.clone();
+        hdr10_screen.caps.hdr_types.as_mut().unwrap().retain(|t| t != "dolby_vision");
+        hdr10_screen.caps.dolby_vision_profiles = None;
+        let d = play(&hdr10_screen, &fel);
+        assert_eq!(
+            (d.enhancement_layer, d.enhancement_layer_as),
+            (Some(EnhancementLayer::Used), Some(OutputRange::Hdr10))
+        );
+        let web = PlaybackRequest {
+            caps: Caps { hdr: true, video_codecs: vec!["h264".into(), "hevc".into()], ..browser() },
+            ..req.clone()
+        };
+        let d = play(&web, &fel);
+        assert_eq!(
+            (d.enhancement_layer, d.enhancement_layer_as),
+            (Some(EnhancementLayer::Used), Some(OutputRange::Sdr))
+        );
+
+        // Not offered to an SDR screen, a player that plays profile 7 with
+        // its layer itself, a download, or on a server that converts no
+        // video.
+        let mut sdr_screen = hdr10_screen.clone();
+        sdr_screen.caps.hdr_types = Some(Vec::new());
+        let sdr_web = PlaybackRequest { caps: Caps { hdr: false, ..web.caps.clone() }, ..req.clone() };
         let mut coreelec = req.clone();
         coreelec.caps.dolby_vision_profiles =
             Some([7, 8].map(|profile| DolbyVisionDecoder { profile, max_level: None }).to_vec());
-        let mut hdr10_screen = req.clone();
-        hdr10_screen.caps.hdr_types.as_mut().unwrap().retain(|t| t != "dolby_vision");
         let download = PlaybackRequest { download: true, ..req.clone() };
         let copy_only = PlaybackRequest { copy_video_only: true, ..req.clone() };
-        for other in [&coreelec, &hdr10_screen, &download, &copy_only] {
+        for other in [&sdr_screen, &sdr_web, &coreelec, &download, &copy_only] {
             assert_eq!(play(other, &fel).enhancement_layer, None);
         }
         // Nor for a stream that says it lacks the layer, or a minimal one.

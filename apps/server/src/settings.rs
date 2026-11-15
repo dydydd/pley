@@ -90,8 +90,8 @@ pub struct Settings {
     /// folder in RAM with room: Linux's `/dev/shm`), else on disk.
     pub transcode_in_memory: bool,
     /// Experimental: Dolby Vision profile 7's full enhancement layer (FEL)
-    /// is offered to players whose screen shows Dolby Vision and that
-    /// can't play profile 7 themselves; one that asks gets the full
+    /// is offered to players whose screen shows HDR and that can't play
+    /// profile 7 themselves; one that asks gets the full
     /// picture both layers make, rebuilt where the transcoder's FFmpeg can
     /// (Pley's own) ([`crate::playback::enhancement_layer_offered`]).
     /// Otherwise transcodes use its HDR10 base layer.

@@ -307,6 +307,7 @@ pub async fn start(
             pts_offset_ms: None,
             original_only: req.copy_video_only,
             enhancement_layer: decision.enhancement_layer,
+            enhancement_layer_as: decision.enhancement_layer_as,
         }));
     }
 
@@ -450,6 +451,7 @@ pub async fn start(
         pts_offset_ms: Some(if created.segment_format.is_ts() { HLS_PTS_OFFSET_MS } else { 0 }),
         original_only: req.copy_video_only,
         enhancement_layer: decision.enhancement_layer,
+        enhancement_layer_as: decision.enhancement_layer_as,
     }))
 }
 

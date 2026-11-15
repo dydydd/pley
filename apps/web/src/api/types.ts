@@ -548,6 +548,13 @@ export interface PlaybackInfo {
    */
   original_only?: boolean;
   /**
+   * Dolby Vision profile 7's full enhancement layer: "offered" where the player may ask for it
+   * (`enhancement_layer` in the request), "used" where this transcode is made from it. Absent otherwise.
+   */
+  enhancement_layer?: "offered" | "used";
+  /** What the full picture plays as where it is offered. */
+  enhancement_layer_as?: "sdr" | "hdr10" | "hlg";
+  /**
    * What the screen gets of HDR video, by name: "Dolby Vision P8.1", "HDR10
    * (Dolby Vision base layer)", "SDR (tone-mapped)"… Absent for SDR video
    * and from older servers.
@@ -605,6 +612,8 @@ export interface PlaybackRequest {
   client_id?: string;
   /** Started while the last session plays on, to move to it once it is ready: that one is left to the player to end. */
   keep_previous?: boolean;
+  /** The viewer wants Dolby Vision profile 7's full enhancement layer where the server offers it (experimental). */
+  enhancement_layer?: boolean;
   /** The remote's commands this player obeys; left out: none (Stop always works). */
   controls?: Control[];
   /** What remotes call this device; left out: the server names it from the User-Agent ("Firefox on macOS"). */

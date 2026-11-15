@@ -186,7 +186,7 @@
       "tonemapInstead": "{{reason}}: {{fallback}}",
       "tonemapWithAnother": "{{reason}}: transcodes tone map with another instead.",
       "fel": "Dolby Vision FEL",
-      "felHint": "Allow the transcoder to rebuild the full picture for FEL titles. Clients must support Dolby Vision.",
+      "felHint": "Allow the transcoder to rebuild the full picture for FEL titles. Clients must support HDR.",
       "felFull": "Offer the full enhancement layer",
       "felFullUnavailable": "Needs Pley's own FFmpeg, which can read the enhancement layer.",
       "experimental": "Experimental",
