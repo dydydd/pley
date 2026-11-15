@@ -227,7 +227,6 @@ before using what it names:
 | `live_bitrate` | `POST /v1/jobs/{id}/bitrate` works |
 | `live` | `/v1/live` works |
 | `fmp4_segments` | jobs make fMP4 segments when `segment_format` asks for them, except jobs without video ([fMP4 segments](#fmp4-segments)) |
-| `dolby_vision_fel` | transcodes do what `TranscodeOptions.dolby_vision_fel` asks ([Profile 7's full enhancement layer](#profile-7s-full-enhancement-layer)) |
 | `dolby_vision_fel_full` | FFmpeg can rebuild profile 7's full picture from both layers (Pley's FFmpeg; [Profile 7's full enhancement layer](#profile-7s-full-enhancement-layer)) |
 | `trickplay_version` | the version of the seek previews it makes (`TrickplayInfo.version`); `0` from older transcoders |
 | `trickplay_runs` | how many seek-preview sets it makes at once; `0` from older transcoders, which make one at a time and give a set up after an hour of running |
@@ -439,7 +438,6 @@ variants, segment_format}`. See [How HLS jobs work](#how-hls-jobs-work).
 | `preset` | `veryfast` | x264 preset for software encodes, or `auto`: chosen and changed by the transcoder from its load and its lead on the player |
 | `throttle` | on | hold FFmpeg to real time after a burst ([Throttling](#throttling)) |
 | `in_memory` | on | keep segments in memory when possible ([Segments in memory](#segments-in-memory)) |
-| `dolby_vision_fel` | `base_layer` | what a transcode makes of Dolby Vision profile 7 with a full enhancement layer: `base_layer` or `metadata` ([Profile 7's full enhancement layer](#profile-7s-full-enhancement-layer)) |
 | `dolby_vision_fel_full` | off | experimental: profile 7 with a full enhancement layer is transcoded from the full picture both layers make, where FFmpeg can (`dolby_vision_fel_full`) |
 
 Playlists and segments:
@@ -989,8 +987,9 @@ available tone mapper:
   stream with content light levels alone is taken for 1000 cd/m² as well.
 - Dolby Vision profiles 7 and 8 have an HDR10- or HLG-compatible base layer
   and work with any tone mapper. Profile 5 without libplacebo, or Pley's
-  FFmpeg's OpenCL, plays with off colours, with a warning. Profile 7 with a full enhancement layer is tone
-  mapped from its base layer alone unless asked otherwise
+  FFmpeg's OpenCL, plays with off colours, with a warning. Profile 7 with
+  a full enhancement layer is tone mapped from its base layer alone, or
+  from the full picture where that is asked for
   ([Profile 7's full enhancement layer](#profile-7s-full-enhancement-layer)).
 - libplacebo caches compiled shaders in `libplacebo/` (saving about 0.2 s at
   every start, seek and quality switch) with FFmpeg 8 and later, whose
@@ -1003,44 +1002,25 @@ available tone mapper:
 Dolby Vision profile 7 carries a second layer over its HDR10 base layer. A
 minimal one (MEL) adds nothing to the picture; a full one (FEL) holds part
 of it, and on some titles part of its brightness. FFmpeg as released
-doesn't read that layer, so a transcode's picture is the base layer's
-(Pley's own FFmpeg can rebuild the full one, below).
-`TranscodeOptions.dolby_vision_fel` says what a transcode makes of a stream
-the probe found a full layer in (`MediaStream.dv_el: fel`), where
-libplacebo tone maps or converts it. The server passes the setting on for
-players whose screen shows Dolby Vision, and asks for `base_layer` for any
-other: an HDR10 screen gets the picture an HDR10 player makes of the disc.
+doesn't read that layer, so a transcode of a stream the probe found a full
+layer in (`MediaStream.dv_el: fel`) is made from its HDR10 base layer, by
+the base layer's own static metadata, the Dolby Vision metadata unread
+(libplacebo's `apply_dolbyvision=0`).
 
-| Value | The picture |
-|---|---|
-| `base_layer` (default) | HDR10: the base layer by its own static metadata, the Dolby Vision metadata unread (`apply_dolbyvision=0`) |
-| `metadata` | the base layer, tone mapped by the brightness the Dolby Vision metadata gives each scene, as a minimal layer's and profile 8.1's are |
-
-- libplacebo applies no Dolby Vision mapping that needs an enhancement
-  layer, with either value. Built with libdovi, it still reads the
-  brightness profile 7's metadata gives each scene (level 1: its maximum
-  and its average) and tone maps by it. On most titles that brightness is
-  the base layer's too. On those whose full layer carries part of it, it
-  describes the picture with the layer, and the base layer alone comes out
-  too dark or too bright. `base_layer` leaves it unread, for the picture
-  the title's HDR10 grade gives.
+- That metadata's brightness (level 1, each scene's maximum and average)
+  describes the picture with the layer. On titles whose full layer carries
+  part of the brightness, the base layer tone mapped by it comes out too
+  dark or too bright, so it is left unread: the picture the title's HDR10
+  grade gives.
 - As HDR10, the stream takes HDR10's paths: Quick Sync decodes and scales
-  it, and its scaler tone maps it where the GPU falls
-  behind ([Sharing the GPU](#sharing-the-gpu)). With `metadata`, FFmpeg's
-  own decoder brings libplacebo the frames
-  ([Hardware decoding](#hardware-decoding)), and OpenCL where the GPU falls
-  behind and it can take them.
+  it, and its scaler tone maps it where the GPU falls behind
+  ([Sharing the GPU](#sharing-the-gpu)). Pley's FFmpeg's OpenCL is told
+  not to read the metadata either (`apply_dovi=0`).
 - HDR10+ in the base layer is the base layer's own: still read.
 - A minimal layer, a layer not known (probed by an older transcoder) and
   the other profiles aren't concerned: their metadata is read.
-- zimg and FFmpeg's own OpenCL tone mapper never read profile 7's
-  metadata, and HDR kept as HDR10 is the base layer already: both values
-  give them the same picture. Pley's FFmpeg's OpenCL reads it, and is
-  told not to (`apply_dovi=0`) for `base_layer`.
-- Seek previews and frame grabs are made from the base layer alone, as
-  transcodes are by default (`apply_dolbyvision=0`), whatever the setting:
-  they are made once a file.
-- Capability `dolby_vision_fel`. A transcoder without it does `metadata`.
+- Seek previews and frame grabs are made from the base layer alone too:
+  they are made once a file, whatever a player asks for later.
 - **Experimental: the full layer.** With `dolby_vision_fel_full` asked for,
   and an FFmpeg that can (capability `dolby_vision_fel_full`, Pley's own
   FFmpeg), the full picture is rebuilt from the base layer, the enhancement
@@ -1048,12 +1028,13 @@ other: an HDR10 screen gets the picture an HDR10 player makes of the disc.
   then transcoded as HDR10. The brightness the metadata gives each scene
   describes that picture, and goes on with it as HDR10+ (`dovi_compose`'s
   `scene`), so made SDR it is tone mapped scene by scene, as a Dolby Vision
-  player would. Elsewhere it is ignored and `dolby_vision_fel` applies,
-  and also where the stream says it carries no enhancement layer, only its
-  metadata (`MediaStream.dv_el_present: false`, from the configuration
-  record's `el_present_flag`): FFmpeg would wait for that layer's frames
-  to the end of the file. Blu-ray transport streams and dual-track MP4s,
-  where the layer is a stream of its own, aren't composed.
+  player would. The server asks for it only for a player that asked
+  ([API.md](API.md), `enhancement_layer`). It isn't done where the stream
+  says it carries no enhancement layer, only its metadata
+  (`MediaStream.dv_el_present: false`, from the configuration record's
+  `el_present_flag`): FFmpeg would wait for that layer's frames to the end
+  of the file. Blu-ray transport streams and dual-track MP4s, where the
+  layer is a stream of its own, aren't composed.
 
 #### libplacebo quality
 

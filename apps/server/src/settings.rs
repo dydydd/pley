@@ -4,8 +4,7 @@
 use std::sync::Arc;
 
 use pley_transcoder_api::{
-    Capabilities, DolbyVisionFel, EncoderInfo, HwAccel, TonemapMode, Tonemapper, TranscodeOptions, TranscoderInfo,
-    VideoCodec,
+    Capabilities, EncoderInfo, HwAccel, TonemapMode, Tonemapper, TranscodeOptions, TranscoderInfo, VideoCodec,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -90,12 +89,12 @@ pub struct Settings {
     /// Keep transcodes' segments in memory where the transcoder can (a
     /// folder in RAM with room: Linux's `/dev/shm`), else on disk.
     pub transcode_in_memory: bool,
-    /// What transcodes make of Dolby Vision profile 7 with a full
-    /// enhancement layer (FEL): its HDR10 base layer alone, or that with
-    /// its Dolby Vision metadata ([`DolbyVisionFel`]).
-    pub dolby_vision_fel: DolbyVisionFel,
-    /// Experimental: that layer is used, the full picture rebuilt from
-    /// both, where the transcoder's FFmpeg can (Pley's own).
+    /// Experimental: Dolby Vision profile 7's full enhancement layer (FEL)
+    /// is offered to players whose screen shows Dolby Vision and that
+    /// can't play profile 7 themselves; one that asks gets the full
+    /// picture both layers make, rebuilt where the transcoder's FFmpeg can
+    /// (Pley's own) ([`crate::playback::enhancement_layer_offered`]).
+    /// Otherwise transcodes use its HDR10 base layer.
     pub dolby_vision_fel_full: bool,
     pub scan_interval_minutes: u32,
     pub watch_libraries: bool,
@@ -237,7 +236,6 @@ impl Default for Settings {
             transcode_preset: "auto".into(),
             throttle_transcodes: true,
             transcode_in_memory: true,
-            dolby_vision_fel: DolbyVisionFel::BaseLayer,
             dolby_vision_fel_full: false,
             scan_interval_minutes: 360,
             watch_libraries: true,
@@ -358,23 +356,15 @@ impl Settings {
             preset: Some(self.transcode_preset.clone()),
             throttle: self.throttle_transcodes,
             in_memory: self.transcode_in_memory,
-            dolby_vision_fel: self.dolby_vision_fel,
-            dolby_vision_fel_full: self.dolby_vision_fel_full,
+            dolby_vision_fel_full: false,
         }
     }
 
-    /// [`Settings::transcode_options`] for a player whose screen shows Dolby
-    /// Vision (`dolby_vision_screen`) or doesn't. The Dolby Vision FEL
-    /// choices are for Dolby Vision screens, whose owners expect the
-    /// picture a Dolby Vision player makes of profile 7; any other screen
-    /// gets the HDR10 base layer, the picture an HDR10 player makes of the
-    /// disc.
-    pub fn transcode_options_for(&self, dolby_vision_screen: bool) -> TranscodeOptions {
-        let options = self.transcode_options();
-        if dolby_vision_screen {
-            return options;
-        }
-        TranscodeOptions { dolby_vision_fel: DolbyVisionFel::BaseLayer, dolby_vision_fel_full: false, ..options }
+    /// [`Settings::transcode_options`] for a play that uses profile 7's full
+    /// enhancement layer (`full_layer`: offered and asked for,
+    /// [`crate::playback::EnhancementLayer::Used`]) or doesn't.
+    pub fn transcode_options_for(&self, full_layer: bool) -> TranscodeOptions {
+        TranscodeOptions { dolby_vision_fel_full: full_layer && self.dolby_vision_fel_full, ..self.transcode_options() }
     }
 }
 
@@ -630,7 +620,6 @@ pub struct SettingsPatch {
     pub transcode_preset: Option<String>,
     pub throttle_transcodes: Option<bool>,
     pub transcode_in_memory: Option<bool>,
-    pub dolby_vision_fel: Option<DolbyVisionFel>,
     pub dolby_vision_fel_full: Option<bool>,
     pub scan_interval_minutes: Option<u32>,
     pub watch_libraries: Option<bool>,
@@ -794,9 +783,6 @@ impl SettingsStore {
         }
         if let Some(v) = patch.transcode_in_memory {
             next.transcode_in_memory = v;
-        }
-        if let Some(v) = patch.dolby_vision_fel {
-            next.dolby_vision_fel = v;
         }
         if let Some(v) = patch.dolby_vision_fel_full {
             next.dolby_vision_fel_full = v;
@@ -1274,36 +1260,22 @@ mod tests {
         assert!(!off.transcode_options().in_memory);
     }
 
-    /// Dolby Vision profile 7's full enhancement layer: transcoded from its
-    /// base layer unless the setting asks for its metadata, which every
-    /// job's request then says. Settings saved before it read as the base
-    /// layer.
+    /// Dolby Vision profile 7's full enhancement layer: off unless turned
+    /// on, and then used only by the plays that ask for it. Settings saved
+    /// with the choice the server had before are read without it.
     #[test]
-    fn transcodes_are_told_what_to_make_of_a_full_enhancement_layer() {
-        assert_eq!(Settings::default().transcode_options().dolby_vision_fel, DolbyVisionFel::BaseLayer);
-        let metadata = Settings { dolby_vision_fel: DolbyVisionFel::Metadata, ..Settings::default() };
-        assert_eq!(metadata.transcode_options().dolby_vision_fel, DolbyVisionFel::Metadata);
-        let json = serde_json::to_value(&metadata).unwrap();
-        assert_eq!(json["dolby_vision_fel"], "metadata");
-        let before: Settings = serde_json::from_str(r#"{"server_name":"Home"}"#).unwrap();
-        assert_eq!(before.dolby_vision_fel, DolbyVisionFel::BaseLayer);
-        let patch: SettingsPatch = serde_json::from_str(r#"{"dolby_vision_fel":"metadata"}"#).unwrap();
-        assert_eq!(patch.dolby_vision_fel, Some(DolbyVisionFel::Metadata));
-        assert!(serde_json::from_str::<SettingsPatch>(r#"{"dolby_vision_fel":"enhanced"}"#).is_err());
-        // The full layer, experimental: off unless turned on, and passed on to every job.
-        assert!(!before.dolby_vision_fel_full && !Settings::default().transcode_options().dolby_vision_fel_full);
-        let full = Settings { dolby_vision_fel_full: true, ..Settings::default() };
-        assert!(full.transcode_options().dolby_vision_fel_full);
+    fn the_full_enhancement_layer_is_off_unless_turned_on_and_asked_for() {
+        let before: Settings = serde_json::from_str(r#"{"server_name":"Home","dolby_vision_fel":"metadata"}"#).unwrap();
+        assert!(!before.dolby_vision_fel_full);
+        assert!(!serde_json::to_string(&before).unwrap().contains(r#""dolby_vision_fel""#));
         let patch: SettingsPatch = serde_json::from_str(r#"{"dolby_vision_fel_full":true}"#).unwrap();
         assert_eq!(patch.dolby_vision_fel_full, Some(true));
-
-        // Both are for Dolby Vision screens: any other gets the base layer.
-        let both = Settings { dolby_vision_fel: DolbyVisionFel::Metadata, dolby_vision_fel_full: true, ..full };
-        let shown = both.transcode_options_for(true);
-        assert_eq!((shown.dolby_vision_fel, shown.dolby_vision_fel_full), (DolbyVisionFel::Metadata, true));
-        let other = both.transcode_options_for(false);
-        assert_eq!((other.dolby_vision_fel, other.dolby_vision_fel_full), (DolbyVisionFel::BaseLayer, false));
-        assert_eq!(other, Settings::default().transcode_options(), "the rest as set");
+        let on = Settings { dolby_vision_fel_full: true, ..Settings::default() };
+        assert!(!on.transcode_options().dolby_vision_fel_full, "not for every job");
+        assert!(on.transcode_options_for(true).dolby_vision_fel_full);
+        assert!(!on.transcode_options_for(false).dolby_vision_fel_full);
+        assert!(!Settings::default().transcode_options_for(true).dolby_vision_fel_full, "off on the server");
+        assert_eq!(on.transcode_options_for(false), Settings::default().transcode_options(), "the rest as set");
     }
 
     #[test]

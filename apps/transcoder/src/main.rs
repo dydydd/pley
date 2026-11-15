@@ -735,7 +735,6 @@ pub(crate) fn own_capabilities(caps: &pley_transcoder_api::Capabilities) -> pley
         live_bitrate: true,
         live: true,
         fmp4_segments: true,
-        dolby_vision_fel: true,
         ..caps.clone()
     }
 }

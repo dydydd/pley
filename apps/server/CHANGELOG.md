@@ -11,11 +11,10 @@ describes how they are made.
 
 ### Added
 
-- Settings → Transcoder has a Dolby Vision FEL choice for screens that show
-  Dolby Vision: profile 7 with a full enhancement layer is transcoded from
-  its HDR10 base layer, or with its Dolby Vision brightness. An
-  experimental toggle uses the full enhancement layer itself, with Pley's
-  own FFmpeg. Other screens always get the HDR10 base layer.
+- Settings → Transcoder has an experimental Dolby Vision FEL option: with
+  Pley's own FFmpeg, players on Dolby Vision screens can ask for the full
+  picture of profile 7 with a full enhancement layer, rebuilt from both
+  layers.
 
 ### Changed
 
@@ -24,7 +23,7 @@ describes how they are made.
   letterbox bars stay black.
 - Dolby Vision profile 7 with a full enhancement layer is transcoded from
   its HDR10 base layer, where it was tone mapped by its Dolby Vision
-  brightness before; Settings → Transcoder brings that back.
+  brightness before.
 - The Docker image and the Windows installer carry Pley's own FFmpeg, with
   jellyfin-ffmpeg's improvements for Intel graphics.
 

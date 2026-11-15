@@ -533,30 +533,6 @@ pub enum TonemapMode {
     None,
 }
 
-/// What a transcode makes of Dolby Vision profile 7 whose enhancement layer
-/// is full (FEL, [`DolbyVisionLayer::Fel`]). FFmpeg as released doesn't
-/// read that layer, so the picture is its HDR10 base layer's
-/// ([`TranscodeOptions::dolby_vision_fel_full`] aside); what differs is whether
-/// the stream's Dolby Vision metadata is used with it. Its mapping never is
-/// (libplacebo applies none that needs the layer), but the brightness it
-/// gives each scene is, where libplacebo is built with libdovi. On most
-/// titles that brightness matches the base layer; on those whose layer
-/// carries part of it, it describes a picture the base layer isn't, and
-/// the tone mapped picture comes out too dark or too bright.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum DolbyVisionFel {
-    /// As HDR10: the base layer, by its own static metadata, the Dolby
-    /// Vision metadata unread. The picture its HDR10 grade gives, whatever
-    /// the title; and any decoder can decode it, Quick Sync's included.
-    #[default]
-    BaseLayer,
-    /// The base layer, tone mapped by the Dolby Vision metadata's
-    /// brightness for each scene, as profile 7 with a minimal layer and
-    /// profile 8.1 are.
-    Metadata,
-}
-
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum VideoCodec {
@@ -767,11 +743,6 @@ pub struct Capabilities {
     /// Older transcoders make MPEG-TS only.
     #[serde(default)]
     pub fmp4_segments: bool,
-    /// Transcodes do what [`TranscodeOptions::dolby_vision_fel`] asks with
-    /// Dolby Vision profile 7's full enhancement layer. Older transcoders
-    /// tone map it by its Dolby Vision metadata, whatever is asked.
-    #[serde(default)]
-    pub dolby_vision_fel: bool,
     /// FFmpeg can rebuild Dolby Vision profile 7's full picture from its
     /// base layer, its full enhancement layer and their metadata, as a
     /// Dolby Vision player does (Pley's FFmpeg). Experimental: what
@@ -1238,14 +1209,11 @@ pub struct TranscodeOptions {
     /// jobs only: their lead on the player is bounded.
     #[serde(default = "default_true")]
     pub in_memory: bool,
-    /// What transcodes make of Dolby Vision profile 7 with a full
-    /// enhancement layer ([`Capabilities::dolby_vision_fel`]).
-    #[serde(default)]
-    pub dolby_vision_fel: DolbyVisionFel,
     /// Experimental: Dolby Vision profile 7 with a full enhancement layer
     /// is transcoded from the full picture both layers make, where the
     /// transcoder can ([`Capabilities::dolby_vision_fel_full`]), rather
-    /// than as [`TranscodeOptions::dolby_vision_fel`] says.
+    /// than from its HDR10 base layer alone, as it is otherwise (FFmpeg as
+    /// released doesn't read that layer).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dolby_vision_fel_full: bool,
 }
@@ -1259,7 +1227,6 @@ impl Default for TranscodeOptions {
             preset: None,
             throttle: true,
             in_memory: true,
-            dolby_vision_fel: DolbyVisionFel::BaseLayer,
             dolby_vision_fel_full: false,
         }
     }
@@ -1894,19 +1861,18 @@ mod tests {
     }
 
     /// Dolby Vision profile 7's full enhancement layer: its base layer
-    /// alone unless a request asks for its metadata, a server from before
-    /// the choice included, and a transcoder from before it doesn't say it
-    /// follows the choice.
+    /// alone unless the full picture is asked for, a request from a server
+    /// from before the choice included.
     #[test]
     fn a_full_enhancement_layer_is_made_from_the_base_layer_unless_asked() {
         let options: TranscodeOptions = serde_json::from_str("{}").unwrap();
-        assert_eq!(options.dolby_vision_fel, DolbyVisionFel::BaseLayer);
+        assert!(!options.dolby_vision_fel_full);
         assert_eq!(options, TranscodeOptions::default());
+        // A server that still sends the choice it had: ignored.
         let options: TranscodeOptions = serde_json::from_str(r#"{"dolby_vision_fel":"metadata"}"#).unwrap();
-        assert_eq!(options.dolby_vision_fel, DolbyVisionFel::Metadata);
+        assert_eq!(options, TranscodeOptions::default());
         let json = serde_json::to_string(&TranscodeOptions::default()).unwrap();
-        assert!(json.contains(r#""dolby_vision_fel":"base_layer""#), "{json}");
-        assert!(!Capabilities::default().dolby_vision_fel);
+        assert!(!json.contains("dolby_vision_fel"), "{json}");
     }
 
     #[test]

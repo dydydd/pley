@@ -981,12 +981,6 @@ export type HwAccel = "auto" | "none" | "nvenc" | "qsv" | "amf" | "vaapi" | "vid
 /** `auto`: the transcoder picks one from its load and how far ahead of the player it is, and changes it as they change. */
 export type TranscodePreset = "auto" | "ultrafast" | "superfast" | "veryfast" | "faster" | "fast" | "medium";
 export type ToneMapping = "auto" | "libplacebo" | "opencl" | "zscale" | "none";
-/**
- * What transcodes make of Dolby Vision profile 7 with a full enhancement
- * layer (FEL): its HDR10 base layer alone, or that tone mapped by the Dolby
- * Vision metadata's brightness.
- */
-export type DolbyVisionFel = "base_layer" | "metadata";
 /** Where TV show metadata comes from; "auto" is TMDB, else TheTVDB (when they have a key), else TVmaze. */
 export type TvMetadata = "auto" | "tmdb" | "tvdb" | "tvmaze";
 /**
@@ -1032,14 +1026,9 @@ export interface Settings {
   /** Keep transcodes' segments in RAM where the transcoder can, else on disk. Throttled transcodes only. */
   transcode_in_memory: boolean;
   /**
-   * What transcodes make of Dolby Vision profile 7 with a full enhancement
-   * layer: its HDR10 base layer alone, or that with its Dolby Vision
-   * metadata. Absent from servers before it.
-   */
-  dolby_vision_fel?: DolbyVisionFel;
-  /**
-   * Experimental: that layer is used, the full picture rebuilt from both,
-   * where the transcoder's FFmpeg can. Absent from servers before it.
+   * Experimental: players on Dolby Vision screens offer profile 7's full
+   * enhancement layer, the full picture rebuilt from both layers where the
+   * transcoder's FFmpeg can. Absent from servers before it.
    */
   dolby_vision_fel_full?: boolean;
   scan_interval_minutes: number;
@@ -1166,8 +1155,6 @@ export interface TranscoderInfo {
   chromaprint: boolean;
   /** FFmpeg can hold transcodes back (6.1 and newer). */
   throttling: boolean;
-  /** Transcodes do what the `dolby_vision_fel` setting asks. Absent from servers before it. */
-  dolby_vision_fel?: boolean;
   /** The transcoder's FFmpeg can rebuild Dolby Vision FEL's full picture. Absent from servers before it. */
   dolby_vision_fel_full?: boolean;
   /** Whether segments can be kept in memory, and how much; `null` while the transcoder is unavailable. */
