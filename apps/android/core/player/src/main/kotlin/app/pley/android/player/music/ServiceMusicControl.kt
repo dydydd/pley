@@ -21,17 +21,10 @@ import app.pley.android.player.session.clientIdOf
 import app.pley.android.player.sleep.SleepChoice
 import app.pley.android.player.sleep.SleepState
 import com.google.common.util.concurrent.ListenableFuture
-import java.io.IOException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.Request
-import okhttp3.Response
 
 /**
  * The app's [MusicControl]: the process's [MusicPlayback], with a
@@ -149,7 +142,7 @@ class ServiceMusicControl(
                 reporter = reporter,
                 output = {
                     EngineMusicOutput(engines.create(app, profile, music = true), main) { url ->
-                        fetch(network, url)
+                        fetchPicture(network, url)
                     }
                 },
                 events = data.liveUpdates.events,
@@ -163,30 +156,5 @@ class ServiceMusicControl(
 
         /** Music's player id: the device's, marked, so music and video don't end each other's sessions. */
         const val MUSIC_SUFFIX = "-music"
-
-        /** The notification's art, through the pictures' client (it carries the server's token). */
-        private suspend fun fetch(network: NetworkGraph, url: String): ByteArray? = withContext(Dispatchers.IO) {
-            val call = network.images.newCall(Request.Builder().url(url).build())
-            suspendCancellableCoroutine { continuation ->
-                continuation.invokeOnCancellation { call.cancel() }
-                call.enqueue(
-                    object : Callback {
-                        override fun onFailure(call: Call, e: IOException) {
-                            continuation.resumeWith(Result.success(null))
-                        }
-
-                        override fun onResponse(call: Call, response: Response) {
-                            val bytes = response.use { r ->
-                                if (!r.isSuccessful) null else runCatching { r.body.bytes() }.getOrNull()?.takeIf { it.size <= MAX_ART_BYTES }
-                            }
-                            continuation.resumeWith(Result.success(bytes))
-                        }
-                    },
-                )
-            }
-        }
-
-        /** Art bigger than this isn't put in the notification. */
-        private const val MAX_ART_BYTES = 2 * 1024 * 1024
     }
 }

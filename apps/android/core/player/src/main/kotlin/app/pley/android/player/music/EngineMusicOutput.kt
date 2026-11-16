@@ -1,5 +1,6 @@
 package app.pley.android.player.music
 
+import android.os.Bundle
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -92,6 +93,7 @@ class EngineMusicOutput(
             .setIsPlayable(true)
             .setIsBrowsable(false)
             .apply { if (art != null) setArtworkData(art, MediaMetadata.PICTURE_TYPE_FRONT_COVER) }
+            .apply { info.id?.let { setExtras(Bundle().apply { putLong(TRACK_ID, it) }) } }
             .build()
         p.replaceMediaItem(p.currentMediaItemIndex, item.buildUpon().setMediaMetadata(metadata).build())
     }
@@ -130,6 +132,9 @@ class EngineMusicOutput(
     }
 
     companion object {
+        /** The extra of the player's item's metadata that holds the track's id. */
+        const val TRACK_ID = "pley.track"
+
         /** Errors the engine recovers from by preparing again (AudioRestarts). */
         private val ENGINE_RESTARTS = setOf(
             PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,

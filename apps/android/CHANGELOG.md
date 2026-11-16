@@ -8,6 +8,13 @@ describes how they are made.
 
 ## [Unreleased]
 
+### Added
+
+- Pley plays music in Android Auto: Recent, Artists and Playlists tabs
+  with album covers, search, the whole queue on Now Playing with Shuffle,
+  and "Hey Google, play … on Pley". Signed out, the car says to open Pley
+  on the phone.
+
 ### Fixed
 
 - Pause pressed while a track is starting now keeps it paused once it

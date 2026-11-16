@@ -9,6 +9,8 @@ data class TrackInfo(
     val album: String?,
     /** The album art's full address, sized for the notification; `null` without one. */
     val artUrl: String?,
+    /** The track's id, on the player's item ([EngineMusicOutput.TRACK_ID]): the media session tells which queue entry it is. */
+    val id: Long? = null,
 )
 
 /**

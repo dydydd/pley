@@ -998,6 +998,35 @@ to the home server still goes over the Wi-Fi (`LocalRoute`).
   unless Settings → Downloads allows mobile data. Progress made offline is
   sent when the server is back.
 
+### Android Auto
+
+On a phone connected to a car with Android Auto, Pley is a music app on
+the car's screen, while driving or parked. The car's screen has three
+tabs:
+
+- **Recent**: the albums added last to each music library, as a grid of
+  their covers (under each library's name when there are several).
+- **Artists**: by name (with several music libraries, the libraries
+  first). An artist lists Shuffle, then their albums, newest first; an
+  album lists its tracks.
+- **Playlists**: the profile's music playlists.
+
+Search finds artists, albums and tracks. Picking a track plays on through
+its album or playlist; a track found by search plays on through its
+album. Now Playing shows the whole queue, which the car can pick from and
+shuffle. "Hey Google, play … on Pley" plays the closest artist (shuffled),
+album or track; "play music on Pley" plays the album added last. Signed
+out, the car says to open Pley on the phone and sign in, with a button
+that opens it. The car reads the covers from the app, as the server's
+pictures need the profile's token: the app grants Android Auto reading
+them and nothing else. Only Android Auto and the Google app, checked by
+the certificate Google signs them with, besides the system's own media
+controls, may browse or play Pley's music.
+
+Android Auto shows a sideloaded app once its developer settings allow
+unknown sources (tap Version ten times in Android Auto's settings, then
+⋮ → Developer settings → Unknown sources).
+
 ### Videos on a USB drive
 
 On Android TV, Google TV and Fire TV, while a USB drive is plugged in, the
@@ -1392,6 +1421,9 @@ base64 -w0 pley-release.keystore   # the ANDROID_KEYSTORE_BASE64 secret
   server's settings, network, transcoder, requests and Live TV to the web
   app.
 - No Watch Next row on phones or Fire TV.
+- Android Auto's Artists tab lists the first 500 artists of a library by
+  name (search finds the others), and its music has no downloads: a car
+  out of signal browses what was last seen and plays nothing new.
 - The TV's display mode isn't matched for live channels.
 - Videos on a USB drive are on TVs only. Their display mode isn't
   matched, as their frame rate is known only once they play; HDR10+ shows

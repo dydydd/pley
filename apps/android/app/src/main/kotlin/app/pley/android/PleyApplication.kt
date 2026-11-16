@@ -14,6 +14,8 @@ import app.pley.android.common.perf.StartupSignals
 import app.pley.android.designsystem.PleyImageLoader
 import app.pley.android.downloads.AppDownloads
 import app.pley.android.downloads.DownloadsOwner
+import app.pley.android.player.PlayerGraph
+import app.pley.android.player.PlayerGraphOwner
 import app.pley.android.screens.PleyGraphOwner
 import app.pley.android.screens.ScreensGraph
 import coil3.ImageLoader
@@ -36,7 +38,7 @@ import kotlinx.coroutines.launch
  * beside it, and returns (15 ms at most). Before that, the language the
  * app is shown in is set (AppLanguage); LanguageSync keeps it.
  */
-class PleyApplication : Application(), PleyGraphOwner, DownloadsOwner, SingletonImageLoader.Factory {
+class PleyApplication : Application(), PleyGraphOwner, PlayerGraphOwner, DownloadsOwner, SingletonImageLoader.Factory {
     val graph: AppGraph by lazy { AppGraph(this) }
 
     /** What the latest window's first screen was chosen by (StartupRead): read as the process starts, then by [startupFor]. */
@@ -53,6 +55,10 @@ class PleyApplication : Application(), PleyGraphOwner, DownloadsOwner, Singleton
 
     override val screensGraph: ScreensGraph
         get() = graph
+
+    /** For the music service and its pictures, which Android starts by themselves. */
+    override val playerGraph: PlayerGraph
+        get() = graph.player
 
     override val appDownloads: AppDownloads
         get() = graph.appDownloads

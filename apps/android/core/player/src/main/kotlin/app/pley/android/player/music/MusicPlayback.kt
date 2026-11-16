@@ -619,6 +619,7 @@ class MusicPlayback(
     }
 
     private fun trackInfo(track: ItemSummary, server: PleyApi) = TrackInfo(
+        id = track.id,
         title = track.title,
         artist = track.grandparentTitle,
         album = track.parentTitle,
