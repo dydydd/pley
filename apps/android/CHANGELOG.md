@@ -19,12 +19,15 @@ describes how they are made.
 - Parked, the sideloaded app plays videos and Live TV on the car's screen
   with Android Auto (Android 15 and later, in cars that allow video
   apps), with larger controls, 10-second skip buttons, and pausing as
-  soon as the car moves off.
+  soon as the car moves off. Music's Now Playing and its bar are larger
+  there too.
 
 ### Fixed
 
 - Pause pressed while a track is starting now keeps it paused once it
   loads, instead of playing it.
+- Now Playing fits a phone turned on its side, with the cover beside
+  the title, instead of the cover hiding the controls.
 
 ## [0.1.14] - 2026-11-16
 

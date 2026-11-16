@@ -2,6 +2,7 @@ package app.pley.android.ui.phone.player
 
 import android.app.Activity
 import android.view.Display
+import androidx.activity.compose.LocalActivity
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
@@ -28,6 +29,13 @@ object OtherScreen {
     fun shows(activity: Activity): Boolean = ContextCompat.getDisplayOrDefault(activity).displayId != Display.DEFAULT_DISPLAY
 }
 
+/** Whether what is composed shows on a screen other than the device's own ([OtherScreen]). */
+@Composable
+internal fun onOtherScreen(): Boolean {
+    val activity = LocalActivity.current
+    return remember(activity) { activity != null && OtherScreen.shows(activity) }
+}
+
 /** The player draws for a car's screen ([CarSized]): fewer, larger controls. */
 internal val LocalCarScreen = staticCompositionLocalOf { false }
 
@@ -50,6 +58,22 @@ internal fun CarSized(car: Boolean, content: @Composable () -> Unit) {
     CompositionLocalProvider(LocalDensity provides larger, LocalCarScreen provides true) {
         MaterialTheme(colorScheme = MaterialTheme.colorScheme, typography = readable, shapes = MaterialTheme.shapes, content = content)
     }
+}
+
+/**
+ * A menu's or a sheet's [content], car-sized as the page that opened it.
+ * Such a window starts again from the screen's own density, so a page's
+ * [CarSized] doesn't reach it; its text styles do, already raised.
+ */
+@Composable
+internal fun CarSizedWindow(content: @Composable () -> Unit) {
+    if (!LocalCarScreen.current) {
+        content()
+        return
+    }
+    val density = LocalDensity.current
+    val larger = remember(density) { Density(density.density * CAR_SCALE, density.fontScale) }
+    CompositionLocalProvider(LocalDensity provides larger, content = content)
 }
 
 /** How much larger the player draws on a car's screen: 48 dp to 64. */

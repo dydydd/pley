@@ -39,6 +39,10 @@ import app.pley.android.ui.phone.R
 import app.pley.android.ui.phone.kit.PleyIconButton
 import app.pley.android.ui.phone.music.rememberMusicControl
 import app.pley.android.ui.phone.music.rememberMusicPosition
+import app.pley.android.ui.phone.player.CarGap
+import app.pley.android.ui.phone.player.CarSized
+import app.pley.android.ui.phone.player.LocalCarScreen
+import app.pley.android.ui.phone.player.onOtherScreen
 
 /**
  * The mini player (design spec §3.6): a 72 dp bar above the navigation
@@ -50,6 +54,12 @@ import app.pley.android.ui.phone.music.rememberMusicPosition
 @Composable
 internal fun MiniPlayerSlot(nowPlaying: NowPlaying?, modifier: Modifier = Modifier) {
     if (nowPlaying == null) return
+    // On a car's screen, car-sized: 64 dp buttons, no text under 24 sp.
+    CarSized(onOtherScreen()) { MiniPlayer(nowPlaying, modifier) }
+}
+
+@Composable
+private fun MiniPlayer(nowPlaying: NowPlaying, modifier: Modifier) {
     val navigator = LocalPhoneNavigator.current
     val onNowPlaying = (navigator as? PhoneNavigation)?.stack()?.lastOrNull() == PleyKey.NowPlaying
     if (onNowPlaying) return
@@ -57,10 +67,12 @@ internal fun MiniPlayerSlot(nowPlaying: NowPlaying?, modifier: Modifier = Modifi
     val position by rememberMusicPosition({ music?.position() ?: MusicPosition() }, nowPlaying.playing, key = nowPlaying.itemId)
     val art = remember(nowPlaying.artUrl) { nowPlaying.artUrl?.let { ArtworkImage(listOf(it)) } }
     val playing = nowPlaying.playing || (nowPlaying.loading && nowPlaying.error == null)
+    // On a car's screen: 112 dp there, clear of its edges, its buttons apart and its title the larger line.
+    val car = LocalCarScreen.current
     Row(
         modifier
             .fillMaxWidth()
-            .height(72.dp)
+            .height(if (car) 84.dp else 72.dp)
             .background(PleyColors.Surface2)
             .drawBehind {
                 // How far along: 2 dp of accent over the surface's top edge.
@@ -71,7 +83,7 @@ internal fun MiniPlayerSlot(nowPlaying: NowPlaying?, modifier: Modifier = Modifi
                 if (f > 0f) drawLine(PleyColors.Accent, Offset(0f, h / 2f), Offset(size.width * f, h / 2f), h)
             }
             .clickable(role = Role.Button, onClickLabel = stringResource(R.string.shell_now_playing)) { navigator.open(PleyKey.NowPlaying) }
-            .padding(start = 8.dp, end = 4.dp)
+            .padding(start = if (car) CarGap else 8.dp, end = if (car) CarGap else 4.dp)
             .testTag(MINI_PLAYER),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -84,7 +96,7 @@ internal fun MiniPlayerSlot(nowPlaying: NowPlaying?, modifier: Modifier = Modifi
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(nowPlaying.title, style = MaterialTheme.typography.titleSmall, color = PleyColors.Fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(nowPlaying.title, style = if (car) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleSmall, color = PleyColors.Fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
             val byline = nowPlaying.byline
             if (byline.isNotEmpty()) {
                 Text(byline, style = MaterialTheme.typography.bodySmall, color = PleyColors.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -95,6 +107,7 @@ internal fun MiniPlayerSlot(nowPlaying: NowPlaying?, modifier: Modifier = Modifi
             stringResource(if (playing) R.string.music_pause else R.string.music_play),
             onClick = { music?.toggle() },
         )
+        if (car) Spacer(Modifier.width(CarGap))
         PleyIconButton(
             PleyIcons.SkipForward,
             stringResource(R.string.music_next),

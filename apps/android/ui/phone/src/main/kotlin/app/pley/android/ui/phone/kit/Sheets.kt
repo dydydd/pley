@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
@@ -19,7 +20,6 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -35,6 +35,7 @@ import app.pley.android.designsystem.PleyShape
 import app.pley.android.designsystem.icon.Icon
 import app.pley.android.designsystem.icon.PleyIcon
 import app.pley.android.ui.phone.R
+import app.pley.android.ui.phone.player.CarSizedWindow
 
 /**
  * A bottom sheet (design spec §3.4, elevation level 2): [surface2][PleyColors.Surface2]
@@ -75,16 +76,19 @@ internal fun PleySheet(
         tonalElevation = 0.dp,
         dragHandle = { SheetHandle() },
     ) {
-        Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 8.dp)) {
-            if (title != null) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = PleyColors.Fg,
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
-                )
+        // Opened from a page on a car's screen, car-sized as it is.
+        CarSizedWindow {
+            Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 8.dp)) {
+                if (title != null) {
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = PleyColors.Fg,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                    )
+                }
+                content()
             }
-            content()
         }
     }
 }

@@ -1035,14 +1035,19 @@ screen the player keeps the screen's orientation, has no picture in
 picture, and its volume and brightness drags are off (the car has its
 own). It draws a third larger there, as Google's car app quality
 criteria ask: buttons of 64 dp at least and no text under 24 sp, its
-sheets and messages too, and the controls over the video keep 24 dp
-from each other and from the screen's edges. Play sits between 10 seconds back and 10 seconds
-forward, the seek bar is taller, and the bottom row keeps Subtitles,
-Audio, Fit and Next episode (Quality is in Settings, chapters show on
-the seek bar, and there is no Lock). As the car moves off, Android Auto covers the window: the video
-pauses at once and its media session goes, so neither the car's buttons
-nor the steering wheel's can play it while driving; a channel is let go.
-Parked again, Play carries on (a channel plays again by itself).
+sheets, menus and messages too, and the controls over the video keep
+24 dp from each other and from the screen's edges. Play sits between
+10 seconds back and 10 seconds forward, the seek bar is taller, and the
+bottom row keeps Subtitles, Audio, Fit and Next episode (Quality is in
+Settings, chapters show on the seek bar, and there is no Lock). Music's
+Now Playing and the bar of what plays at the bottom of the pages are
+car-sized the same way; Now Playing puts the cover beside the title,
+over the scrubber and the controls, as in any short, wide window (a
+phone on its side too). As the car moves off, Android Auto covers the
+window: the video pauses at once and its media session goes, so neither
+the car's buttons nor the steering wheel's can play it while driving; a
+channel is let go. Parked again, Play carries on (a channel plays again
+by itself).
 
 Google Play takes video apps for Android Auto only from its early access
 partners, so only the sideloaded build (`direct`) lists Pley among the

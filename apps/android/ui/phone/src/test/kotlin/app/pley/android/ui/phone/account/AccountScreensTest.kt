@@ -21,6 +21,8 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.hasScrollAction
 import androidx.test.core.app.ApplicationProvider
 import app.pley.android.common.perf.FrameRate
@@ -37,6 +39,7 @@ import app.pley.android.ui.phone.diagnostics.DIAGNOSTICS_FRAME_RATE
 import app.pley.android.ui.phone.diagnostics.DiagnosticsScreen
 import app.pley.android.ui.phone.kit.LocalOffline
 import app.pley.android.ui.phone.music.AlbumScreen
+import app.pley.android.ui.phone.music.NowPlayingScreen
 import app.pley.android.ui.phone.shell.LocalPhoneNavigator
 import app.pley.android.ui.phone.shell.LocalPhoneShell
 import app.pley.android.ui.phone.shell.MiniPlayerSlot
@@ -277,5 +280,23 @@ class AccountScreensTest {
         compose.onAllNodesWithContentDescription("Next")[0].performClick()
         assertEquals(1, graph.music.toggles)
         assertEquals(1, graph.music.nexts)
+    }
+
+    @Test
+    @Config(qualifiers = "w800dp-h360dp-land")
+    fun nowPlayingInAShortWideWindowPutsTheArtBesideTheTitleAndShowsEveryControl() {
+        val now = NowPlaying(503, "Song 3", "Harbour Lights", playing = true, album = "Deep Water", count = 12, index = 2, durationMs = 180_000)
+        graph.music.now.value = now
+        show { NowPlayingScreen() }
+        waitFor("Song 3")
+        val window = compose.onRoot().getBoundsInRoot()
+        val title = compose.onNodeWithText("Song 3").getBoundsInRoot()
+        // Beside the art, not under it: the title starts a fifth of the way across, in the top half.
+        assertTrue("title: $title", title.left > window.right / 5 && title.bottom < window.bottom / 2)
+        // A phone's portrait layout put the scrubber and the controls below the window's bottom.
+        for (control in listOf("Position in the track", "Shuffle", "Previous", "Pause", "Next", "Queue")) {
+            val bounds = compose.onAllNodesWithContentDescription(control)[0].getBoundsInRoot()
+            assertTrue("$control: $bounds in $window", bounds.bottom <= window.bottom && bounds.top >= window.top)
+        }
     }
 }
