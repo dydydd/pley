@@ -104,6 +104,38 @@ class MusicPlaybackTest {
     }
 
     @Test
+    fun pauseAndPlayWhileATrackIsAskedForDecideWhetherItPlaysOnceLoaded() = runTest {
+        val music = music()
+        api.hold()
+        music.play(album)
+        runCurrent()
+        // A car's Pause comes while the server is still asked: the old track isn't played, the new one waits.
+        music.pause()
+        api.release()
+        settle()
+        assertEquals(1, output.loaded.size)
+        assertFalse(output.wants)
+
+        api.hold()
+        music.next()
+        runCurrent()
+        music.pause()
+        music.play()
+        api.release()
+        settle()
+        assertEquals(2, output.loaded.size)
+        assertTrue(output.wants)
+
+        api.hold()
+        music.next()
+        runCurrent()
+        music.toggle()
+        api.release()
+        settle()
+        assertFalse(output.wants)
+    }
+
+    @Test
     fun progressGoesOutEveryTenSecondsWhilePlayingOnPauseAndEveryThirtyPaused() = runTest {
         val music = music()
         music.play(album)
@@ -557,7 +589,10 @@ class MusicPlaybackTest {
         var released = false
         var position = 0L
         private var listener: MusicOutput.Listener? = null
-        private var wants = false
+
+        /** Whether it plays once ready (playWhenReady). */
+        var wants = false
+            private set
         private var playing = false
 
         override fun load(source: EngineSource, startMs: Long, play: Boolean, info: TrackInfo) {

@@ -117,6 +117,9 @@ class MusicPlayback(
     private var recreates = 0
     private var playing = false
     private var loading = false
+
+    /** Whether the track being asked for plays once it loads: Play and Pause meanwhile change it. */
+    private var startPlays = true
     private var ended = false
 
     /** A video or a channel took over ([pauseForVideo]): the session went, the place stays. */
@@ -237,17 +240,29 @@ class MusicPlayback(
         when {
             ended -> startTrack(0)
             error != null || yielded -> startTrack(lastPosition(), sameTrack = true, play = true)
+            starting -> startPlays = true
             else -> output().play()
         }
     }
 
     fun pause() {
+        if (starting) startPlays = false
         out?.pause()
     }
 
+    /** A track is being asked for (not the server asked about a failure): the output still holds the last one. */
+    private val starting: Boolean get() = startJob.let { it != null && it === loadJob && it.isActive }
+
+    /** The job asking for the current track's session ([startTrack]). */
+    private var startJob: Job? = null
+
     fun toggle() {
         val o = out
-        if (o != null && o.playWhenReady && !ended && error == null && !yielded) pause() else play()
+        when {
+            starting -> if (startPlays) pause() else play()
+            o != null && o.playWhenReady && !ended && error == null && !yielded -> pause()
+            else -> play()
+        }
     }
 
     fun next() {
@@ -348,6 +363,7 @@ class MusicPlayback(
         error = null
         loading = true
         playing = false
+        startPlays = wantPlay
         publish()
         loadJob = scope.launch {
             // The session before goes first (stopped, then DELETE): the server's transcode limit.
@@ -374,11 +390,12 @@ class MusicPlayback(
             val server = api ?: return@launch
             val info = started.info
             val source = EngineSource(url = server.url(info.url), hls = info.hls, durationMs = info.durationMs.takeIf { it > 0 })
-            o.load(source, atMs, wantPlay, trackInfo(track, server))
+            o.load(source, atMs, startPlays, trackInfo(track, server))
             // From now on, also while it waits paused (the sleep timer's next track).
             startTicker()
             publish()
         }
+        startJob = loadJob
     }
 
     private suspend fun capsOrNone(): ClientCaps = try {

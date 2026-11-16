@@ -8,6 +8,11 @@ describes how they are made.
 
 ## [Unreleased]
 
+### Fixed
+
+- Pause pressed while a track is starting now keeps it paused once it
+  loads, instead of playing it.
+
 ## [0.1.14] - 2026-11-16
 
 ### Added
