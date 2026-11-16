@@ -10,10 +10,12 @@ describes how they are made.
 
 ### Added
 
-- Pley plays music in Android Auto: Recent, Artists and Playlists tabs
-  with album covers, search, the whole queue on Now Playing with Shuffle,
-  and "Hey Google, play … on Pley". Signed out, the car says to open Pley
-  on the phone.
+- Pley plays music in Android Auto: Recent (what you played last, then
+  what was added), Artists and Playlists tabs with album covers, search,
+  the whole queue and a Shuffle button on Now Playing, and "Hey Google,
+  play … on Pley". Signed out, the car says to open Pley on the phone.
+- Music's notification and the phone's media controls have a Shuffle
+  button.
 - Parked, the sideloaded app plays videos and Live TV on the car's screen
   with Android Auto (Android 15 and later, in cars that allow video
   apps), pausing as soon as the car moves off.

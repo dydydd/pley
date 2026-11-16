@@ -10,6 +10,7 @@ import androidx.media3.session.MediaConstants
 import app.pley.android.model.ItemKind
 import app.pley.android.model.ItemSummary
 import app.pley.android.model.PlaylistKind
+import app.pley.android.model.format.formatClockMs
 import app.pley.android.model.PlaylistSummary
 import app.pley.android.player.music.MusicPlayback
 import kotlinx.coroutines.async
@@ -19,6 +20,12 @@ import kotlinx.coroutines.coroutineScope
 /** The words and icons of the library's own nodes, in the language the app is shown in. */
 interface MusicLibraryLook {
     val recent: String
+
+    /** Recent's groups: the albums played last, then those added last ("Recently added in Music" with several libraries). */
+    val recentlyPlayed: String
+    val recentlyAdded: String
+
+    fun recentlyAddedIn(library: String): String
     val artists: String
     val playlists: String
 
@@ -29,6 +36,9 @@ interface MusicLibraryLook {
 
     /** "12 tracks". */
     fun tracks(count: Int): String
+
+    /** "4 albums". */
+    fun albums(count: Int): String
 
     /** Icons of the tabs and of Shuffle: monochrome, as `android.resource` addresses. */
     val recentIcon: Uri?
@@ -175,17 +185,58 @@ class MusicLibrary(
         )
     }
 
+    /**
+     * The albums played last (as YouTube Music's Last played), then those
+     * added last to each music library, each under its heading. Plays that
+     * can't be read leave their group out; the added albums still show.
+     */
     private suspend fun recent(): List<MediaItem> {
         val libraries = source.libraries()
-        val rows = coroutineScope { libraries.map { async { it to source.recentlyAdded(it.id) } }.awaitAll() }
-        val several = rows.count { it.second.isNotEmpty() } > 1
-        return rows.flatMap { (library, items) ->
-            items.filter { it.kind == ItemKind.Album }.map { album(it).grouped(if (several) library.name else null) }
+        val (played, added) = coroutineScope {
+            val played = libraries.map { async { runCatching { source.recentlyPlayed(it.id) }.getOrDefault(emptyList()) } }
+            val added = libraries.map { async { it to source.recentlyAdded(it.id) } }
+            played.awaitAll() to added.awaitAll()
         }
+        val l = look()
+        val playedAlbums = played.flatten()
+            .filter { it.kind == ItemKind.Track }
+            .mapNotNull(::albumOf)
+            .distinctBy { it.id }
+            .take(RECENTLY_PLAYED)
+            .map { album(it).grouped(l.recentlyPlayed) }
+        val several = added.count { it.second.isNotEmpty() } > 1
+        val addedAlbums = added.flatMap { (library, items) ->
+            val group = if (several) l.recentlyAddedIn(library.name) else l.recentlyAdded
+            items.filter { it.kind == ItemKind.Album }.map { album(it).grouped(group) }
+        }
+        return playedAlbums + addedAlbums
     }
 
-    private fun artist(item: ItemSummary): MediaItem =
-        node(MusicId.Artist(item.id), item.title, browsable = true, playable = false, artPath = item.posterUrl, browsableStyle = GRID, playableStyle = LIST, mediaType = MediaMetadata.MEDIA_TYPE_ARTIST)
+    /** The album [track] is on, as far as the track says: its title, artist and cover. */
+    private fun albumOf(track: ItemSummary): ItemSummary? {
+        val id = track.parentId ?: return null
+        return ItemSummary(
+            id = id,
+            libraryId = track.libraryId,
+            kind = ItemKind.Album,
+            title = track.parentTitle ?: return null,
+            parentId = track.grandparentId,
+            parentTitle = track.grandparentTitle,
+            posterUrl = "/api/items/$id/images/poster",
+        )
+    }
+
+    private fun artist(item: ItemSummary): MediaItem = node(
+        MusicId.Artist(item.id),
+        item.title,
+        subtitle = item.childCount?.takeIf { it > 0 }?.let { look().albums(it) },
+        browsable = true,
+        playable = false,
+        artPath = item.posterUrl,
+        browsableStyle = GRID,
+        playableStyle = LIST,
+        mediaType = MediaMetadata.MEDIA_TYPE_ARTIST,
+    )
 
     private fun album(item: ItemSummary): MediaItem = node(
         MusicId.Album(item.id),
@@ -210,18 +261,25 @@ class MusicLibrary(
         mediaType = MediaMetadata.MEDIA_TYPE_PLAYLIST,
     )
 
+    /**
+     * A track's row. In its album's list, each row would show the same
+     * cover and artist: it shows the track's length instead, and no cover.
+     * Elsewhere (a playlist, search, the queue), its artist and cover.
+     */
     private fun track(item: ItemSummary, from: MusicId?): MediaItem {
         val artist = item.grandparentTitle
+        val inAlbum = from is MusicId.Album
+        val subtitle = if (inAlbum) item.durationMs?.takeIf { it > 0 }?.let(::formatClockMs) else artist
         val metadata = MediaMetadata.Builder()
             .setTitle(item.title)
             .setDisplayTitle(item.title)
             .setArtist(artist)
-            .setSubtitle(artist)
+            .setSubtitle(subtitle)
             .setAlbumTitle(item.parentTitle)
             .setTrackNumber(item.index)
             .setDiscNumber(item.parentIndex)
             .setDurationMs(item.durationMs?.takeIf { it > 0 })
-            .setArtworkUri(MusicPlayback.artPath(item)?.let(art))
+            .setArtworkUri(if (inAlbum) null else MusicPlayback.artPath(item)?.let(art))
             .setIsBrowsable(false)
             .setIsPlayable(true)
             .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
@@ -272,6 +330,9 @@ class MusicLibrary(
 
         /** The most children a page holds, whatever the car asks for. */
         const val MAX_PAGE = 500
+
+        /** The most albums Recently played shows. */
+        private const val RECENTLY_PLAYED = 12
 
         /** The most of each kind a search shows. */
         private const val SEARCH_EACH = 15

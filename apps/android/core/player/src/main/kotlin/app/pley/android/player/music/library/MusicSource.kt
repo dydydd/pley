@@ -26,6 +26,9 @@ interface MusicSource {
     /** The albums added last to [libraryId], newest first. */
     suspend fun recentlyAdded(libraryId: Long): List<ItemSummary>
 
+    /** What the profile played last in [libraryId] (tracks, the newest first). */
+    suspend fun recentlyPlayed(libraryId: Long): List<ItemSummary>
+
     /** [limit] artists of [libraryId] from [offset], by name. */
     suspend fun artists(libraryId: Long, offset: Int, limit: Int): List<ItemSummary>
 
@@ -58,6 +61,9 @@ class RepositoryMusicSource(private val data: DataGraph, private val network: Ne
 
     override suspend fun recentlyAdded(libraryId: Long): List<ItemSummary> =
         data.hubs.library(libraryId).settled().hubs.firstOrNull { it.key.startsWith(RECENTLY_ADDED) }?.items.orEmpty()
+
+    override suspend fun recentlyPlayed(libraryId: Long): List<ItemSummary> =
+        api().history(limit = HISTORY_LIMIT, libraryId = libraryId).entries.map { it.item }
 
     override suspend fun artists(libraryId: Long, offset: Int, limit: Int): List<ItemSummary> =
         api().libraryItems(libraryId, sort = LibrarySort.Title, offset = offset, limit = limit).items
@@ -110,6 +116,9 @@ class RepositoryMusicSource(private val data: DataGraph, private val network: Ne
     private companion object {
         /** A library's recently added row ("recently_added:<library id>"). */
         const val RECENTLY_ADDED = "recently_added"
+
+        /** The plays read for Recently played: enough for a row of albums. */
+        const val HISTORY_LIMIT = 100
 
         /** How long the server's answer is waited for when something is saved. */
         const val FRESH_WAIT_MS = 2_500L

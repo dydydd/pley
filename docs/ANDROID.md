@@ -1005,17 +1005,20 @@ the car's screen, and plays videos there while the car is parked.
 
 **Music**, while driving or parked. The car's screen has three tabs:
 
-- **Recent**: the albums added last to each music library, as a grid of
-  their covers (under each library's name when there are several).
-- **Artists**: by name (with several music libraries, the libraries
-  first). An artist lists Shuffle, then their albums, newest first; an
-  album lists its tracks.
+- **Recent**: as grids of covers, the albums played last (Recently
+  played, twelve at most), then those added last to each music library
+  (Recently added, or Recently added in each library's name when there
+  are several).
+- **Artists**: by name, with how many albums each has (with several music
+  libraries, the libraries first). An artist lists Shuffle, then their
+  albums, newest first; an album lists its tracks with their lengths.
 - **Playlists**: the profile's music playlists.
 
 Search finds artists, albums and tracks. Picking a track plays on through
 its album or playlist; a track found by search plays on through its
-album. Now Playing shows the whole queue, which the car can pick from and
-shuffle. "Hey Google, play … on Pley" plays the closest artist (shuffled),
+album. Now Playing shows the whole queue, which the car can pick from,
+and a Shuffle button, lit while the queue is shuffled (the phone's media
+controls have it too). "Hey Google, play … on Pley" plays the closest artist (shuffled),
 album or track; "play music on Pley" plays the album added last. Signed
 out, the car says to open Pley on the phone and sign in, with a button
 that opens it. The car reads the covers from the app, as the server's

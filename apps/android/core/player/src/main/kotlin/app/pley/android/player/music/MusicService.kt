@@ -13,13 +13,16 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.LibraryResult
+import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaConstants
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaLibraryService.LibraryParams
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession
 import androidx.media3.session.MediaNotification
 import androidx.media3.session.MediaSession
+import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionError
+import androidx.media3.session.SessionResult
 import app.pley.android.common.AppLanguage
 import app.pley.android.network.OfflineException
 import app.pley.android.player.PlayerGraphOwner
@@ -41,7 +44,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
@@ -107,6 +112,8 @@ class MusicService : MediaLibraryService() {
         player = queue
         following = scope.launch {
             launch { playback.queueState.collect { player?.queueChanged() } }
+            // Shuffle's button shows whether it is on, as the queue changes from anywhere.
+            launch { playback.queueState.map { it.shuffle }.distinctUntilChanged().drop(1).collect { made.setMediaButtonPreferences(buttons(it)) } }
             graph?.musicLibrary?.let { library -> launch { library.signedInChanges.drop(1).collect { tellCars(made, it) } } }
         }
         playback.onStopped = { stopped(made, playback, graph?.musicLibrary?.library) }
@@ -182,6 +189,22 @@ class MusicService : MediaLibraryService() {
 
     private fun isCar(packageName: String): Boolean = packageName != this.packageName && MusicCallers.allowed(packageManager, packageName)
 
+    /**
+     * The buttons beside Previous, Play and Next (Android Auto's Now
+     * Playing, the notification, the system's media controls): Shuffle,
+     * lit while it is on.
+     */
+    private fun buttons(shuffled: Boolean): List<CommandButton> {
+        val res = AppLanguage.resources(this)
+        return listOf(
+            CommandButton.Builder(if (shuffled) CommandButton.ICON_SHUFFLE_ON else CommandButton.ICON_SHUFFLE_OFF)
+                .setDisplayName(res.getString(if (shuffled) R.string.music_library_shuffle_off else R.string.music_library_shuffle))
+                .setSessionCommand(SHUFFLE)
+                .setSlots(CommandButton.SLOT_BACK_SECONDARY, CommandButton.SLOT_OVERFLOW)
+                .build(),
+        )
+    }
+
     /** Signed out, each car shows why it plays nothing, and a button opening Pley on the phone; signed in again, it clears. */
     private fun tellCars(made: MediaLibrarySession, signedIn: Boolean) {
         // Cars read the platform session's state, which Media3 makes from its notification controller's.
@@ -218,7 +241,24 @@ class MusicService : MediaLibraryService() {
                     )
                 }
             }
-            return super.onConnect(session, controller)
+            // Media3's defaults for this controller (super.onConnect only marks "use the defaults"), with Shuffle.
+            val accepted = MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller).build()
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
+                .setAvailableSessionCommands(accepted.availableSessionCommands.buildUpon().add(SHUFFLE).build())
+                .setAvailablePlayerCommands(accepted.availablePlayerCommands)
+                .setMediaButtonPreferences(buttons(playback.queueState.value.shuffle))
+                .build()
+        }
+
+        override fun onCustomCommand(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            customCommand: SessionCommand,
+            args: Bundle,
+        ): ListenableFuture<SessionResult> {
+            if (customCommand.customAction != SHUFFLE.customAction) return super.onCustomCommand(session, controller, customCommand, args)
+            playback.setShuffle(!playback.queueState.value.shuffle)
+            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }
 
         override fun onPostConnect(session: MediaSession, controller: MediaSession.ControllerInfo) {
@@ -382,6 +422,9 @@ class MusicService : MediaLibraryService() {
 
     private companion object {
         const val SESSION_ID = "pley.music"
+
+        /** Shuffle's button: shuffles the queue, or plays it in order again. */
+        val SHUFFLE = SessionCommand("app.pley.music.SHUFFLE", Bundle.EMPTY)
 
         /** The session's player and the output it shows, kept for the process's life (queuePlayer). */
         var made: Pair<EngineMusicOutput, QueuePlayer>? = null

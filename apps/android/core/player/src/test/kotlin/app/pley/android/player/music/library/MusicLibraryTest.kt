@@ -72,12 +72,25 @@ class MusicLibraryTest {
         assertEquals("content://art/api/items/50/images/poster?v=1", one[0].mediaMetadata.artworkUri.toString())
         assertEquals("Harbour Lights", one[0].mediaMetadata.subtitle.toString())
         assertTrue(one[0].mediaMetadata.isPlayable == true && one[0].mediaMetadata.isBrowsable == true)
-        assertNull(one[0].group)
+        assertEquals("Recently added", one[0].group)
 
         source.libraries += Library(4, "Live recordings", LibraryKind.Music)
         source.recent[4] = listOf(album(60, "Live at Sea"))
         val two = library.children(MusicId.Recent, 0, 50)
-        assertEquals(listOf("Music", "Live recordings"), two.map { it.group })
+        assertEquals(listOf("Recently added in Music", "Recently added in Live recordings"), two.map { it.group })
+    }
+
+    @Test
+    fun recentStartsWithTheAlbumsPlayedLastOnceEach() = runTest {
+        // Newest first: two tracks of Deep Water, a video, then one of Second Tide.
+        val other = track(56, 55).copy(parentTitle = "Second Tide")
+        source.played[3] = listOf(track(52, 50), track(51, 50), ItemSummary(9, 3, ItemKind.Movie, "A film"), other)
+        val recent = library.children(MusicId.Recent, 0, 50)
+        assertEquals(listOf("album:50", "album:55", "album:50"), recent.map { it.mediaId })
+        assertEquals(listOf("Recently played", "Recently played", "Recently added"), recent.map { it.group })
+        assertEquals("Second Tide", recent[1].mediaMetadata.title.toString())
+        assertEquals("Harbour Lights", recent[1].mediaMetadata.subtitle.toString())
+        assertEquals("content://art/api/items/55/images/poster", recent[1].mediaMetadata.artworkUri.toString())
     }
 
     @Test
@@ -85,6 +98,7 @@ class MusicLibraryTest {
         val page = library.children(MusicId.Artists, 1, 2)
         assertEquals(listOf(2 to 2), source.artistPages.map { it.second to it.third })
         assertEquals(listOf("artist:40"), page.map { it.mediaId })
+        assertEquals("2 albums", page[0].mediaMetadata.subtitle.toString())
 
         source.libraries += Library(4, "Live recordings", LibraryKind.Music)
         val libraries = library.children(MusicId.Artists, 0, 50)
@@ -106,8 +120,12 @@ class MusicLibraryTest {
         val tracks = library.children(MusicId.Album(50), 0, 50)
         assertEquals(listOf("track:51@album:50", "track:52@album:50"), tracks.map { it.mediaId })
         assertEquals("Harbour Lights", tracks[0].mediaMetadata.artist.toString())
-        // A track without its own picture shows its album's.
-        assertEquals("content://art/api/items/50/images/poster", tracks[1].mediaMetadata.artworkUri.toString())
+        // In its album's list a track shows its length, under no cover; elsewhere its artist and its album's cover.
+        assertEquals("3:00", tracks[0].mediaMetadata.subtitle.toString())
+        assertNull(tracks[1].mediaMetadata.artworkUri)
+        val inPlaylist = library.children(MusicId.Playlist(7), 0, 50)
+        assertEquals("Harbour Lights", inPlaylist[0].mediaMetadata.subtitle.toString())
+        assertEquals("content://art/api/items/50/images/poster", inPlaylist[0].mediaMetadata.artworkUri.toString())
 
         val selection = library.selection(MusicId.parse(tracks[1].mediaId)!!)!!
         assertEquals(listOf(51L, 52L), selection.tracks.map { it.id })
@@ -178,6 +196,10 @@ class MusicLibraryTest {
 
     private object Look : MusicLibraryLook {
         override val recent = "Recent"
+        override val recentlyPlayed = "Recently played"
+        override val recentlyAdded = "Recently added"
+
+        override fun recentlyAddedIn(library: String) = "Recently added in $library"
         override val artists = "Artists"
         override val playlists = "Playlists"
         override val albums = "Albums"
@@ -185,6 +207,8 @@ class MusicLibraryTest {
         override val shuffle = "Shuffle"
 
         override fun tracks(count: Int) = "$count tracks"
+
+        override fun albums(count: Int) = "$count albums"
 
         override val recentIcon: Uri = Uri.parse("android.resource://pley/drawable/recent")
         override val artistsIcon: Uri = Uri.parse("android.resource://pley/drawable/artists")
@@ -196,7 +220,8 @@ class MusicLibraryTest {
         val libraries = mutableListOf(Library(3, "Music", LibraryKind.Music), Library(9, "Films", LibraryKind.Movies))
         val recent = mutableMapOf(3L to listOf(album(50, "Deep Water"), track(51, 50)))
         val artistPages = mutableListOf<Triple<Long, Int, Int>>()
-        private val artist = ItemSummary(40, 3, ItemKind.Artist, "Harbour Lights", posterUrl = "/api/items/40/images/poster")
+        val played = mutableMapOf<Long, List<ItemSummary>>()
+        private val artist = ItemSummary(40, 3, ItemKind.Artist, "Harbour Lights", posterUrl = "/api/items/40/images/poster", childCount = 2)
         private val albums = listOf(album(50, "Deep Water", year = 2019), album(55, "Second Tide", year = 2023))
         private val tracks = mapOf(50L to listOf(track(51, 50), track(52, 50)), 55L to listOf(track(56, 55)))
         var found: List<ItemSummary> = listOf(artist, albums[0], albums[1], track(51, 50))
@@ -204,6 +229,8 @@ class MusicLibraryTest {
         override suspend fun libraries() = libraries.filter { it.kind == LibraryKind.Music }
 
         override suspend fun recentlyAdded(libraryId: Long) = recent[libraryId].orEmpty()
+
+        override suspend fun recentlyPlayed(libraryId: Long) = played[libraryId].orEmpty()
 
         override suspend fun artists(libraryId: Long, offset: Int, limit: Int): List<ItemSummary> {
             artistPages += Triple(libraryId, offset, limit)

@@ -45,6 +45,10 @@ class MusicLibraryGraph(context: Context, data: DataGraph, network: NetworkGraph
         val res = AppLanguage.resources(app)
         return object : MusicLibraryLook {
             override val recent = res.getString(R.string.music_library_recent)
+            override val recentlyPlayed = res.getString(R.string.music_library_recently_played)
+            override val recentlyAdded = res.getString(R.string.music_library_recently_added)
+
+            override fun recentlyAddedIn(library: String): String = res.getString(R.string.music_library_recently_added_in, library)
             override val artists = res.getString(R.string.music_library_artists)
             override val playlists = res.getString(R.string.music_library_playlists)
             override val albums = res.getString(R.string.music_library_albums)
@@ -52,6 +56,8 @@ class MusicLibraryGraph(context: Context, data: DataGraph, network: NetworkGraph
             override val shuffle = res.getString(R.string.music_library_shuffle)
 
             override fun tracks(count: Int): String = res.getQuantityString(R.plurals.music_library_tracks, count, count)
+
+            override fun albums(count: Int): String = res.getQuantityString(R.plurals.music_library_albums_count, count, count)
 
             override val recentIcon = icon(R.drawable.music_library_recent)
             override val artistsIcon = icon(R.drawable.music_library_artists)
