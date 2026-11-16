@@ -1001,8 +1001,9 @@ to the home server still goes over the Wi-Fi (`LocalRoute`).
 ### Android Auto
 
 On a phone connected to a car with Android Auto, Pley is a music app on
-the car's screen, while driving or parked. The car's screen has three
-tabs:
+the car's screen, and plays videos there while the car is parked.
+
+**Music**, while driving or parked. The car's screen has three tabs:
 
 - **Recent**: the albums added last to each music library, as a grid of
   their covers (under each library's name when there are several).
@@ -1023,9 +1024,23 @@ them and nothing else. Only Android Auto and the Google app, checked by
 the certificate Google signs them with, besides the system's own media
 controls, may browse or play Pley's music.
 
-Android Auto shows a sideloaded app once its developer settings allow
-unknown sources (tap Version ten times in Android Auto's settings, then
-⋮ → Developer settings → Unknown sources).
+**Videos**, while parked, on phones with Android 15 or later where the
+car allows video apps (Google brings them to Android Auto with Android 17
+phones, car by car). Pley opens on the car's screen as on a tablet, and
+movies, episodes and Live TV play there, not on the phone. On the car's
+screen the player keeps the screen's orientation, has no picture in
+picture, and its volume and brightness drags are off (the car has its
+own). As the car moves off, Android Auto covers the window: the video
+pauses at once and its media session goes, so neither the car's buttons
+nor the steering wheel's can play it while driving; a channel is let go.
+Parked again, Play carries on (a channel plays again by itself).
+
+Google Play takes video apps for Android Auto only from its early access
+partners, so only the sideloaded build (`direct`) lists Pley among the
+car's parked apps; the store build has music only. Android Auto shows a
+sideloaded app once its developer settings allow unknown sources (tap
+Version ten times in Android Auto's settings, then ⋮ → Developer
+settings → Unknown sources).
 
 ### Videos on a USB drive
 
@@ -1421,9 +1436,10 @@ base64 -w0 pley-release.keystore   # the ANDROID_KEYSTORE_BASE64 secret
   server's settings, network, transcoder, requests and Live TV to the web
   app.
 - No Watch Next row on phones or Fire TV.
-- Android Auto's Artists tab lists the first 500 artists of a library by
-  name (search finds the others), and its music has no downloads: a car
-  out of signal browses what was last seen and plays nothing new.
+- Android Auto's videos are in the sideloaded build only. Its Artists tab
+  lists the first 500 artists of a library by name (search finds the
+  others), and its music has no downloads: a car out of signal browses
+  what was last seen and plays nothing new.
 - The TV's display mode isn't matched for live channels.
 - Videos on a USB drive are on TVs only. Their display mode isn't
   matched, as their frame rate is known only once they play; HDR10+ shows

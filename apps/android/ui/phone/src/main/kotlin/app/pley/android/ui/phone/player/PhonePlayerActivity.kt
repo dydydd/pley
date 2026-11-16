@@ -70,7 +70,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  *   pause; never while paused;
  * - leaving otherwise pauses, reports and lets go of the decoders, and
  *   the remote isn't obeyed meanwhile; back within 90 s it carries on with
- *   the same server session, later with a new one at the same place.
+ *   the same server session, later with a new one at the same place;
+ * - on a car's screen (Android Auto, parked: [OtherScreen]) it isn't
+ *   turned and doesn't shrink; covered as the car moves off, it pauses and
+ *   its media session goes, so the car's and the steering wheel's buttons
+ *   can't play it while driving; Play starts it again once parked.
  */
 class PhonePlayerActivity : ComponentActivity(), PlayerHost {
     private lateinit var services: PlaybackServices
@@ -84,6 +88,9 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
     private var mediaSession: VideoMediaSession? = null
     private var pipKey: Any? = null
     private var screenOn = false
+
+    /** On a car's screen, or another display: asked each time, as the window can move to the phone's when the car goes. */
+    private val onOtherScreen: Boolean get() = OtherScreen.shows(this)
 
     /** Decoders let go in onStop; prepared again in onStart. */
     private var decodersReleased = false
@@ -110,7 +117,8 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
         PlayerWindows.opened(this)
 
         immersive()
-        if (resources.configuration.smallestScreenWidthDp < TABLET_DP) {
+        // A car's screen keeps its orientation: asking to turn it would letterbox the picture.
+        if (resources.configuration.smallestScreenWidthDp < TABLET_DP && !onOtherScreen) {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         }
         val graph = (application as PleyGraphOwner).screensGraph
@@ -242,6 +250,25 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
         immersive()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Parked again on a car's screen: the media session comes back, paused.
+        val engine = attached
+        if (engine != null && mediaSession == null) mediaSession = VideoMediaSession(this, engine.player).also { it.start() }
+    }
+
+    /**
+     * On a car's screen, covered as the car moves off: the video pauses at
+     * once, and its media session goes, so nothing plays it while driving.
+     */
+    override fun onPause() {
+        super.onPause()
+        if (!onOtherScreen || isFinishing) return
+        controller.value?.pause()
+        mediaSession?.stop()
+        mediaSession = null
+    }
+
     override fun onStop() {
         super.onStop()
         detachEngine()
@@ -286,7 +313,9 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
 
     // ---------------------------------------------------------------- picture in picture
 
-    override val pipSupported: Boolean by lazy { PictureInPicture.allowed(this) }
+    override val pipSupported: Boolean get() = !onOtherScreen && pipAllowed
+
+    private val pipAllowed: Boolean by lazy { PictureInPicture.allowed(this) }
 
     override fun enterPip() {
         if (!pipSupported) return
@@ -352,6 +381,8 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
         val system = runCatching { SystemSettings.System.getInt(contentResolver, SystemSettings.System.SCREEN_BRIGHTNESS) }.getOrDefault(128)
         return (system / 255f).coerceIn(0f, 1f)
     }
+
+    override val levelsDraggable: Boolean get() = !onOtherScreen
 
     /** This window's brightness only: the system's setting is left alone, and comes back on leaving. */
     override fun setBrightness(level: Float) {

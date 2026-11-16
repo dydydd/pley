@@ -43,6 +43,7 @@ import app.pley.android.player.live.LivePhase
 import app.pley.android.player.live.LiveSessionPlayer
 import app.pley.android.screens.livetv.LivePlayerViewModel
 import app.pley.android.screens.PleyGraphOwner
+import app.pley.android.ui.phone.player.OtherScreen
 import app.pley.android.ui.phone.player.PictureInPicture
 import app.pley.android.ui.phone.player.PipActions
 import app.pley.android.ui.phone.remote.CastNotice
@@ -103,7 +104,8 @@ class LivePlayerActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         PlayerWindows.opened(this)
         immersive()
-        if (resources.configuration.smallestScreenWidthDp < TABLET_DP) {
+        // A car's screen keeps its orientation (OtherScreen).
+        if (resources.configuration.smallestScreenWidthDp < TABLET_DP && !onOtherScreen) {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         }
         ContextCompat.registerReceiver(
@@ -173,9 +175,28 @@ class LivePlayerActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        stoppedCovered = false
         vm.resume()
         immersive()
     }
+
+    /** On a car's screen, covered as the car moves off: the channel goes at once, as it does out of sight. */
+    override fun onPause() {
+        super.onPause()
+        if (!onOtherScreen || isFinishing) return
+        vm.stop()
+        stoppedCovered = true
+    }
+
+    /** Parked again: the channel plays again, as it does back in front. */
+    override fun onResume() {
+        super.onResume()
+        if (stoppedCovered) vm.resume()
+        stoppedCovered = false
+    }
+
+    /** Stopped by [onPause] on a car's screen, not yet started again. */
+    private var stoppedCovered = false
 
     override fun onStop() {
         super.onStop()
@@ -193,7 +214,12 @@ class LivePlayerActivity : ComponentActivity() {
 
     // ---------------------------------------------------------------- picture in picture
 
-    private val pipSupported: Boolean by lazy { PictureInPicture.allowed(this) }
+    /** On a car's screen, or another display: asked each time, as the window can move to the phone's when the car goes. */
+    private val onOtherScreen: Boolean get() = OtherScreen.shows(this)
+
+    private val pipSupported: Boolean get() = !onOtherScreen && pipAllowed
+
+    private val pipAllowed: Boolean by lazy { PictureInPicture.allowed(this) }
 
     private fun enterPip() {
         if (!pipSupported) return

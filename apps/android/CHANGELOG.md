@@ -14,6 +14,9 @@ describes how they are made.
   with album covers, search, the whole queue on Now Playing with Shuffle,
   and "Hey Google, play … on Pley". Signed out, the car says to open Pley
   on the phone.
+- Parked, the sideloaded app plays videos and Live TV on the car's screen
+  with Android Auto (Android 15 and later, in cars that allow video
+  apps), pausing as soon as the car moves off.
 
 ### Fixed
 

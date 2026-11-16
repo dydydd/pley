@@ -47,6 +47,9 @@ class PleyApplication : Application(), PleyGraphOwner, PlayerGraphOwner, Downloa
 
     private val windows = AtomicInteger()
 
+    /** The screen the app was last shown on: the players open there. */
+    val shownScreen = ShownScreen()
+
     private lateinit var language: LanguageSync
 
     override fun attachBaseContext(base: Context) {
@@ -72,6 +75,8 @@ class PleyApplication : Application(), PleyGraphOwner, PlayerGraphOwner, Downloa
             if (BuildConfig.DEBUG) watchForSlowCalls()
             // The frame-rate counter's switch, read in the background; off, it only follows the activities.
             FrameRate.watch(this, shells = setOf(TvActivity::class.java, MainActivity::class.java))
+            // Players open where the app is shown: a car's screen with Android Auto.
+            registerActivityLifecycleCallbacks(shownScreen)
             startup = StartupRead.start(this)
             restartDemoServer()
             warmGraph()
