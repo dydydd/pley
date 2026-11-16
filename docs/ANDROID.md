@@ -1033,7 +1033,13 @@ phones, car by car). Pley opens on the car's screen as on a tablet, and
 movies, episodes and Live TV play there, not on the phone. On the car's
 screen the player keeps the screen's orientation, has no picture in
 picture, and its volume and brightness drags are off (the car has its
-own). As the car moves off, Android Auto covers the window: the video
+own). It draws a third larger there, as Google's car app quality
+criteria ask: buttons of 64 dp at least and no text under 24 sp, its
+sheets and messages too, and the controls over the video keep 24 dp
+from each other and from the screen's edges. Play sits between 10 seconds back and 10 seconds
+forward, the seek bar is taller, and the bottom row keeps Subtitles,
+Audio, Fit and Next episode (Quality is in Settings, chapters show on
+the seek bar, and there is no Lock). As the car moves off, Android Auto covers the window: the video
 pauses at once and its media session goes, so neither the car's buttons
 nor the steering wheel's can play it while driving; a channel is let go.
 Parked again, Play carries on (a channel plays again by itself).

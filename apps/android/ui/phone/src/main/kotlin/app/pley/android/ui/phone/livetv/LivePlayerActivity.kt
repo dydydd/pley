@@ -43,6 +43,7 @@ import app.pley.android.player.live.LivePhase
 import app.pley.android.player.live.LiveSessionPlayer
 import app.pley.android.screens.livetv.LivePlayerViewModel
 import app.pley.android.screens.PleyGraphOwner
+import app.pley.android.ui.phone.player.CarSized
 import app.pley.android.ui.phone.player.OtherScreen
 import app.pley.android.ui.phone.player.PictureInPicture
 import app.pley.android.ui.phone.player.PipActions
@@ -122,18 +123,20 @@ class LivePlayerActivity : ComponentActivity() {
         val remote = (application as PleyGraphOwner).screensGraph.data.remote
         setContent {
             PhoneTheme {
-                // Watch on…: the channel goes to the device, and the app's shell says so as this closes.
-                PlayOnWindow(
-                    remote,
-                    onCast = { deviceId, name ->
-                        CastsSent.tell(deviceId, name)
-                        finish()
-                    },
-                ) {
-                    Box(Modifier.fillMaxSize()) {
-                        val small = inPip.value
-                        LivePlayerScreen(vm = vm, onBack = ::finish, inPip = small, onPip = if (pipSupported) ::enterPip else null)
-                        if (!small) CastNotice(cast, Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.safeDrawing).padding(top = 64.dp))
+                CarSized(onOtherScreen) {
+                    // Watch on…: the channel goes to the device, and the app's shell says so as this closes.
+                    PlayOnWindow(
+                        remote,
+                        onCast = { deviceId, name ->
+                            CastsSent.tell(deviceId, name)
+                            finish()
+                        },
+                    ) {
+                        Box(Modifier.fillMaxSize()) {
+                            val small = inPip.value
+                            LivePlayerScreen(vm = vm, onBack = ::finish, inPip = small, onPip = if (pipSupported) ::enterPip else null)
+                            if (!small) CastNotice(cast, Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.safeDrawing).padding(top = 64.dp))
+                        }
                     }
                 }
             }

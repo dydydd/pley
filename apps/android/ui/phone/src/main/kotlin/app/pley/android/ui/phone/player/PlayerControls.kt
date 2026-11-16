@@ -108,15 +108,20 @@ internal fun Scrims(visible: Boolean) {
 /** How much the picture dims behind the controls between the scrim's darker ends. */
 private const val MID_DIM = 0.4f
 
-/** Back (large, as the hybrid player's), the title and the episode, how it plays, then picture in picture and Settings. */
+/**
+ * Back (large, as the hybrid player's), the title and the episode, how it
+ * plays, then picture in picture and Settings. On a car's screen, kept
+ * clear of its edges and without the badge (Settings has Playback details).
+ */
 @Composable
 internal fun TopBar(state: PlayerScreenState, host: PlayerHost, modifier: Modifier = Modifier) {
     PlayerProbe.composed?.invoke("top")
+    val car = LocalCarScreen.current
     Row(
         modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.player)
-            .padding(start = 8.dp, end = 12.dp, top = 8.dp),
+            .padding(start = if (car) CarGap else 8.dp, end = if (car) CarGap else 12.dp, top = if (car) CarGap else 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         BackButton(onClick = host::back)
@@ -139,7 +144,7 @@ internal fun TopBar(state: PlayerScreenState, host: PlayerHost, modifier: Modifi
                 Text(it, style = MaterialTheme.typography.bodySmall, color = PleyColors.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
-        state.method?.let {
+        if (!car) state.method?.let {
             MethodBadge(it, state.playbackMethod) { state.open(SheetPage.Details) }
             Spacer(Modifier.size(4.dp))
         }
@@ -166,7 +171,10 @@ private fun BackButton(onClick: () -> Unit) {
 
 /**
  * Play/Pause, as streaming apps' players draw it: a glyph alone on the
- * dimmed picture. It steps aside for the spinner.
+ * dimmed picture. It steps aside for the spinner. On a car's screen,
+ * between 10 s back and 10 s forward: a seek bar is no place for a
+ * finger reaching across to a dashboard, and double taps are hard to time
+ * there.
  */
 @Composable
 internal fun CentreControls(state: PlayerScreenState, spinning: Boolean, modifier: Modifier = Modifier) {
@@ -174,9 +182,25 @@ internal fun CentreControls(state: PlayerScreenState, spinning: Boolean, modifie
     // The seek preview takes the middle while the seek bar is dragged.
     val scrubbing = state.scrubbing
     val playing = state.playing
-    Box(modifier.size(PlayTarget).graphicsLayer { alpha = if (scrubbing || spinning) 0f else 1f }) {
+    val car = LocalCarScreen.current
+    Row(
+        modifier.graphicsLayer { alpha = if (scrubbing || spinning) 0f else 1f },
+        horizontalArrangement = Arrangement.spacedBy(CarGap * 2),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val step = (PlayerScreenState.SEEK_STEP_MS / 1000).toInt()
+        if (car) {
+            GlyphButton(stringResource(R.string.player_skip_back, step), StepTarget, onClick = { state.seekBy(-PlayerScreenState.SEEK_STEP_MS) }) {
+                Icon(PleyIcons.RotateCcw, contentDescription = null, size = StepGlyph)
+            }
+        }
         GlyphButton(stringResource(if (playing) R.string.player_pause else R.string.player_play), PlayTarget, onClick = state::togglePlay) {
             Icon(if (playing) PleyIcons.Pause else PleyIcons.Play, contentDescription = null, size = PlayGlyph)
+        }
+        if (car) {
+            GlyphButton(stringResource(R.string.player_skip_forward, step), StepTarget, onClick = { state.seekBy(PlayerScreenState.SEEK_STEP_MS) }) {
+                Icon(PleyIcons.RotateCw, contentDescription = null, size = StepGlyph)
+            }
         }
     }
 }
@@ -184,6 +208,10 @@ internal fun CentreControls(state: PlayerScreenState, spinning: Boolean, modifie
 /** The centre's touch target and glyph: 80 dp around 52. */
 private val PlayTarget = 80.dp
 private val PlayGlyph = 52.dp
+
+/** The car's 10 s buttons: 56 dp around 36, 75 and 48 once scaled. */
+private val StepTarget = 56.dp
+private val StepGlyph = 36.dp
 
 /** A [size] round touch target, read out as [label], around its [glyph]. */
 @Composable
@@ -203,16 +231,19 @@ private fun GlyphButton(label: String, size: Dp, onClick: () -> Unit, glyph: @Co
 /**
  * The seek bar with its times, then Subtitles · Audio · Quality · Fit ·
  * Chapters · Lock · Next episode, spread across the width as far as they
- * fit and scrolling when they don't.
+ * fit and scrolling when they don't. On a car's screen, Subtitles · Audio
+ * · Fit · Next episode, kept clear of its edges: Quality is in Settings,
+ * the chapters show on the seek bar, and nothing there needs a lock.
  */
 @Composable
 internal fun BottomBar(state: PlayerScreenState, picture: PictureState, screenAspect: () -> Float, modifier: Modifier = Modifier) {
     PlayerProbe.composed?.invoke("bottom")
+    val car = LocalCarScreen.current
     Column(
         modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.player)
-            .padding(start = 16.dp, end = 16.dp, bottom = 4.dp),
+            .padding(start = if (car) CarGap else 16.dp, end = if (car) CarGap else 16.dp, bottom = if (car) CarGap else 4.dp),
     ) {
         TimesAndSeekBar(state)
         BottomButtons(state, picture, screenAspect)
@@ -228,6 +259,7 @@ internal fun BottomBar(state: PlayerScreenState, picture: PictureState, screenAs
  */
 @Composable
 private fun BottomButtons(state: PlayerScreenState, picture: PictureState, screenAspect: () -> Float) {
+    val car = LocalCarScreen.current
     Box(Modifier.fillMaxWidth().heightIn(min = BarItemHeight)) {
         AnimatedVisibility(state.answered, enter = fadeIn(PleyMotion.reveal()), exit = fadeOut(PleyMotion.reveal())) {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -244,14 +276,14 @@ private fun BottomButtons(state: PlayerScreenState, picture: PictureState, scree
                     if (state.audio.size > 1) {
                         BarItem(PleyIcons.AudioLines, stringResource(R.string.player_audio)) { state.open(SheetPage.Audio) }
                     }
-                    if (state.qualities.isNotEmpty()) {
+                    if (!car && state.qualities.isNotEmpty()) {
                         BarItem(PleyIcons.Gauge, stringResource(R.string.player_quality)) { state.open(SheetPage.Quality) }
                     }
                     FitItem(state, picture, screenAspect)
-                    if (state.chapters.size > 1) {
+                    if (!car && state.chapters.size > 1) {
                         BarItem(PleyIcons.ListOrdered, stringResource(R.string.player_chapters)) { state.open(SheetPage.Chapters) }
                     }
-                    BarItem(PleyIcons.Lock, stringResource(R.string.player_lock), onClick = state::lock)
+                    if (!car) BarItem(PleyIcons.Lock, stringResource(R.string.player_lock), onClick = state::lock)
                     if (state.episode) {
                         BarItem(PleyIcons.SkipForward, stringResource(R.string.player_next_episode)) {
                             state.touched()

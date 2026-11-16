@@ -146,22 +146,24 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
         val settingsFlow: Flow<Settings> = settings?.settings ?: flowOf(Settings())
         setContent {
             PhoneTheme {
-                val current = controller.value
-                val chosen by settingsFlow.collectAsStateWithLifecycle(Settings())
-                if (current == null) {
-                    Box(Modifier.fillMaxSize().background(Color.Black))
-                } else {
-                    key(current) {
-                        PhonePlayerScreen(
-                            controller = current,
-                            host = this@PhonePlayerActivity,
-                            picture = picture,
-                            captions = PlayerLook.captionLook(chosen),
-                            style = PlayerLook.subtitleChoice(chosen),
-                            onStyle = ::chooseStyle,
-                            inPip = inPip.value,
-                            showDetails = chosen.showPlaybackDetails,
-                        )
+                CarSized(onOtherScreen) {
+                    val current = controller.value
+                    val chosen by settingsFlow.collectAsStateWithLifecycle(Settings())
+                    if (current == null) {
+                        Box(Modifier.fillMaxSize().background(Color.Black))
+                    } else {
+                        key(current) {
+                            PhonePlayerScreen(
+                                controller = current,
+                                host = this@PhonePlayerActivity,
+                                picture = picture,
+                                captions = PlayerLook.captionLook(chosen),
+                                style = PlayerLook.subtitleChoice(chosen),
+                                onStyle = ::chooseStyle,
+                                inPip = inPip.value,
+                                showDetails = chosen.showPlaybackDetails,
+                            )
+                        }
                     }
                 }
             }

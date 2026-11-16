@@ -15,6 +15,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.unit.dp
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -609,5 +610,33 @@ class PhonePlayerScreenTest {
 
         assertEquals("compositions while dragging: $during", emptyList<String>(), during.filter { it == "level" })
         assertTrue(host.level > 0.5f)
+    }
+
+    @Test
+    fun onACarsScreenTheControlsAreLargerFewerAndSeekTenSecondsFromTheCentre() {
+        val fake = FakePlaybackController(playing())
+        compose.setContent {
+            PhoneTheme {
+                CarSized(car = true) {
+                    PhonePlayerScreen(fake, host, PictureState(), CaptionLook(), SubtitleChoice(), {}, inPip = false)
+                }
+            }
+        }
+        compose.waitForIdle()
+        // Google's car app quality criteria: touch targets of 64 dp at least, in the screen's own dp (the
+        // nodes' bounds in dp are in the player's, a third larger).
+        fun SemanticsNodeInteraction.screenDp() = with(compose.density) { fetchSemanticsNode().boundsInRoot.let { it.width.toDp() to it.height.toDp() } }
+        for (button in listOf("Back", "Playback settings", "Back 10 seconds", "Forward 10 seconds")) {
+            val (width, height) = compose.onNodeWithContentDescription(button).screenDp()
+            assertTrue("$button: $width × $height", width >= 64.dp && height >= 64.dp)
+        }
+        val (_, subtitles) = compose.onNodeWithText("Subtitles").screenDp()
+        assertTrue("Subtitles: $subtitles", subtitles >= 64.dp)
+        // Quality is in Settings, the chapters show on the seek bar, and nothing in a car needs a lock.
+        for (gone in listOf("Lock", "Quality", "Chapters", "Direct play")) assertEquals(gone, 0, compose.onAllNodesWithTextCount(gone))
+        compose.onNodeWithContentDescription("Forward 10 seconds").performClick()
+        compose.onNodeWithContentDescription("Back 10 seconds").performClick()
+        // From the playhead, which the fake leaves at 0:30.
+        assertEquals(listOf(listOf<Any?>(40_000L), listOf<Any?>(20_000L)), fake.calls("seekTo").map { it.args })
     }
 }

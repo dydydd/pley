@@ -18,7 +18,8 @@ describes how they are made.
   button.
 - Parked, the sideloaded app plays videos and Live TV on the car's screen
   with Android Auto (Android 15 and later, in cars that allow video
-  apps), pausing as soon as the car moves off.
+  apps), with larger controls, 10-second skip buttons, and pausing as
+  soon as the car moves off.
 
 ### Fixed
 
