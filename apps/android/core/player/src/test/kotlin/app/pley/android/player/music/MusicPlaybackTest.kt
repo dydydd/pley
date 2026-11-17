@@ -17,6 +17,7 @@ import app.pley.android.network.ApiException
 import app.pley.android.network.OfflineException
 import app.pley.android.player.EngineSource
 import app.pley.android.player.MusicError
+import app.pley.android.player.MusicRepeat
 import app.pley.android.player.session.SessionReporter
 import app.pley.android.testing.network.FakePleyApi
 import java.io.IOException
@@ -558,6 +559,143 @@ class MusicPlaybackTest {
         assertTrue(queue.shuffle)
         assertEquals(5L, queue.current?.id)
         assertEquals(1, starts().size)
+    }
+
+    @Test
+    fun repeatingTheQueuePlaysItAgainFromItsStartAndNextAndPreviousGoRoundItsEnds() = runTest {
+        val music = music()
+        music.play(album, startIndex = 2)
+        runCurrent()
+        music.setRepeat(MusicRepeat.All)
+        assertEquals(MusicRepeat.All, music.queueState.value.repeat)
+        // The last track has a next one now: the first.
+        assertTrue(music.nowPlaying.value!!.hasNext)
+        output.startPlaying()
+        output.end()
+        settle()
+        assertEquals(listOf(3L, 1L), starts().map { it.itemId })
+        assertFalse(music.nowPlaying.value!!.ended)
+        assertEquals(0, music.nowPlaying.value?.index)
+
+        // Previous on the first track, just started, is the last; Next there, the first again.
+        music.previous()
+        settle()
+        music.next()
+        settle()
+        assertEquals(listOf(3L, 1L, 3L, 1L), starts().map { it.itemId })
+    }
+
+    @Test
+    fun repeatingTheTrackPlaysItAgainWithASessionOfItsOwnAndNextStillMovesOn() = runTest {
+        val music = music()
+        music.play(album)
+        runCurrent()
+        music.setRepeat(MusicRepeat.One)
+        output.startPlaying()
+        output.position = 180_000
+        output.end()
+        settle()
+        // The same track, from its start, in a new session: the one before ended, as any track's does.
+        assertEquals(listOf(1L, 1L), starts().map { it.itemId })
+        assertEquals(1, api.calls("stopPlayback").size)
+        assertEquals(0L, output.startPositions.last())
+        assertEquals(0, music.nowPlaying.value?.index)
+
+        music.next()
+        settle()
+        assertEquals(listOf(1L, 1L, 2L), starts().map { it.itemId })
+    }
+
+    @Test
+    fun repeatIsForgottenWithTheQueueAndKeptAsAnotherAlbumPlays() = runTest {
+        val music = music()
+        music.play(album)
+        runCurrent()
+        music.setRepeat(MusicRepeat.All)
+        music.play(album, startIndex = 1)
+        runCurrent()
+        assertEquals(MusicRepeat.All, music.nowPlaying.value?.repeat)
+
+        music.stop()
+        settle()
+        music.play(album)
+        runCurrent()
+        assertEquals(MusicRepeat.Off, music.nowPlaying.value?.repeat)
+    }
+
+    @Test
+    fun betweenTracksThePositionIsTheNextTracksStartNotWhereTheLastOneWas() = runTest {
+        val music = music()
+        music.play(album)
+        runCurrent()
+        output.startPlaying()
+        output.position = 120_000
+        // The server is still asked for the next track: the output holds the last one, two minutes in.
+        api.hold()
+        music.next()
+        runCurrent()
+        assertEquals(0L, music.position().positionMs)
+        assertEquals(0L, music.position().bufferedMs)
+        assertEquals(180_000L, music.position().durationMs)
+
+        // Previous pressed now goes back to the track left: the one coming hasn't played a second.
+        music.previous()
+        api.release()
+        settle()
+        assertEquals(0, music.nowPlaying.value?.index)
+        assertEquals(1L, starts().last().itemId)
+        assertEquals(0L, output.startPositions.last())
+    }
+
+    @Test
+    fun aTrackThatFailedToStartPlaysFromItsStartNotFromWhereTheLastOneWas() = runTest {
+        val music = music()
+        music.play(album)
+        runCurrent()
+        output.startPlaying()
+        output.position = 120_000
+        api.fail("startPlayback", OfflineException(IOException("refused")))
+        music.next()
+        settle()
+        assertEquals(MusicError.Offline, music.nowPlaying.value?.error)
+
+        api.reset()
+        music.play()
+        settle()
+        val again = starts().single()
+        assertEquals(2L, again.itemId)
+        assertNull(again.startMs)
+        assertEquals(0L, output.startPositions.last())
+    }
+
+    @Test
+    fun playPauseShowsWhatItWillDoWhileATrackStartsAndThroughAPausedSeek() = runTest {
+        val music = music()
+        api.hold()
+        music.play(album)
+        runCurrent()
+        // Starting: it will play, so the button is Pause; pressed, the track will wait.
+        assertTrue(music.nowPlaying.value!!.wantsPlay)
+        music.pause()
+        assertFalse(music.nowPlaying.value!!.wantsPlay)
+        music.play()
+        assertTrue(music.nowPlaying.value!!.wantsPlay)
+        api.release()
+        settle()
+        output.startPlaying()
+        assertTrue(music.nowPlaying.value!!.wantsPlay)
+
+        music.pause()
+        assertFalse(music.nowPlaying.value!!.wantsPlay)
+        // After the queue's end too: Play starts the last track again.
+        music.play()
+        output.startPlaying()
+        music.jumpTo(2)
+        settle()
+        output.startPlaying()
+        output.end()
+        settle()
+        assertFalse(music.nowPlaying.value!!.wantsPlay)
     }
 
     private fun transcodeInfo() = PlaybackInfo(sessionId = "t1", method = PlaybackMethod.Transcode, url = "/api/playback/t1/index.m3u8", hls = true, fileId = 601, durationMs = 180_000)

@@ -1,5 +1,10 @@
 package app.pley.android.ui.phone.music
 
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.semantics.progressBarRangeInfo
@@ -39,8 +44,10 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -64,13 +71,16 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.pley.android.designsystem.PleyColors
+import app.pley.android.designsystem.PleyMotion
 import app.pley.android.designsystem.PleyShape
 import app.pley.android.designsystem.icon.Icon
 import app.pley.android.designsystem.icon.PleyIcons
 import app.pley.android.designsystem.image.Artwork
 import app.pley.android.designsystem.image.ArtworkImage
+import app.pley.android.designsystem.reducedMotion
 import app.pley.android.model.format.formatClockMs
 import app.pley.android.player.MusicError
+import app.pley.android.player.MusicRepeat
 import app.pley.android.player.NowPlaying
 import app.pley.android.screens.PleyKey
 import app.pley.android.player.MusicControl
@@ -82,6 +92,7 @@ import app.pley.android.ui.phone.player.LocalCarScreen
 import app.pley.android.ui.phone.player.SleepNotice
 import app.pley.android.ui.phone.player.onCarScreen
 import androidx.compose.foundation.layout.BoxScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import app.pley.android.screens.music.NowPlayingState
 import app.pley.android.screens.music.NowPlayingViewModel
@@ -95,12 +106,17 @@ import app.pley.android.ui.phone.shell.LocalPhoneNavigator
 /**
  * Now Playing on the phone (design spec §4.10): the art at 80 % of the
  * width over a faint copy of itself, the title, the artist and album, the
- * scrubber with its times, Shuffle, Previous, Play/Pause, Next, and the
- * queue in a sheet; the sleep timer at the top right. In a short, wide
- * window (a phone on its side, a car's screen) the art sits beside the
- * title, as Android Auto's own Now Playing has it, over the scrubber and
- * the controls, so all of it shows. On a car's screen it is car-sized
- * ([CarSized]): 64 dp buttons and no text under 24 sp.
+ * scrubber with its times, and Shuffle, Previous, Play/Pause, Next and
+ * Repeat; the queue, in a sheet, and the sleep timer at the top right. In
+ * a short, wide window (a phone on its side, a car's screen) the art sits
+ * beside the title, as Android Auto's own Now Playing has it, over the
+ * scrubber and the controls, so all of it shows. On a car's screen it is
+ * car-sized ([CarSized]): 64 dp buttons and no text under 24 sp.
+ *
+ * A change of track moves, it doesn't blink: the cover stays until the
+ * next one fades in over it ([TrackArt]), the title and artist give way to
+ * the next track's ([TrackChange]), the scrubber's thumb runs back to the
+ * start, and "Loading…" shows only for a track that takes a while.
  */
 @Composable
 internal fun NowPlayingScreen(car: Boolean = onCarScreen()) {
@@ -120,20 +136,19 @@ private fun NowPlayingPage() {
     val sleep by (music?.sleep ?: noSleep).collectAsStateWithLifecycle()
     Box(Modifier.fillMaxSize().background(PleyColors.Bg).testTag(NOW_PLAYING_PAGE)) {
         // The art, faint and unblurred, fading into the page.
-        if (art != null) {
-            Artwork(
-                art,
-                now?.title.orEmpty(),
-                Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1f)
-                    .graphicsLayer { alpha = BACKDROP_ALPHA }
-                    .drawWithContent {
-                        drawContent()
-                        drawRect(Brush.verticalGradient(0.3f to Color.Transparent, 1f to PleyColors.Bg))
-                    },
-            )
-        }
+        TrackArt(
+            art,
+            now?.title.orEmpty(),
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .graphicsLayer { alpha = BACKDROP_ALPHA }
+                .drawWithContent {
+                    drawContent()
+                    drawRect(Brush.verticalGradient(0.3f to Color.Transparent, 1f to PleyColors.Bg))
+                },
+            placeholder = false,
+        )
         Column(
             Modifier
                 .fillMaxSize()
@@ -148,6 +163,8 @@ private fun NowPlayingPage() {
                 if (car) {
                     Spacer(Modifier.weight(1f))
                 } else {
+                    // As much room on the label's left as the two buttons take on its right: it stays centred.
+                    if (now != null) Spacer(Modifier.width(48.dp))
                     Text(
                         stringResource(R.string.music_now_playing),
                         style = MaterialTheme.typography.labelLarge,
@@ -155,6 +172,10 @@ private fun NowPlayingPage() {
                         textAlign = TextAlign.Center,
                         modifier = Modifier.weight(1f).semantics { heading() },
                     )
+                }
+                if (now != null) {
+                    PleyIconButton(PleyIcons.ListMusic, stringResource(R.string.music_queue), onClick = { queue = true }, tint = PleyColors.Muted)
+                    if (car) Spacer(Modifier.width(CarGap))
                 }
                 if (music != null && now != null) MusicSleepButton(sleep, music) else Spacer(Modifier.width(48.dp))
             }
@@ -169,7 +190,7 @@ private fun NowPlayingPage() {
             BoxWithConstraints(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                 val onAlbum = now.albumId?.let { id -> { navigator.open(PleyKey.Album(id, now.itemId)) } }
                 if (maxWidth > maxHeight && maxHeight < WIDE_BELOW) {
-                    WideNowPlaying(now, art, model, onAlbum, onQueue = { queue = true })
+                    WideNowPlaying(now, art, model, onAlbum)
                 } else {
                     Column(
                         Modifier.fillMaxHeight().widthIn(max = 520.dp).padding(horizontal = 24.dp),
@@ -183,11 +204,11 @@ private fun NowPlayingPage() {
                                 .clip(PleyShape.Card)
                                 .background(PleyColors.Surface2),
                         ) {
-                            Artwork(art, now.album ?: now.title, Modifier.matchParentSize())
+                            TrackArt(art, now.album ?: now.title, Modifier.matchParentSize())
                         }
                         TrackTitle(now, onAlbum, Modifier.fillMaxWidth(), centred = true)
                         Scrubber(now, model)
-                        Controls(now, model, onQueue = { queue = true })
+                        Controls(now, model)
                     }
                 }
             }
@@ -202,7 +223,7 @@ private fun NowPlayingPage() {
  * scrubber and the controls across the width (no wider than a phone's).
  */
 @Composable
-private fun WideNowPlaying(now: NowPlaying, art: ArtworkImage?, model: NowPlayingViewModel, onAlbum: (() -> Unit)?, onQueue: () -> Unit) {
+private fun WideNowPlaying(now: NowPlaying, art: ArtworkImage?, model: NowPlayingViewModel, onAlbum: (() -> Unit)?) {
     Column(
         Modifier
             .fillMaxHeight()
@@ -219,39 +240,44 @@ private fun WideNowPlaying(now: NowPlaying, art: ArtworkImage?, model: NowPlayin
                     .clip(PleyShape.Card)
                     .background(PleyColors.Surface2),
             ) {
-                Artwork(art, now.album ?: now.title, Modifier.matchParentSize())
+                TrackArt(art, now.album ?: now.title, Modifier.matchParentSize())
             }
             Spacer(Modifier.width(24.dp))
             TrackTitle(now, onAlbum, Modifier.weight(1f), centred = false)
         }
         Scrubber(now, model, inline = true)
-        Controls(now, model, onQueue = onQueue)
+        Controls(now, model)
     }
 }
 
-/** The title, "Artist · Album" (which opens the album), and the status line. */
+/** The title, "Artist · Album" (which opens the album), and the status line; the first two change with the track. */
 @Composable
 private fun TrackTitle(now: NowPlaying, onAlbum: (() -> Unit)?, modifier: Modifier, centred: Boolean) {
     val align = if (centred) TextAlign.Center else TextAlign.Start
-    Column(modifier, horizontalAlignment = if (centred) Alignment.CenterHorizontally else Alignment.Start) {
-        Text(
-            now.title,
-            style = MaterialTheme.typography.headlineSmall,
-            color = PleyColors.Fg,
-            textAlign = align,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            now.byline,
-            style = MaterialTheme.typography.bodyLarge,
-            color = PleyColors.Muted,
-            textAlign = align,
-            maxLines = if (centred) 1 else 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = onAlbum?.let { Modifier.clickable(role = Role.Button, onClick = it) } ?: Modifier,
-        )
+    val across = if (centred) Alignment.CenterHorizontally else Alignment.Start
+    Column(modifier, horizontalAlignment = across) {
+        TrackChange(trackWords(now), Modifier.fillMaxWidth(), if (centred) Alignment.TopCenter else Alignment.TopStart) { words ->
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = across) {
+                Text(
+                    words.title,
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = PleyColors.Fg,
+                    textAlign = align,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    words.byline,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = PleyColors.Muted,
+                    textAlign = align,
+                    maxLines = if (centred) 1 else 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = onAlbum?.let { Modifier.clickable(role = Role.Button, onClick = it) } ?: Modifier,
+                )
+            }
+        }
         // Beside the art, the block centres on it: a line kept for a status to come would lift it.
         StatusLine(now, keepRoom = centred)
     }
@@ -264,21 +290,35 @@ private fun BoxScope.MusicSleepNotice(sleep: SleepState, music: MusicControl?) {
     SleepNotice(sleep.secondsLeft, music = true, onKeep = music::keepListening, modifier = Modifier.padding(top = 52.dp))
 }
 
-/** Loading or failing: one line under the byline, its room kept while there is none when [keepRoom]. */
+/**
+ * Loading or failing: one line under the byline, its room kept while there
+ * is none when [keepRoom]. A track says it loads only once it has for
+ * [LOADING_AFTER_MS]: most start sooner, and the line would blink at every
+ * change of track.
+ */
 @Composable
 private fun StatusLine(now: NowPlaying, keepRoom: Boolean = true) {
+    val slow by produceState(false, now.loading, now.itemId, now.index) {
+        value = false
+        if (now.loading) {
+            delay(LOADING_AFTER_MS)
+            value = true
+        }
+    }
     val text = when {
         now.error == MusicError.Offline -> stringResource(R.string.music_error_offline)
         now.error == MusicError.SignedOut -> stringResource(R.string.music_error_signed_out)
         now.error == MusicError.Stopped -> stringResource(R.string.music_error_stopped)
         now.error != null -> stringResource(R.string.music_error_unplayable)
-        now.loading -> stringResource(R.string.music_loading)
+        now.loading && slow -> stringResource(R.string.music_loading)
         else -> null
     }
     if (text == null && !keepRoom) return
     Box(Modifier.heightIn(min = 24.dp).padding(top = 6.dp)) {
-        if (text != null) {
-            Text(text, style = MaterialTheme.typography.bodySmall, color = if (now.error != null) PleyColors.DangerText else PleyColors.Subtle)
+        Crossfade(text to (now.error != null), animationSpec = PleyMotion.reveal(), label = "status") { (words, failed) ->
+            if (words != null) {
+                Text(words, style = MaterialTheme.typography.bodySmall, color = if (failed) PleyColors.DangerText else PleyColors.Subtle)
+            }
         }
     }
 }
@@ -287,18 +327,42 @@ private fun StatusLine(now: NowPlaying, keepRoom: Boolean = true) {
  * The scrubber and its times; it follows the track, or the finger while
  * dragged. [inline] puts the times either side of it, on one 48 dp row
  * (64 on a car's screen), where a short window has no room for two.
+ *
+ * The thumb glides from one reading of the position to the next while the
+ * track plays, and runs to where a seek or another track puts it (at once
+ * with reduced motion). A seek shows where it went as it is made, paused
+ * too: the position is read again then, not at the next reading.
  */
 @Composable
 private fun Scrubber(now: NowPlaying, model: NowPlayingViewModel, inline: Boolean = false) {
     val car = LocalCarScreen.current
-    val position by rememberMusicPosition(model::position, now.playing, key = now.itemId to now.index)
+    val playingTrack = now.itemId to now.index
+    val reading = rememberMusicPosition(model::position, now.playing, key = playingTrack)
+    val position = reading.value
     var dragging by remember { mutableStateOf<Float?>(null) }
     val duration = position.durationMs.takeIf { it > 0 } ?: now.durationMs
-    val fraction = dragging ?: if (duration > 0) (position.positionMs.toFloat() / duration).coerceIn(0f, 1f) else 0f
+    val played = if (duration > 0) (position.positionMs.toFloat() / duration).coerceIn(0f, 1f) else 0f
+    val fraction = dragging ?: played
     val shownMs = (fraction * duration).toLong()
     val scrubberLabel = stringResource(R.string.music_position)
     val enabled = duration > 0 && now.error == null
     val buffered = if (duration > 0) (position.bufferedMs.toFloat() / duration).coerceIn(0f, 1f) else 0f
+    val seek: (Float) -> Unit = { to ->
+        model.seekTo((to.coerceIn(0f, 1f) * duration).toLong())
+        reading.refresh()
+    }
+    val reduced = reducedMotion()
+    val thumbAt = remember { Animatable(played) }
+    LaunchedEffect(played, now.playing, playingTrack, reduced) {
+        val step = played - thumbAt.value
+        when {
+            reduced -> thumbAt.snapTo(played)
+            // Playing on: from one reading to the next, in the time between them.
+            now.playing && step > 0f && step * duration <= 2 * POSITION_EVERY_MS -> thumbAt.animateTo(played, tween(POSITION_EVERY_MS.toInt(), easing = LinearEasing))
+            // A seek, or another track.
+            else -> thumbAt.animateTo(played, tween(PleyMotion.OVERLAY_MS, easing = PleyMotion.EaseOut))
+        }
+    }
     // The phone's scrubber (design spec §3.5): a 4 dp track, accent played, a 16 dp accent thumb that grows to 24 while
     // dragged; on a car's screen, 6 dp, 21 and 27 (8, 28 and 36 there).
     val trackHeight = if (car) 6.dp else 4.dp
@@ -311,21 +375,21 @@ private fun Scrubber(now: NowPlaying, model: NowPlayingViewModel, inline: Boolea
             progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
             if (enabled) {
                 setProgress { target ->
-                    model.seekTo((target.coerceIn(0f, 1f) * duration).toLong())
+                    seek(target)
                     true
                 }
             }
         }
         .pointerInput(enabled, duration) {
             if (!enabled) return@pointerInput
-            detectTapGestures { offset -> model.seekTo(((offset.x / size.width).coerceIn(0f, 1f) * duration).toLong()) }
+            detectTapGestures { offset -> seek(offset.x / size.width) }
         }
         .pointerInput(enabled, duration) {
             if (!enabled) return@pointerInput
             detectHorizontalDragGestures(
                 onDragStart = { offset -> dragging = (offset.x / size.width).coerceIn(0f, 1f) },
                 onDragEnd = {
-                    dragging?.let { model.seekTo((it * duration).toLong()) }
+                    dragging?.let(seek)
                     dragging = null
                 },
                 onDragCancel = { dragging = null },
@@ -337,9 +401,11 @@ private fun Scrubber(now: NowPlaying, model: NowPlayingViewModel, inline: Boolea
             val r = CornerRadius(h / 2f, h / 2f)
             drawRoundRect(PleyColors.Fg.copy(alpha = 0.25f), Offset(0f, y - h / 2f), Size(size.width, h), r)
             drawRoundRect(PleyColors.Fg.copy(alpha = 0.45f), Offset(0f, y - h / 2f), Size(size.width * buffered, h), r)
-            drawRoundRect(if (enabled) PleyColors.Accent else PleyColors.Disabled, Offset(0f, y - h / 2f), Size(size.width * fraction, h), r)
+            // Under the finger while dragged, else where the thumb has glided to.
+            val at = dragging ?: thumbAt.value
+            drawRoundRect(if (enabled) PleyColors.Accent else PleyColors.Disabled, Offset(0f, y - h / 2f), Size(size.width * at, h), r)
             val thumb = (if (dragging != null) thumbDragged else thumbSize).toPx() / 2f
-            drawCircle(if (enabled) PleyColors.Accent else PleyColors.Disabled, thumb, Offset((size.width * fraction).coerceIn(thumb, size.width - thumb), y))
+            drawCircle(if (enabled) PleyColors.Accent else PleyColors.Disabled, thumb, Offset((size.width * at).coerceIn(thumb, size.width - thumb), y))
         }
     val elapsed = formatClockMs(shownMs)
     val left = "−" + formatClockMs((duration - shownMs).coerceAtLeast(0))
@@ -363,17 +429,19 @@ private fun Scrubber(now: NowPlaying, model: NowPlayingViewModel, inline: Boolea
     }
 }
 
+/** Shuffle, Previous, Play/Pause, Next and Repeat, Play the largest, in the middle. */
 @Composable
-private fun Controls(now: NowPlaying, model: NowPlayingViewModel, onQueue: () -> Unit) {
+private fun Controls(now: NowPlaying, model: NowPlayingViewModel) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        PleyIconButton(
+        ModeButton(
             PleyIcons.Shuffle,
             stringResource(if (now.shuffle) R.string.music_shuffle_off else R.string.music_shuffle_on),
+            on = now.shuffle,
             onClick = { model.setShuffle(!now.shuffle) },
-            tint = if (now.shuffle) PleyColors.Accent else PleyColors.Muted,
         )
         SkipButton(PleyIcons.SkipBack, stringResource(R.string.music_previous), onClick = model::previous)
-        val playing = now.playing || (now.loading && now.error == null)
+        // What it will do, a track still starting too; paused, it stays Play through a seek's loading.
+        val playing = now.wantsPlay
         val label = stringResource(if (playing) R.string.music_pause else R.string.music_play)
         Box(
             Modifier
@@ -384,11 +452,29 @@ private fun Controls(now: NowPlaying, model: NowPlayingViewModel, onQueue: () ->
                 .semantics { contentDescription = label },
             contentAlignment = Alignment.Center,
         ) {
-            Icon(if (playing) PleyIcons.Pause else PleyIcons.Play, contentDescription = null, size = 32.dp, tint = PleyColors.OnAccent)
+            PlayPauseGlyph(playing, size = 32.dp, tint = PleyColors.OnAccent)
         }
         SkipButton(PleyIcons.SkipForward, stringResource(R.string.music_next), onClick = model::next, enabled = now.hasNext)
-        PleyIconButton(PleyIcons.ListMusic, stringResource(R.string.music_queue), onClick = onQueue, tint = PleyColors.Muted)
+        ModeButton(
+            if (now.repeat == MusicRepeat.One) PleyIcons.Repeat1 else PleyIcons.Repeat,
+            stringResource(
+                when (now.repeat) {
+                    MusicRepeat.Off -> R.string.music_repeat_on
+                    MusicRepeat.All -> R.string.music_repeat_one
+                    MusicRepeat.One -> R.string.music_repeat_off
+                },
+            ),
+            on = now.repeat != MusicRepeat.Off,
+            onClick = { model.setRepeat(now.repeat.next) },
+        )
     }
+}
+
+/** Shuffle or Repeat: in accent while [on], named for what a press does. */
+@Composable
+private fun ModeButton(icon: PleyIcon, label: String, on: Boolean, onClick: () -> Unit) {
+    val tint by animateColorAsState(if (on) PleyColors.Accent else PleyColors.Muted, PleyMotion.reveal(), label = "mode")
+    PleyIconButton(icon, label, onClick = onClick, tint = tint)
 }
 
 /** Previous or Next: an icon button, its glyph larger on a car's screen, where it sits beside a 96 dp Play. */
@@ -465,6 +551,9 @@ private val WIDE_BELOW = 560.dp
 
 /** The widest a wide window's controls spread. */
 private val WIDE_MAX = 640.dp
+
+/** A track loading this long says so. */
+private const val LOADING_AFTER_MS = 700L
 
 /** The art's share of the width. */
 private const val ART_SHARE = 0.8f

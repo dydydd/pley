@@ -5,32 +5,41 @@ import androidx.media3.common.C
 import androidx.media3.common.ForwardingSimpleBasePlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import app.pley.android.model.ItemSummary
+import app.pley.android.player.MusicError
+import app.pley.android.player.MusicRepeat
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import kotlin.math.abs
 
 /**
  * The player the media session shows (notification, lock screen, the
  * system's media controls, Bluetooth buttons, Android Auto): the output's
  * one-track player, shown as [playback]'s whole queue, so a car lists
  * what comes next and picks from it. Play, Pause, Previous, Next, a pick
- * from the queue and Shuffle go through [playback]: after the queue's
- * end, Play starts its last track again. What a car asks to play is
- * started by the session's callback (MusicService), so items set here
+ * from the queue, Shuffle and Repeat go through [playback]: after the
+ * queue's end, Play starts its last track again. What a car asks to play
+ * is started by the session's callback (MusicService), so items set here
  * change nothing; nor can the queue be edited from outside.
  *
- * [describe] gives a track of the queue its title, artist, album and
- * art, as the car lists it. Call [queueChanged] when [playback]'s queue
- * changes.
+ * A track is the same entry from the moment it is the queue's until the
+ * next one is: its name, art and id as [describe] gives them, whether the
+ * output still asks the server for it, loads it or plays it. A car draws
+ * what plays again each time the entry changes, so one that changed as
+ * the track loaded, and again as its art came, flickered at every skip.
+ * [words] says why a track doesn't play, in the language shown. Call
+ * [queueChanged] when [playback]'s queue changes.
  */
 @OptIn(markerClass = [UnstableApi::class])
 internal class QueuePlayer(
     player: Player,
     private val playback: MusicPlayback,
     private val describe: (track: ItemSummary) -> MediaItem = { plainItem(it) },
+    private val words: (MusicError) -> String = { it.name },
 ) : ForwardingSimpleBasePlayer(player) {
     /** Shows [playback]'s queue as it is now. */
     fun queueChanged() = invalidateState()
@@ -42,7 +51,7 @@ internal class QueuePlayer(
         val state = base.buildUpon()
             .setAvailableCommands(commands)
             .setShuffleModeEnabled(queue.shuffle)
-            .setRepeatMode(Player.REPEAT_MODE_OFF)
+            .setRepeatMode(repeatModeOf(queue.repeat))
         if (queue.tracks.isEmpty()) return state.build()
         val index = base.currentMediaItemIndex
         val window = if (!base.timeline.isEmpty && index in 0 until base.timeline.windowCount) base.timeline.getWindow(index, Timeline.Window()) else null
@@ -51,36 +60,75 @@ internal class QueuePlayer(
         val loaded = window != null && current != null && window.mediaItem.mediaMetadata.extras?.getLong(EngineMusicOutput.TRACK_ID, -1) == current.id
         val playlist = queue.tracks.mapIndexed { i, track ->
             val item = describe(track)
+            val listed = track.durationMs?.takeIf { it > 0 }?.let { it * 1000 } ?: C.TIME_UNSET
             val data = MediaItemData.Builder(Uid(i, track.id))
             if (i == queue.index && loaded && window != null) {
-                // The track the output plays: its own item, duration and tracks, with the art's address for cars.
-                val metadata = base.currentMetadata.buildUpon().setArtworkUri(item.mediaMetadata.artworkUri).build()
-                data.setMediaItem(window.mediaItem.buildUpon().setMediaId(item.mediaId).setMediaMetadata(metadata).build())
+                // The track the output plays: the entry it had while it loaded, with the output's tracks, and its length
+                // only where the library's is none or wrong (never none: a car would take its progress bar away).
+                val metadata = withArt(item.mediaMetadata, base.currentMetadata)
+                data.setMediaItem(item.buildUpon().setMediaMetadata(metadata).build())
+                    // Said outright: left out, the file's own tags (a cover inside it too) would be mixed in as they are read.
                     .setMediaMetadata(metadata)
                     .setTracks(base.currentTracks)
-                    .setDurationUs(window.durationUs)
+                    .setDurationUs(lengthOf(window.durationUs, listed))
                     .setIsSeekable(window.isSeekable)
                     .setDefaultPositionUs(window.defaultPositionUs)
             } else {
                 // Another track, or the current one while it loads.
-                data.setMediaItem(item).setDurationUs(track.durationMs?.takeIf { it > 0 }?.let { it * 1000 } ?: C.TIME_UNSET)
+                data.setMediaItem(item).setMediaMetadata(item.mediaMetadata).setDurationUs(listed)
             }
             data.build()
         }
         state.setPlaylist(playlist).setCurrentMediaItemIndex(queue.index.coerceIn(0, playlist.lastIndex))
+        val now = playback.nowPlaying.value ?: return state.build()
+        val failed = now.error
+        if (failed != null) {
+            // A track that failed for good says why in Pley's words, also when no player failed (the server out of
+            // reach as the track was asked for), where the session would say nothing plays and nothing is wrong.
+            state.setPlaybackState(Player.STATE_IDLE)
+                .setIsLoading(false)
+                .setPlayerError(PlaybackException(words(failed), null, errorCodeOf(failed)))
+                .setPlayWhenReady(false, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+            if (!loaded) state.setContentPositionMs(0)
+            return state.build()
+        }
         // Between tracks, and while a failed one is tried again, the output has nothing loaded, or an error: the session
         // says the queue's track is loading, playing as it will, so a car doesn't show its own loading screen for nothing
-        // playing at each change. A track that failed for good says so.
-        val now = playback.nowPlaying.value
-        val starting = now != null && now.error == null && (now.loading || !loaded || base.playerError != null)
-        if (starting && now != null) {
+        // playing at each change.
+        val starting = !now.ended && (now.loading || !loaded || base.playerError != null)
+        if (starting) {
             state.setPlaybackState(Player.STATE_BUFFERING)
                 .setPlayerError(null)
                 // Playing as it will: the output's own state between tracks (stopped, buffering) isn't a pause.
-                .setPlayWhenReady(now.playing || (if (loaded) now.loading else playback.startsPlaying), Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+                .setPlayWhenReady(now.wantsPlay, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
             if (!loaded) state.setContentPositionMs(0)
         }
         return state.build()
+    }
+
+    /**
+     * [listed], the entry's name and art as the queue lists it, with the
+     * cover the output fetched ([playing]'s) when the entry names none by
+     * address: a session without a library to read covers from.
+     */
+    private fun withArt(listed: MediaMetadata, playing: MediaMetadata): MediaMetadata {
+        val cover = playing.artworkData
+        if (listed.artworkUri != null || listed.artworkData != null || cover == null) return listed
+        return listed.buildUpon().setArtworkData(cover, playing.artworkDataType).build()
+    }
+
+    /**
+     * The length of the track the output plays: the one the queue [listed]
+     * it with, unless the output knows a length that differs by more than
+     * [LENGTH_SLACK_US] (or the library knows none). The two rarely agree
+     * to the millisecond, and a car draws Now Playing again when the length
+     * changes: the entry would change at every track as it starts.
+     */
+    private fun lengthOf(outputUs: Long, listed: Long): Long = when {
+        outputUs == C.TIME_UNSET -> listed
+        listed == C.TIME_UNSET -> outputUs
+        abs(outputUs - listed) <= LENGTH_SLACK_US -> listed
+        else -> outputUs
     }
 
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
@@ -106,6 +154,11 @@ internal class QueuePlayer(
         return Futures.immediateVoidFuture()
     }
 
+    override fun handleSetRepeatMode(repeatMode: Int): ListenableFuture<*> {
+        playback.setRepeat(repeatOf(repeatMode))
+        return Futures.immediateVoidFuture()
+    }
+
     override fun handleStop(): ListenableFuture<*> {
         playback.stop()
         return Futures.immediateVoidFuture()
@@ -124,8 +177,6 @@ internal class QueuePlayer(
 
     override fun handleReplaceMediaItems(fromIndex: Int, toIndex: Int, mediaItems: List<MediaItem>): ListenableFuture<*> = Futures.immediateVoidFuture()
 
-    override fun handleSetRepeatMode(repeatMode: Int): ListenableFuture<*> = Futures.immediateVoidFuture()
-
     /** A queue entry: the same track can be in the queue twice. */
     private data class Uid(val position: Int, val trackId: Long)
 
@@ -141,6 +192,7 @@ internal class QueuePlayer(
             Player.COMMAND_SEEK_TO_MEDIA_ITEM,
             Player.COMMAND_SEEK_TO_DEFAULT_POSITION,
             Player.COMMAND_SET_SHUFFLE_MODE,
+            Player.COMMAND_SET_REPEAT_MODE,
             Player.COMMAND_GET_TIMELINE,
             Player.COMMAND_GET_CURRENT_MEDIA_ITEM,
             Player.COMMAND_GET_METADATA,
@@ -149,8 +201,31 @@ internal class QueuePlayer(
             Player.COMMAND_CHANGE_MEDIA_ITEMS,
         )
 
-        /** The queue plays once, at its speed. */
-        private val NOT_OURS = intArrayOf(Player.COMMAND_SET_REPEAT_MODE, Player.COMMAND_SET_SPEED_AND_PITCH)
+        /** How far the output's length may be from the library's and the library's still stand ([lengthOf]). */
+        private const val LENGTH_SLACK_US = 2_000_000L
+
+        /** The queue plays at its speed. */
+        private val NOT_OURS = intArrayOf(Player.COMMAND_SET_SPEED_AND_PITCH)
+
+        fun repeatModeOf(repeat: MusicRepeat): Int = when (repeat) {
+            MusicRepeat.Off -> Player.REPEAT_MODE_OFF
+            MusicRepeat.All -> Player.REPEAT_MODE_ALL
+            MusicRepeat.One -> Player.REPEAT_MODE_ONE
+        }
+
+        fun repeatOf(@Player.RepeatMode mode: Int): MusicRepeat = when (mode) {
+            Player.REPEAT_MODE_ALL -> MusicRepeat.All
+            Player.REPEAT_MODE_ONE -> MusicRepeat.One
+            else -> MusicRepeat.Off
+        }
+
+        /** [error] as a session's controllers know errors. */
+        private fun errorCodeOf(error: MusicError): Int = when (error) {
+            MusicError.SignedOut -> PlaybackException.ERROR_CODE_AUTHENTICATION_EXPIRED
+            MusicError.Offline -> PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+            MusicError.Unplayable -> PlaybackException.ERROR_CODE_IO_UNSPECIFIED
+            MusicError.Stopped -> PlaybackException.ERROR_CODE_REMOTE_ERROR
+        }
 
         /** A track with its title, artist and album only. */
         fun plainItem(track: ItemSummary): MediaItem = MediaItem.Builder()

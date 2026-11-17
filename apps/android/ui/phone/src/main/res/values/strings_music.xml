@@ -27,6 +27,10 @@
     <string name="music_previous">Previous</string>
     <string name="music_shuffle_on">Shuffle</string>
     <string name="music_shuffle_off">Stop shuffling</string>
+    <!-- Repeat's button, named for what a press does: the queue repeats, then the track, then nothing. -->
+    <string name="music_repeat_on">Repeat</string>
+    <string name="music_repeat_one">Repeat this track</string>
+    <string name="music_repeat_off">Stop repeating</string>
     <string name="music_position">Position in the track</string>
     <string name="music_loading">Loading…</string>
     <string name="music_nothing_playing">Nothing is playing</string>

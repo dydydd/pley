@@ -14,6 +14,8 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSourceBitmapLoader
+import androidx.media3.session.CacheBitmapLoader
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaConstants
@@ -26,8 +28,12 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
 import app.pley.android.common.AppLanguage
+import app.pley.android.model.ItemSummary
 import app.pley.android.model.LiveChannel
 import app.pley.android.network.OfflineException
+import app.pley.android.player.MusicError
+import app.pley.android.player.MusicQueueState
+import app.pley.android.player.MusicRepeat
 import app.pley.android.player.PlayerGraphOwner
 import app.pley.android.player.R
 import app.pley.android.player.music.library.MusicArt
@@ -36,6 +42,7 @@ import app.pley.android.player.music.library.MusicId
 import app.pley.android.player.music.library.MusicLibrary
 import app.pley.android.player.music.library.MusicLibraryGraph
 import app.pley.android.player.music.library.MusicSelection
+import app.pley.android.player.music.library.SessionArt
 import app.pley.android.player.music.library.SignedOutException
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
@@ -61,8 +68,11 @@ import kotlinx.coroutines.launch
  *
  * Android Auto browses and plays Pley's music through it, as does the
  * Google app's Assistant ("play … on Pley"): the [MusicLibrary] (Recent,
- * Artists, Playlists, search), its pictures read through [MusicArt]. Signed
- * out, the car says so and opens Pley on the phone. A Live TV channel
+ * Artists, Playlists, search), its pictures read through [MusicArt]. Now
+ * Playing has Shuffle and Repeat beside Previous, Play and Next, as the
+ * phone's media controls do, and the cover of what plays comes with the
+ * track ([SessionArt]). Signed out, the car says so and opens Pley on the
+ * phone; a track that can't play says why. A Live TV channel
  * picked in the car plays its sound as radio ([LiveRadio]), the session
  * showing it until music plays again; the last car gone, the radio stops.
  *
@@ -112,29 +122,41 @@ class MusicService : MediaLibraryService() {
         graph?.music
         val playback = MusicHub.playback ?: return null
         val queue = queuePlayer(playback, graph?.musicLibrary?.library) ?: return null
+        val covers = graph?.musicLibrary?.let { library ->
+            SessionArt(scope, { MusicArt.pathOf(this, it) }, library::picture, CacheBitmapLoader(DataSourceBitmapLoader(this)))
+        }
         val made = MediaLibrarySession.Builder(this, queue, Callback(playback, graph?.musicLibrary))
             .setId(SESSION_ID)
             .apply { openApp()?.let(::setSessionActivity) }
+            .apply { covers?.let(::setBitmapLoader) }
             .build()
         session = made
         player = queue
         // The phone's own media controls show the covers the session names, read from the app as the car's are.
         grantArt(SYSTEM_UI)
         following = scope.launch {
-            launch { playback.queueState.collect { player?.queueChanged() } }
+            launch {
+                playback.queueState.collect { queue ->
+                    // The covers of the tracks either side are read before the session is told of this one: Next and
+                    // Previous then show theirs at once.
+                    graph?.musicLibrary?.library?.let { covers?.warm(coversAround(queue, it)) }
+                    player?.queueChanged()
+                }
+            }
             // A track starting, failing or loaded changes what the session says plays.
             launch { playback.nowPlaying.collect { player?.queueChanged() } }
-            // Shuffle's button shows whether it is on, as the queue changes from anywhere.
+            // Shuffle's and Repeat's buttons show what they are set to, as the queue changes from anywhere.
             launch {
-                playback.queueState.map { it.shuffle }.distinctUntilChanged().drop(1).collect {
-                    // The radio has no Shuffle: the music's comes back with the music (showMusic).
-                    if (radio?.active != true) made.setMediaButtonPreferences(buttons(it))
+                playback.queueState.map { it.shuffle to it.repeat }.distinctUntilChanged().drop(1).collect {
+                    // The radio has neither: the music's come back with the music (showMusic).
+                    if (radio?.active != true) made.setMediaButtonPreferences(buttons(playback.queueState.value))
                 }
             }
             // Signed out or another profile: the radio (the last profile's Live TV) stops, and cars read the library again.
             graph?.musicLibrary?.let { library ->
                 launch {
                     library.profileChanges.drop(1).collect { profile ->
+                        covers?.clear()
                         showMusic(made, playback, library.library)
                         tellCars(made, signedIn = profile != null)
                     }
@@ -159,7 +181,10 @@ class MusicService : MediaLibraryService() {
     private fun queuePlayer(playback: MusicPlayback, library: MusicLibrary?): QueuePlayer? {
         val output = playback.output() as? EngineMusicOutput ?: return null
         made?.let { (over, player) -> if (over === output) return player }
-        val player = if (library != null) QueuePlayer(output.player, playback) { library.queueItem(it) } else QueuePlayer(output.player, playback)
+        val describe: (ItemSummary) -> MediaItem = if (library != null) { track -> library.queueItem(track) } else QueuePlayer::plainItem
+        // The player outlives the service: its words come through the app, not this service.
+        val app = applicationContext
+        val player = QueuePlayer(output.player, playback, describe) { wordsOf(app, it) }
         made = output to player
         return player
     }
@@ -178,7 +203,7 @@ class MusicService : MediaLibraryService() {
         if (next != null) {
             made.player = next
             player = next
-            made.setMediaButtonPreferences(buttons(playback.queueState.value.shuffle))
+            made.setMediaButtonPreferences(buttons(playback.queueState.value))
             return
         }
         end(made, playback)
@@ -198,7 +223,7 @@ class MusicService : MediaLibraryService() {
         val (channels, at) = lineup
         live.play(channels, at)
         made.player = live.player
-        // Shuffle is the music's: the radio has none.
+        // Shuffle and Repeat are the music's: the radio has neither.
         made.setMediaButtonPreferences(emptyList())
         val items = channels.map { graph.live?.channel(it, from = null) ?: MediaItem.Builder().setMediaId(it.id.toString()).build() }
         return MediaSession.MediaItemsWithStartPosition(items, at, C.TIME_UNSET)
@@ -212,7 +237,7 @@ class MusicService : MediaLibraryService() {
         val queue = queuePlayer(playback, library) ?: return
         made.player = queue
         player = queue
-        made.setMediaButtonPreferences(buttons(playback.queueState.value.shuffle))
+        made.setMediaButtonPreferences(buttons(playback.queueState.value))
     }
 
     /** The session goes, and the service stops: nothing plays, and no car holds it. */
@@ -284,17 +309,38 @@ class MusicService : MediaLibraryService() {
     /**
      * The buttons beside Previous, Play and Next (Android Auto's Now
      * Playing, the notification, the system's media controls): Shuffle,
-     * lit while it is on.
+     * lit while it is on, then Repeat, showing whether the queue or the
+     * track repeats. Each is named for what a press does.
      */
-    private fun buttons(shuffled: Boolean): List<CommandButton> {
+    private fun buttons(queue: MusicQueueState): List<CommandButton> {
         val res = AppLanguage.resources(this)
-        return listOf(
-            CommandButton.Builder(if (shuffled) CommandButton.ICON_SHUFFLE_ON else CommandButton.ICON_SHUFFLE_OFF)
-                .setDisplayName(res.getString(if (shuffled) R.string.music_library_shuffle_off else R.string.music_library_shuffle))
-                .setSessionCommand(SHUFFLE)
-                .setSlots(CommandButton.SLOT_BACK_SECONDARY, CommandButton.SLOT_OVERFLOW)
-                .build(),
-        )
+        val shuffle = CommandButton.Builder(if (queue.shuffle) CommandButton.ICON_SHUFFLE_ON else CommandButton.ICON_SHUFFLE_OFF)
+            .setDisplayName(res.getString(if (queue.shuffle) R.string.music_library_shuffle_off else R.string.music_library_shuffle))
+            .setSessionCommand(SHUFFLE)
+            .setSlots(CommandButton.SLOT_BACK_SECONDARY, CommandButton.SLOT_OVERFLOW)
+            .build()
+        val (icon, name) = when (queue.repeat) {
+            MusicRepeat.Off -> CommandButton.ICON_REPEAT_OFF to R.string.music_library_repeat
+            MusicRepeat.All -> CommandButton.ICON_REPEAT_ALL to R.string.music_library_repeat_one
+            MusicRepeat.One -> CommandButton.ICON_REPEAT_ONE to R.string.music_library_repeat_off
+        }
+        val repeat = CommandButton.Builder(icon)
+            .setDisplayName(res.getString(name))
+            .setSessionCommand(REPEAT)
+            .setSlots(CommandButton.SLOT_FORWARD_SECONDARY, CommandButton.SLOT_OVERFLOW)
+            .build()
+        return listOf(shuffle, repeat)
+    }
+
+    /** The covers' addresses of the track playing and those Next and Previous go to. */
+    private fun coversAround(queue: MusicQueueState, library: MusicLibrary): List<Uri?> {
+        val tracks = queue.tracks
+        if (tracks.isEmpty()) return emptyList()
+        val wraps = queue.repeat == MusicRepeat.All
+        return listOf(0, 1, -1).mapNotNull { step ->
+            val at = queue.index + step
+            tracks.getOrNull(if (wraps) Math.floorMod(at, tracks.size) else at)
+        }.map { library.queueItem(it).mediaMetadata.artworkUri }.distinct()
     }
 
     /** Signed out, each car shows why it plays nothing, and a button opening Pley on the phone; signed in again, it clears. */
@@ -326,12 +372,12 @@ class MusicService : MediaLibraryService() {
             if (!allowed(controller, session)) return MediaSession.ConnectionResult.reject()
             // The car reads the library's pictures from the app (MusicArt): it may read them, and only them.
             if (isCar(controller.packageName)) grantArt(controller.packageName)
-            // Media3's defaults for this controller (super.onConnect only marks "use the defaults"), with Shuffle.
+            // Media3's defaults for this controller (super.onConnect only marks "use the defaults"), with Shuffle and Repeat.
             val accepted = MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller).build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
-                .setAvailableSessionCommands(accepted.availableSessionCommands.buildUpon().add(SHUFFLE).build())
+                .setAvailableSessionCommands(accepted.availableSessionCommands.buildUpon().add(SHUFFLE).add(REPEAT).build())
                 .setAvailablePlayerCommands(accepted.availablePlayerCommands)
-                .setMediaButtonPreferences(if (radio?.active == true) emptyList() else buttons(playback.queueState.value.shuffle))
+                .setMediaButtonPreferences(if (radio?.active == true) emptyList() else buttons(playback.queueState.value))
                 .build()
         }
 
@@ -341,9 +387,12 @@ class MusicService : MediaLibraryService() {
             customCommand: SessionCommand,
             args: Bundle,
         ): ListenableFuture<SessionResult> {
-            if (customCommand.customAction != SHUFFLE.customAction) return super.onCustomCommand(session, controller, customCommand, args)
+            val shuffle = customCommand.customAction == SHUFFLE.customAction
+            val repeat = customCommand.customAction == REPEAT.customAction
+            if (!shuffle && !repeat) return super.onCustomCommand(session, controller, customCommand, args)
             if (radio?.active == true) return Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
-            playback.setShuffle(!playback.queueState.value.shuffle)
+            val queue = playback.queueState.value
+            if (shuffle) playback.setShuffle(!queue.shuffle) else playback.setRepeat(queue.repeat.next)
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }
 
@@ -544,6 +593,9 @@ class MusicService : MediaLibraryService() {
         /** Shuffle's button: shuffles the queue, or plays it in order again. */
         val SHUFFLE = SessionCommand("app.pley.music.SHUFFLE", Bundle.EMPTY)
 
+        /** Repeat's button: the queue repeats, then the track, then nothing again. */
+        val REPEAT = SessionCommand("app.pley.music.REPEAT", Bundle.EMPTY)
+
         /** The session's player and the output it shows, kept for the process's life (queuePlayer). */
         var made: Pair<EngineMusicOutput, QueuePlayer>? = null
 
@@ -552,6 +604,16 @@ class MusicService : MediaLibraryService() {
 
         /** The longest search a car or the Assistant sends that is used. */
         const val MAX_QUERY = 200
+
+        /** Why a track doesn't play, as a car says it, in the language shown. */
+        fun wordsOf(context: Context, error: MusicError): String = AppLanguage.resources(context).getString(
+            when (error) {
+                MusicError.SignedOut -> R.string.music_library_signed_out
+                MusicError.Offline -> R.string.music_library_offline
+                MusicError.Unplayable -> R.string.music_library_unplayable
+                MusicError.Stopped -> R.string.music_library_stopped
+            },
+        )
     }
 }
 

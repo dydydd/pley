@@ -10,6 +10,10 @@
     <string name="music_library_songs">Pistas</string>
     <string name="music_library_shuffle">Aleatorio</string>
     <string name="music_library_shuffle_off">Desactivar aleatorio</string>
+    <!-- Repeat's button, named for what a press does: the queue repeats, then the track, then nothing. -->
+    <string name="music_library_repeat">Repetir</string>
+    <string name="music_library_repeat_one">Repetir esta pista</string>
+    <string name="music_library_repeat_off">Dejar de repetir</string>
     <plurals name="music_library_tracks">
         <item quantity="one">%1$,d pista</item>
         <item quantity="many">%1$,d pistas</item>
@@ -35,4 +39,7 @@
     <string name="music_library_open_pley">Abrir Pley</string>
     <string name="music_library_offline">No se puede conectar con tu servidor Pley</string>
     <string name="music_library_failed">Algo salió mal. Inténtalo de nuevo.</string>
+    <!-- Why the track doesn't play, on the car's Now Playing. -->
+    <string name="music_library_unplayable">Esta pista no se puede reproducir</string>
+    <string name="music_library_stopped">El servidor detuvo la reproducción</string>
 </resources>

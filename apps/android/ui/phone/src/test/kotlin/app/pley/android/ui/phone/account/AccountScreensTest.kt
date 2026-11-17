@@ -9,6 +9,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.hasClickAction
@@ -19,6 +20,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.getBoundsInRoot
@@ -31,6 +33,7 @@ import app.pley.android.data.TrackDefaultsUnsupported
 import app.pley.android.model.SubtitleMode
 import app.pley.android.network.ApiException
 import app.pley.android.player.NowPlaying
+import app.pley.android.player.MusicRepeat
 import app.pley.android.screens.Navigator
 import app.pley.android.screens.PleyKey
 import app.pley.android.testing.data.FakeServerAdmin
@@ -283,6 +286,34 @@ class AccountScreensTest {
     }
 
     @Test
+    fun nowPlayingRepeatsTheQueueThenTheTrackThenNothingAndShowsTheNextTrackAsItChanges() {
+        val now = NowPlaying(503, "Song 3", "Harbour Lights", playing = true, album = "Deep Water", count = 12, index = 11, durationMs = 180_000)
+        graph.music.now.value = now
+        show { NowPlayingScreen() }
+        waitFor("Song 3")
+        // The last track of a queue that doesn't repeat has no next one.
+        compose.onNodeWithContentDescription("Next").assertIsNotEnabled()
+        compose.onNodeWithContentDescription("Repeat").performClick()
+        assertEquals(listOf(MusicRepeat.All), graph.music.repeats)
+
+        graph.music.now.value = now.copy(repeat = MusicRepeat.All)
+        compose.onNodeWithContentDescription("Repeat this track").performClick()
+        compose.onNodeWithContentDescription("Next").assertIsEnabled()
+        graph.music.now.value = now.copy(repeat = MusicRepeat.One)
+        compose.onNodeWithContentDescription("Stop repeating").performClick()
+        assertEquals(listOf(MusicRepeat.All, MusicRepeat.One, MusicRepeat.Off), graph.music.repeats)
+
+        // The next track: its words take the place of the last one's, which leave.
+        graph.music.now.value = now.copy(itemId = 504, title = "Song 4", index = 0, playing = false, loading = true, wantsPlay = true)
+        waitFor("Song 4")
+        compose.waitForIdle()
+        compose.onNodeWithText("Song 3").assertDoesNotExist()
+        // Still starting, it will play: Pause, and no "Loading…" for a track that starts at once.
+        compose.onNodeWithContentDescription("Pause").assertExists()
+        compose.onNodeWithText("Loading…").assertDoesNotExist()
+    }
+
+    @Test
     @Config(qualifiers = "w800dp-h360dp-land")
     fun nowPlayingInAShortWideWindowPutsTheArtBesideTheTitleAndShowsEveryControl() {
         val now = NowPlaying(503, "Song 3", "Harbour Lights", playing = true, album = "Deep Water", count = 12, index = 2, durationMs = 180_000)
@@ -294,7 +325,7 @@ class AccountScreensTest {
         // Beside the art, not under it: the title starts a fifth of the way across, in the top half.
         assertTrue("title: $title", title.left > window.right / 5 && title.bottom < window.bottom / 2)
         // A phone's portrait layout put the scrubber and the controls below the window's bottom.
-        for (control in listOf("Position in the track", "Shuffle", "Previous", "Pause", "Next", "Queue")) {
+        for (control in listOf("Position in the track", "Shuffle", "Previous", "Pause", "Next", "Repeat", "Queue")) {
             val bounds = compose.onAllNodesWithContentDescription(control)[0].getBoundsInRoot()
             assertTrue("$control: $bounds in $window", bounds.bottom <= window.bottom && bounds.top >= window.top)
         }

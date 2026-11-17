@@ -16,6 +16,12 @@ describes how they are made.
   play … on Pley". Signed out, the car says to open Pley on the phone.
 - Music's notification and the phone's media controls have a Shuffle
   button.
+- Music repeats: a Repeat button in Now Playing on phones and TVs, in the
+  phone's media controls and in Android Auto repeats the queue, then the
+  track playing, then nothing.
+- Now Playing moves from one track to the next: the cover stays until the
+  next one fades in, the title slides to the next track's, and the
+  scrubber glides.
 - Parked, the sideloaded app plays videos and Live TV on the car's screen
   with Android Auto (Android 15 and later, in cars that allow video
   apps), with every page and control sized for the car, on landscape,
@@ -35,6 +41,21 @@ describes how they are made.
 - Pause pressed while a track is starting now keeps it paused once it
   loads, instead of playing it.
 - The phone's media controls show the cover of what plays.
+- Skipping a track in Android Auto no longer redraws Now Playing several
+  times over, its cover and progress bar blinking: the track shows once,
+  with its cover.
+- A track that can't play says why in Android Auto, in the app's
+  language, also when the server can't be reached.
+- The scrubber no longer shows the last track's position while the next
+  one loads, nor jumps back for a moment after a seek, and it moves when
+  seeking while paused.
+- Previous pressed again while a track is still loading goes one more
+  track back, instead of starting the loading track again.
+- A track that failed to start no longer starts where the track before
+  it was when Play is pressed.
+- Play/Pause no longer shows Pause for a track that will wait paused, or
+  while a paused track loads after a seek.
+- "Loading…" no longer blinks under the title at every change of track.
 - The home page's banner fits a phone turned on its side, its title and
   Play in view.
 - Now Playing fits a phone turned on its side, with the cover beside

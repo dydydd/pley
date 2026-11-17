@@ -1027,8 +1027,25 @@ icon the car tints:
 Search finds artists, albums and tracks, then channels. Picking a track plays on through
 its album or playlist; a track found by search plays on through its
 album. Now Playing shows the whole queue, which the car can pick from,
-and a Shuffle button, lit while the queue is shuffled (the phone's media
-controls have it too). "Hey Google, play … on Pley" plays the closest artist (shuffled),
+a Shuffle button, lit while the queue is shuffled, and a Repeat button,
+which repeats the queue, then the track playing, then nothing (the
+phone's media controls have both, as do Now Playing on the phone and on
+a TV). A queue that repeats plays again from its start once it ends, in
+the order it has, and Next on its last track and Previous on its first go
+round; a track that repeats plays again by itself, and Next and Previous
+still move. Repeat stays as another album plays, until the music stops.
+
+A track is one entry of the car's Now Playing from the moment it is the
+queue's: its title, artist, cover and length as the library has them,
+while the server is asked for it, while it loads and while it plays, so
+skipping shows the next track once and not three times over. The covers
+of what plays and of the tracks either side are kept, so a track comes
+with its cover, and the tracks of an album change nothing but the title.
+A track that can't play says why on the car's screen (the server out of
+reach, the session ended by the server, a file it can't play), and Play
+tries it again.
+
+"Hey Google, play … on Pley" plays the closest artist (shuffled),
 album or track; "play music on Pley" plays the album added last. Signed
 out, the car says to open Pley on the phone and sign in when it is safe,
 with a button that opens it. The car reads the covers from the app, as the server's

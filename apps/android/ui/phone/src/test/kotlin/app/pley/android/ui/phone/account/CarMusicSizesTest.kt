@@ -73,7 +73,7 @@ class CarMusicSizesTest {
         CarScreenChecks.controls(
             compose,
             "Now Playing, $screen",
-            listOf("Close Now Playing", "Sleep timer", "Position in the track", "Shuffle", "Previous", "Pause", "Next", "Queue"),
+            listOf("Close Now Playing", "Queue", "Sleep timer", "Position in the track", "Shuffle", "Previous", "Pause", "Next", "Repeat"),
         )
     }
 

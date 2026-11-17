@@ -37,8 +37,16 @@ data class NowPlaying(
     val ended: Boolean = false,
     /** Why it doesn't play; `null` while it does. */
     val error: MusicError? = null,
+    val repeat: MusicRepeat = MusicRepeat.Off,
+    /**
+     * Whether it plays, or will as soon as it can (a track starting, or
+     * waiting for data): what Play/Pause shows. Paused, it stays `false`
+     * through a seek's loading; [playing] is sound coming out.
+     */
+    val wantsPlay: Boolean = playing,
 ) {
-    val hasNext: Boolean get() = index + 1 < count
+    /** Whether Next has a track to go to: the one after, or with [repeat] the first again. */
+    val hasNext: Boolean get() = index + 1 < count || repeat != MusicRepeat.Off
 
     /** "Artist · Album", as the mini player says it. */
     val byline: String get() = listOfNotNull(artist, album).filter { it.isNotBlank() }.joinToString(" · ")
@@ -59,11 +67,26 @@ enum class MusicError {
     Stopped,
 }
 
+/**
+ * What plays once the queue ends, or a track does: nothing more ([Off]),
+ * the queue from its start again ([All]), or the same track ([One]).
+ */
+enum class MusicRepeat {
+    Off,
+    All,
+    One,
+    ;
+
+    /** The one a press of Repeat goes to: off, the queue, the track, off again. */
+    val next: MusicRepeat get() = entries[(ordinal + 1) % entries.size]
+}
+
 /** The queue in the order it plays, the current track at [index]. */
 data class MusicQueueState(
     val tracks: List<ItemSummary> = emptyList(),
     val index: Int = 0,
     val shuffle: Boolean = false,
+    val repeat: MusicRepeat = MusicRepeat.Off,
 ) {
     val current: ItemSummary? get() = tracks.getOrNull(index)
 }
@@ -102,10 +125,14 @@ interface MusicControl {
     /** Plays or pauses; after the queue's end, plays its last track again. */
     fun toggle() {}
 
-    /** The next track, if there is one. */
+    /** The next track, if there is one; after the last, with repeat on, the first. */
     fun next() {}
 
-    /** Back to the start of the track, or the track before when it has played under 3 seconds. */
+    /**
+     * Back to the start of the track, or the track before when it has
+     * played under 3 seconds (before the first, with the queue repeating,
+     * the last).
+     */
     fun previous() {}
 
     fun seekTo(positionMs: Long) {}
@@ -115,6 +142,9 @@ interface MusicControl {
 
     /** Shuffles what is left of the queue around the current track, or puts it back in order. */
     fun setShuffle(shuffle: Boolean) {}
+
+    /** Repeats the queue, the track playing, or nothing; kept until the music stops. */
+    fun setRepeat(repeat: MusicRepeat) {}
 
     /** Stops and forgets the queue (signing out). */
     fun stop() {}

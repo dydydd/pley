@@ -4,13 +4,17 @@ import android.os.Bundle
 import android.os.Looper
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.test.core.app.ApplicationProvider
 import app.pley.android.model.ItemKind
 import app.pley.android.model.ItemSummary
 import app.pley.android.model.caps.ClientCaps
+import app.pley.android.network.OfflineException
 import app.pley.android.player.EngineSource
+import app.pley.android.player.MusicError
+import app.pley.android.player.MusicRepeat
 import app.pley.android.player.session.SessionReporter
 import app.pley.android.testing.network.FakePleyApi
 import kotlinx.coroutines.CoroutineScope
@@ -20,6 +24,7 @@ import kotlinx.coroutines.cancel
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -34,9 +39,10 @@ import org.robolectric.Shadows.shadowOf
 class QueuePlayerTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val output = SilentOutput()
+    private val api = FakePleyApi()
     private val playback = MusicPlayback(
         MusicEnvironment(
-            api = { FakePleyApi() },
+            api = { api },
             caps = { ClientCaps() },
             clientId = { "android-test-music" },
             reporter = SessionReporter(scope),
@@ -46,7 +52,7 @@ class QueuePlayerTest {
     )
     private val engine = ExoPlayer.Builder(ApplicationProvider.getApplicationContext()).build()
     private val album = (1..3L).map { track(it) }
-    private val player = QueuePlayer(engine, playback)
+    private val player = QueuePlayer(engine, playback, words = { "Pley: $it" })
 
     @After
     fun tearDown() {
@@ -78,7 +84,8 @@ class QueuePlayerTest {
         assertTrue(player.hasNextMediaItem())
         assertTrue(player.isCommandAvailable(Player.COMMAND_SEEK_TO_MEDIA_ITEM))
         assertTrue(player.isCommandAvailable(Player.COMMAND_SET_SHUFFLE_MODE))
-        assertFalse(player.isCommandAvailable(Player.COMMAND_SET_REPEAT_MODE))
+        assertTrue(player.isCommandAvailable(Player.COMMAND_SET_REPEAT_MODE))
+        assertFalse(player.isCommandAvailable(Player.COMMAND_SET_SPEED_AND_PITCH))
 
         // The engine still holding track 2 while track 3 is asked for: the entry is track 3's own.
         playback.jumpTo(2)
@@ -130,6 +137,92 @@ class QueuePlayerTest {
     }
 
     @Test
+    fun aTrackIsTheSameEntryWhileItIsAskedForLoadsAndPlays() {
+        val changes = mutableListOf<String>()
+        player.addListener(
+            object : Player.Listener {
+                override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+                    changes += mediaMetadata.title.toString()
+                }
+            },
+        )
+        playback.play(album, startIndex = 1)
+        player.queueChanged()
+        idle()
+        val asked = player.currentMediaItem
+        val length = player.duration
+        assertEquals(180_000L, length)
+
+        // The output has it now, with its own name for it, a cover of its own and no length yet: a car would draw
+        // Now Playing again for each of those, at every skip.
+        val metadata = MediaMetadata.Builder()
+            .setTitle("Track 2 (from the file)")
+            .setArtworkData(byteArrayOf(1, 2, 3), MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+            .setExtras(Bundle().apply { putLong(EngineMusicOutput.TRACK_ID, 2) })
+            .build()
+        engine.setMediaItem(MediaItem.Builder().setUri("http://server/stream").setMediaMetadata(metadata).build())
+        idle()
+        player.queueChanged()
+        idle()
+        assertEquals(asked?.mediaId, player.currentMediaItem?.mediaId)
+        assertEquals("Track 2", player.mediaMetadata.title.toString())
+        assertEquals(length, player.duration)
+        assertEquals(listOf("Track 2"), changes.distinct())
+        // A queue described without covers' addresses shows the one the output fetched.
+        assertTrue(player.mediaMetadata.artworkData != null)
+    }
+
+    @Test
+    fun repeatShowsAndIsSetThroughTheMusic() {
+        playback.play(album, startIndex = 2)
+        engineHolds(3)
+        player.queueChanged()
+        idle()
+        assertEquals(Player.REPEAT_MODE_OFF, player.repeatMode)
+        assertFalse(player.hasNextMediaItem())
+
+        player.repeatMode = Player.REPEAT_MODE_ALL
+        idle()
+        assertEquals(MusicRepeat.All, playback.queueState.value.repeat)
+        player.queueChanged()
+        idle()
+        assertEquals(Player.REPEAT_MODE_ALL, player.repeatMode)
+        // The last track's next one is the first.
+        assertTrue(player.hasNextMediaItem())
+        player.seekToNextMediaItem()
+        idle()
+        assertEquals(0, playback.queueState.value.index)
+
+        playback.setRepeat(MusicRepeat.One)
+        player.queueChanged()
+        idle()
+        assertEquals(Player.REPEAT_MODE_ONE, player.repeatMode)
+    }
+
+    @Test
+    fun aTrackThatCantStartSaysWhyInPleysWords() {
+        api.fail("startPlayback", OfflineException(java.io.IOException("refused")))
+        playback.play(album)
+        idle()
+        player.queueChanged()
+        idle()
+        assertEquals(MusicError.Offline, playback.nowPlaying.value?.error)
+        // No player failed: the session would say nothing plays, and nothing is wrong.
+        assertEquals(Player.STATE_IDLE, player.playbackState)
+        assertEquals("Pley: Offline", player.playerError?.message)
+        assertEquals(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED, player.playerError?.errorCode)
+        assertFalse(player.playWhenReady)
+        assertEquals("track:1", player.currentMediaItem?.mediaId)
+
+        // Play asks for it again: loading, and no error.
+        api.reset()
+        player.play()
+        player.queueChanged()
+        idle()
+        assertNull(player.playerError)
+    }
+
+    @Test
     fun itemsSetFromOutsideChangeNothing() {
         playback.play(album)
         engineHolds(1)
@@ -152,7 +245,9 @@ class QueuePlayerTest {
 
     /** An output that loads and plays nothing. */
     private class SilentOutput : MusicOutput {
-        override fun load(source: EngineSource, startMs: Long, play: Boolean, info: TrackInfo) = Unit
+        override fun load(source: EngineSource, startMs: Long, play: Boolean, info: TrackInfo) {
+            playWhenReady = play
+        }
 
         override fun play() = Unit
 
@@ -167,7 +262,8 @@ class QueuePlayerTest {
         override val positionMs = 0L
         override val durationMs = 0L
         override val bufferedMs = 0L
-        override val playWhenReady = false
+        override var playWhenReady = false
+            private set
 
         override fun setListener(listener: MusicOutput.Listener?) = Unit
     }

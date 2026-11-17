@@ -14,6 +14,7 @@ import app.pley.android.network.NetworkGraph
 import app.pley.android.player.MusicControl
 import app.pley.android.player.MusicPosition
 import app.pley.android.player.MusicQueueState
+import app.pley.android.player.MusicRepeat
 import app.pley.android.player.NowPlaying
 import app.pley.android.player.PlayerEngine
 import app.pley.android.player.session.SessionReporter
@@ -65,6 +66,8 @@ class ServiceMusicControl(
     override fun jumpTo(index: Int) = onMain { playback.jumpTo(index) }
 
     override fun setShuffle(shuffle: Boolean) = onMain { playback.setShuffle(shuffle) }
+
+    override fun setRepeat(repeat: MusicRepeat) = onMain { playback.setRepeat(repeat) }
 
     override fun stop() = onMain {
         // Signed out, another profile, or the app ending what plays: the car's radio stops for good too, before the

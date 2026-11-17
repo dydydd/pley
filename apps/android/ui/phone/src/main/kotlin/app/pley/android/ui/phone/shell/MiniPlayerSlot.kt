@@ -30,15 +30,17 @@ import app.pley.android.designsystem.PleyColors
 import app.pley.android.designsystem.PleyShape
 import app.pley.android.designsystem.icon.Icon
 import app.pley.android.designsystem.icon.PleyIcons
-import app.pley.android.designsystem.image.Artwork
 import app.pley.android.designsystem.image.ArtworkImage
 import app.pley.android.player.MusicPosition
 import app.pley.android.player.NowPlaying
 import app.pley.android.screens.PleyKey
 import app.pley.android.ui.phone.R
 import app.pley.android.ui.phone.kit.PleyIconButton
+import app.pley.android.ui.phone.music.TrackArt
+import app.pley.android.ui.phone.music.TrackChange
 import app.pley.android.ui.phone.music.rememberMusicControl
 import app.pley.android.ui.phone.music.rememberMusicPosition
+import app.pley.android.ui.phone.music.trackWords
 import app.pley.android.ui.phone.player.CarGap
 import app.pley.android.ui.phone.player.CarSized
 import app.pley.android.ui.phone.player.LocalCarScreen
@@ -49,7 +51,9 @@ import app.pley.android.ui.phone.player.onCarScreen
  * bar while music plays: the 56 dp art, the title and "Artist · Album",
  * Play/Pause and Next, and a 2 dp [accent][PleyColors.Accent] line along
  * its top for how far the track has played (drawn, never recomposed).
- * Tapping it opens Now Playing; it hides while Now Playing shows.
+ * Tapping it opens Now Playing; it hides while Now Playing shows. As the
+ * track changes, the art and the words give way to the next one's as Now
+ * Playing's do.
  */
 @Composable
 internal fun MiniPlayerSlot(nowPlaying: NowPlaying?, modifier: Modifier = Modifier, car: Boolean = onCarScreen()) {
@@ -64,9 +68,10 @@ private fun MiniPlayer(nowPlaying: NowPlaying, modifier: Modifier) {
     val onNowPlaying = (navigator as? PhoneNavigation)?.stack()?.lastOrNull() == PleyKey.NowPlaying
     if (onNowPlaying) return
     val music = rememberMusicControl()
-    val position by rememberMusicPosition({ music?.position() ?: MusicPosition() }, nowPlaying.playing, key = nowPlaying.itemId)
+    val position by rememberMusicPosition({ music?.position() ?: MusicPosition() }, nowPlaying.playing, key = nowPlaying.itemId to nowPlaying.index)
     val art = remember(nowPlaying.artUrl) { nowPlaying.artUrl?.let { ArtworkImage(listOf(it)) } }
-    val playing = nowPlaying.playing || (nowPlaying.loading && nowPlaying.error == null)
+    // What Play/Pause will do, a track still starting too.
+    val playing = nowPlaying.wantsPlay
     // On a car's screen: 112 dp there, clear of its edges, its buttons apart and its title the larger line.
     val car = LocalCarScreen.current
     Row(
@@ -89,17 +94,18 @@ private fun MiniPlayer(nowPlaying: NowPlaying, modifier: Modifier) {
     ) {
         Box(Modifier.size(56.dp).clip(PleyShape.TilePhone).background(PleyColors.Surface3), contentAlignment = Alignment.Center) {
             if (art != null) {
-                Artwork(art, nowPlaying.album ?: nowPlaying.title, Modifier.matchParentSize())
+                TrackArt(art, nowPlaying.album ?: nowPlaying.title, Modifier.matchParentSize())
             } else {
                 Icon(PleyIcons.Music, contentDescription = null, tint = PleyColors.Muted)
             }
         }
         Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(nowPlaying.title, style = if (car) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleSmall, color = PleyColors.Fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            val byline = nowPlaying.byline
-            if (byline.isNotEmpty()) {
-                Text(byline, style = MaterialTheme.typography.bodySmall, color = PleyColors.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        TrackChange(trackWords(nowPlaying), Modifier.weight(1f), Alignment.CenterStart) { words ->
+            Column(Modifier.fillMaxWidth()) {
+                Text(words.title, style = if (car) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleSmall, color = PleyColors.Fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (words.byline.isNotEmpty()) {
+                    Text(words.byline, style = MaterialTheme.typography.bodySmall, color = PleyColors.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
         PleyIconButton(

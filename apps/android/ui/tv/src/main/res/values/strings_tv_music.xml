@@ -7,6 +7,10 @@
     <string name="tv_music_pause">Pause</string>
     <string name="tv_music_shuffle">Shuffle</string>
     <string name="tv_music_shuffle_off">Stop shuffling</string>
+    <!-- Repeat's button, named for what Select does: the queue repeats, then the track, then nothing. -->
+    <string name="tv_music_repeat">Repeat</string>
+    <string name="tv_music_repeat_one">Repeat this track</string>
+    <string name="tv_music_repeat_off">Stop repeating</string>
     <string name="tv_music_now_playing">Now playing</string>
     <string name="tv_music_disc">Disc %1$d</string>
     <string name="tv_music_no_albums">No albums found.</string>
