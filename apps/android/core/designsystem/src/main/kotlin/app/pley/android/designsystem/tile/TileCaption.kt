@@ -16,6 +16,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isSpecified
 import app.pley.android.designsystem.PleyColors
 import app.pley.android.designsystem.PleyShape
 import app.pley.android.designsystem.PleyType
@@ -31,7 +32,8 @@ import app.pley.android.designsystem.text.atLeast
  * large font scale lets the title take two lines. Captions always show,
  * so rows never jump. Screen readers hear the tile's description instead.
  * Where text has a smallest size ([LocalMinTextSize], a car's screen),
- * both lines are that size at least.
+ * both lines are that size at least, and the title takes two lines there
+ * too, never smaller: at 24 sp one line holds a dozen letters of it.
  * On TV, where each line is one line, a single node draws both
  * ([tvCaption]): grids bring in a row of these at each step of a held key.
  */
@@ -47,16 +49,16 @@ fun TileCaption(
         Spacer(modifier.tvCaption(title, subtitle, emphasized))
         return
     }
-    val titleLines = if (style == TileStyle.Phone && LocalDensity.current.fontScale > 1.3f) 2 else 1
     val floor = LocalMinTextSize.current
+    val titleLines = if (style == TileStyle.Phone && (LocalDensity.current.fontScale > 1.3f || floor.isSpecified)) 2 else 1
     val titleStyle = remember(style, emphasized, floor) {
         style.captionTitle.atLeast(floor).copy(color = PleyColors.Fg, fontWeight = if (emphasized) PleyType.Bold else style.captionTitle.fontWeight)
     }
     val subtitleStyle = remember(style, floor) { style.captionSubtitle.atLeast(floor).copy(color = PleyColors.Muted) }
     Column(modifier.clearAndSetSemantics {}) {
         if (titleLines > 1) {
-            // On two lines, a word too wide for the tile makes the title smaller rather than break in two.
-            WholeWordsText(title, titleStyle, maxLines = titleLines)
+            // On two lines, a word too wide for the tile makes the title smaller rather than break in two; not under a floor.
+            WholeWordsText(title, titleStyle, maxLines = titleLines, shrinks = !floor.isSpecified)
         } else {
             BasicText(title, style = titleStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }

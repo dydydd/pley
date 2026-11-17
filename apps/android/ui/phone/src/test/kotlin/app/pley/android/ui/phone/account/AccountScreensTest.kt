@@ -14,6 +14,7 @@ import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isHeading
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
@@ -59,6 +60,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
 
 /**
  * The phone's Me, history, album page and mini player over a graph of
@@ -329,5 +331,25 @@ class AccountScreensTest {
             val bounds = compose.onAllNodesWithContentDescription(control)[0].getBoundsInRoot()
             assertTrue("$control: $bounds in $window", bounds.bottom <= window.bottom && bounds.top >= window.top)
         }
+    }
+
+    @Test
+    @Config(qualifiers = "w800dp-h360dp-land")
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun anAlbumInAShortWideWindowPutsItsCoverBesideItsTitleWithPlayInView() {
+        show { AlbumScreen(AccountTestGraph.ALBUM, trackId = null) }
+        waitFor("Deep Water")
+        val window = compose.onRoot().getBoundsInRoot()
+        val title = compose.onNode(hasText("Deep Water") and isHeading()).getBoundsInRoot()
+        // Beside the cover, as an item's poster: a phone's layout stacked them, Play under the window's bottom.
+        assertTrue("title: $title", title.left > window.right / 5)
+        for (button in listOf("Play", "Shuffle")) {
+            val bounds = compose.onNode(hasText(button) and hasClickAction()).getBoundsInRoot()
+            assertTrue("$button: $bounds in $window", bounds.bottom <= window.bottom)
+        }
+        // Side by side, as tall as each other.
+        val play = compose.onNode(hasText("Play") and hasClickAction()).getBoundsInRoot()
+        val shuffle = compose.onNode(hasText("Shuffle") and hasClickAction()).getBoundsInRoot()
+        assertEquals((play.bottom - play.top).value, (shuffle.bottom - shuffle.top).value, 0.5f)
     }
 }

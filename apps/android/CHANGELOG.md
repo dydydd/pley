@@ -40,6 +40,8 @@ describes how they are made.
 ### Changed
 
 - The home banner's More info button reads Más info in Spanish.
+- An artist's, album's or playlist's page puts the cover beside the
+  title on a phone on its side and on tablets, with Play in view.
 
 ### Fixed
 
@@ -63,7 +65,8 @@ describes how they are made.
   while a paused track loads after a seek.
 - "Loading…" no longer blinks under the title at every change of track.
 - The home page's banner fits a phone turned on its side, its title and
-  Play in view.
+  Play in view, also above the bar of what plays.
+- Play and Shuffle on an artist's or album's page are the same height.
 - Now Playing fits a phone turned on its side, with the cover beside
   the title, instead of the cover hiding the controls.
 

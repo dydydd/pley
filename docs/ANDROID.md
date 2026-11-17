@@ -1088,21 +1088,25 @@ screen the player keeps the screen's orientation, has no picture in
 picture, and its volume and brightness drags are off (the car has its
 own). It draws a third larger there, as Google's car app quality
 criteria ask: buttons of 64 dp at least and no text under 24 sp, its
-sheets, menus and messages too, and the controls over the video keep
+sheets, menus, dialogs and messages too, and the controls over the video keep
 24 dp from each other and from the screen's edges. Play sits between
 10 seconds back and 10 seconds forward, the seek bar is taller, and the
 bottom row keeps Subtitles, Audio, Fit and Next episode (Quality is in
 Settings, chapters show on the seek bar, and there is no Lock). Every
-page of the app is car-sized the same way, its rail showing icons alone,
-centred on its height, as Android Auto's own does (all five tabs fit
-the smallest screen), and the home page's banner no taller than
-the screen; music's Now Playing and the bar of what plays too; Now Playing puts the cover beside the title,
-over the scrubber and the controls, as in any short, wide window (a
-phone on its side too). These layouts hold on every screen Android Auto
+page of the app is car-sized the same way, its dialogs too. The rail
+shows icons alone, centred on its height, as Android Auto's own does
+(all five tabs fit the smallest screen); tiles' captions and badges are
+24 sp, a title taking two lines rather than being cut; the home page's
+banner is no taller than the room above the bar of what plays; and an
+artist's, album's or playlist's cover stands beside its title, as an
+item's poster does, so Play is in view. Music's Now Playing and the bar
+of what plays are car-sized too; Now Playing puts the cover beside the
+title, over the scrubber and the controls, as in any short, wide window
+(a phone on its side too). These layouts hold on every screen Android Auto
 gives parked apps, as Google's Desktop Head Unit configurations test
 them: a small landscape screen (800 × 480), the wide strip of a wide
 screen (1920 × 484) and a portrait one (1042 × 1080), denser screens,
-and what a Mustang Mach-E's tall screen gives the app (1042 × 991 at
+and what a car's tall screen gives the app (1042 × 991 at
 185 dpi, and half that height when the car splits its screen); their
 tests draw each and check every control. Now Playing's cover is as large
 as the title, the scrubber and the controls under it leave room for. Whether a screen is a car's comes from

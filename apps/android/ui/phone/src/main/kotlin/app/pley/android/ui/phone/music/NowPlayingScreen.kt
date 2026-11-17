@@ -195,7 +195,7 @@ private fun NowPlayingPage() {
                 } else {
                     // The art is as wide as its share of the column, and no taller than what the title, the scrubber and the
                     // controls leave: on a window a little too short for all of it at that size (a car's portrait screen,
-                    // 1042 × 991 on a Mach-E), it is the art that is smaller, not the controls that are cut off.
+                    // 1042 × 991 at 185 dpi on some), it is the art that is smaller, not the controls that are cut off.
                     val artSide = (minOf(maxWidth, TALL_MAX) - TALL_EDGE * 2) * ART_SHARE
                     Column(
                         Modifier
