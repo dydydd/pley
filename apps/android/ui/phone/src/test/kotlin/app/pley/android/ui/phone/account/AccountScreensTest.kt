@@ -121,6 +121,11 @@ class AccountScreensTest {
         compose.waitUntil(5_000) { compose.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty() }
     }
 
+    /** A control renamed by work done off the main thread (Repeat's next press) reads [description] in a moment. */
+    private fun waitForDescription(description: String) {
+        compose.waitUntil(5_000) { compose.onAllNodesWithContentDescription(description).fetchSemanticsNodes().isNotEmpty() }
+    }
+
     @Test
     fun meShowsTheProfileAndItsTrackDefaults() {
         show { MeScreen() }
@@ -299,9 +304,11 @@ class AccountScreensTest {
         assertEquals(listOf(MusicRepeat.All), graph.music.repeats)
 
         graph.music.now.value = now.copy(repeat = MusicRepeat.All)
+        waitForDescription("Repeat this track")
         compose.onNodeWithContentDescription("Repeat this track").performClick()
         compose.onNodeWithContentDescription("Next").assertIsEnabled()
         graph.music.now.value = now.copy(repeat = MusicRepeat.One)
+        waitForDescription("Stop repeating")
         compose.onNodeWithContentDescription("Stop repeating").performClick()
         assertEquals(listOf(MusicRepeat.All, MusicRepeat.One, MusicRepeat.Off), graph.music.repeats)
 
