@@ -80,7 +80,7 @@ import app.pley.android.ui.phone.player.CarGap
 import app.pley.android.ui.phone.player.CarSized
 import app.pley.android.ui.phone.player.LocalCarScreen
 import app.pley.android.ui.phone.player.SleepNotice
-import app.pley.android.ui.phone.player.onOtherScreen
+import app.pley.android.ui.phone.player.onCarScreen
 import androidx.compose.foundation.layout.BoxScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import app.pley.android.screens.music.NowPlayingState
@@ -103,8 +103,8 @@ import app.pley.android.ui.phone.shell.LocalPhoneNavigator
  * ([CarSized]): 64 dp buttons and no text under 24 sp.
  */
 @Composable
-internal fun NowPlayingScreen() {
-    CarSized(onOtherScreen()) { NowPlayingPage() }
+internal fun NowPlayingScreen(car: Boolean = onCarScreen()) {
+    CarSized(car) { NowPlayingPage() }
 }
 
 @Composable

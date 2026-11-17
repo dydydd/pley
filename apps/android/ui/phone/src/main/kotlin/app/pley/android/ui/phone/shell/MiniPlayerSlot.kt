@@ -42,7 +42,7 @@ import app.pley.android.ui.phone.music.rememberMusicPosition
 import app.pley.android.ui.phone.player.CarGap
 import app.pley.android.ui.phone.player.CarSized
 import app.pley.android.ui.phone.player.LocalCarScreen
-import app.pley.android.ui.phone.player.onOtherScreen
+import app.pley.android.ui.phone.player.onCarScreen
 
 /**
  * The mini player (design spec §3.6): a 72 dp bar above the navigation
@@ -52,10 +52,10 @@ import app.pley.android.ui.phone.player.onOtherScreen
  * Tapping it opens Now Playing; it hides while Now Playing shows.
  */
 @Composable
-internal fun MiniPlayerSlot(nowPlaying: NowPlaying?, modifier: Modifier = Modifier) {
+internal fun MiniPlayerSlot(nowPlaying: NowPlaying?, modifier: Modifier = Modifier, car: Boolean = onCarScreen()) {
     if (nowPlaying == null) return
     // On a car's screen, car-sized: 64 dp buttons, no text under 24 sp.
-    CarSized(onOtherScreen()) { MiniPlayer(nowPlaying, modifier) }
+    CarSized(car) { MiniPlayer(nowPlaying, modifier) }
 }
 
 @Composable

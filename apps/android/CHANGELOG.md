@@ -20,7 +20,7 @@ describes how they are made.
   with Android Auto (Android 15 and later, in cars that allow video
   apps), with larger controls, 10-second skip buttons, and pausing as
   soon as the car moves off. Music's Now Playing and its bar are larger
-  there too.
+  there too, on landscape, wide and portrait car screens.
 
 ### Fixed
 

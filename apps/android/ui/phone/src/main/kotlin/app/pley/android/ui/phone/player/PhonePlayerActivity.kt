@@ -92,6 +92,9 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
     /** On a car's screen, or another display: asked each time, as the window can move to the phone's when the car goes. */
     private val onOtherScreen: Boolean get() = OtherScreen.shows(this)
 
+    /** On a car's screen (Android Auto): car-sized, and paused as the car moves off and covers it. */
+    private val onCar: Boolean get() = OtherScreen.isCar(this)
+
     /** Decoders let go in onStop; prepared again in onStart. */
     private var decodersReleased = false
     private var backgroundClose: Job? = null
@@ -146,7 +149,7 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
         val settingsFlow: Flow<Settings> = settings?.settings ?: flowOf(Settings())
         setContent {
             PhoneTheme {
-                CarSized(onOtherScreen) {
+                CarSized(onCar) {
                     val current = controller.value
                     val chosen by settingsFlow.collectAsStateWithLifecycle(Settings())
                     if (current == null) {
@@ -265,7 +268,7 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
      */
     override fun onPause() {
         super.onPause()
-        if (!onOtherScreen || isFinishing) return
+        if (!onCar || isFinishing) return
         controller.value?.pause()
         mediaSession?.stop()
         mediaSession = null

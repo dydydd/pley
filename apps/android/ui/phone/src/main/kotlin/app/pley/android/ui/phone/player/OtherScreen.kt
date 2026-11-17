@@ -1,8 +1,10 @@
 package app.pley.android.ui.phone.player
 
 import android.app.Activity
+import android.content.Context
 import android.view.Display
 import androidx.activity.compose.LocalActivity
+import androidx.car.app.connection.CarConnection
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
@@ -21,19 +23,39 @@ import androidx.core.content.ContextCompat
 /**
  * Whether a window shows on a screen other than the device's own: the
  * car's, where Android Auto shows Pley while parked, or another display
- * the phone drives. Such a screen keeps its orientation, has no picture
- * in picture, and a car covers its windows as it moves off: the players
- * don't turn it, don't shrink, and pause as they are covered.
+ * the phone drives. Such a screen keeps its orientation and has no picture
+ * in picture: the players don't turn it and don't shrink. On a car's
+ * ([isCar]) they are car-sized ([CarSized]) and pause as Android Auto
+ * covers them when the car moves off.
  */
 object OtherScreen {
     fun shows(activity: Activity): Boolean = ContextCompat.getDisplayOrDefault(activity).displayId != Display.DEFAULT_DISPLAY
+
+    /**
+     * [activity] shows on a car's screen: another screen while Android Auto
+     * projects ([CarConnection], as Google tells parked apps to check).
+     * Until Android Auto has answered, another screen counts as a car's:
+     * an app it opens starts before the answer comes.
+     */
+    fun isCar(activity: Activity): Boolean = shows(activity) && projected != false
+
+    /** Whether Android Auto projects now; `null` until it says. */
+    @Volatile
+    private var projected: Boolean? = null
+
+    /** Follows Android Auto's connection for the app's life: the Application calls it once. */
+    fun follow(context: Context) {
+        CarConnection(context.applicationContext).type.observeForever { type ->
+            projected = type == CarConnection.CONNECTION_TYPE_PROJECTION
+        }
+    }
 }
 
-/** Whether what is composed shows on a screen other than the device's own ([OtherScreen]). */
+/** Whether what is composed shows on a car's screen ([OtherScreen.isCar]). */
 @Composable
-internal fun onOtherScreen(): Boolean {
+internal fun onCarScreen(): Boolean {
     val activity = LocalActivity.current
-    return remember(activity) { activity != null && OtherScreen.shows(activity) }
+    return remember(activity) { activity != null && OtherScreen.isCar(activity) }
 }
 
 /** The player draws for a car's screen ([CarSized]): fewer, larger controls. */

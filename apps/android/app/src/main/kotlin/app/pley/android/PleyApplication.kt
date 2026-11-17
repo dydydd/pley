@@ -18,6 +18,7 @@ import app.pley.android.player.PlayerGraph
 import app.pley.android.player.PlayerGraphOwner
 import app.pley.android.screens.PleyGraphOwner
 import app.pley.android.screens.ScreensGraph
+import app.pley.android.ui.phone.player.OtherScreen
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
@@ -77,6 +78,8 @@ class PleyApplication : Application(), PleyGraphOwner, PlayerGraphOwner, Downloa
             FrameRate.watch(this, shells = setOf(TvActivity::class.java, MainActivity::class.java))
             // Players open where the app is shown: a car's screen with Android Auto.
             registerActivityLifecycleCallbacks(shownScreen)
+            // Whether Android Auto projects: the players are car-sized on its screen alone.
+            OtherScreen.follow(this)
             startup = StartupRead.start(this)
             restartDemoServer()
             warmGraph()

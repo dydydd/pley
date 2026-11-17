@@ -1043,7 +1043,15 @@ Settings, chapters show on the seek bar, and there is no Lock). Music's
 Now Playing and the bar of what plays at the bottom of the pages are
 car-sized the same way; Now Playing puts the cover beside the title,
 over the scrubber and the controls, as in any short, wide window (a
-phone on its side too). As the car moves off, Android Auto covers the
+phone on its side too). These layouts hold on every screen Android Auto
+gives parked apps, as Google's Desktop Head Unit configurations test
+them: a small landscape screen (800 × 480), the wide strip of a wide
+screen (1920 × 484) and a portrait one (1042 × 1080, as on tall screens
+such as the Mustang Mach-E's), and denser screens; their tests draw each
+and check every control. Whether a screen is a car's comes from
+Android Auto (`CarConnection`, as Google tells parked apps to check):
+another screen the phone drives, such as a monitor, keeps the phone's
+sizes. As the car moves off, Android Auto covers the
 window: the video pauses at once and its media session goes, so neither
 the car's buttons nor the steering wheel's can play it while driving; a
 channel is let go. Parked again, Play carries on (a channel plays again

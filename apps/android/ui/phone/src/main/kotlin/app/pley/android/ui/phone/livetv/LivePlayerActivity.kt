@@ -123,7 +123,7 @@ class LivePlayerActivity : ComponentActivity() {
         val remote = (application as PleyGraphOwner).screensGraph.data.remote
         setContent {
             PhoneTheme {
-                CarSized(onOtherScreen) {
+                CarSized(onCar) {
                     // Watch on…: the channel goes to the device, and the app's shell says so as this closes.
                     PlayOnWindow(
                         remote,
@@ -186,7 +186,7 @@ class LivePlayerActivity : ComponentActivity() {
     /** On a car's screen, covered as the car moves off: the channel goes at once, as it does out of sight. */
     override fun onPause() {
         super.onPause()
-        if (!onOtherScreen || isFinishing) return
+        if (!onCar || isFinishing) return
         vm.stop()
         stoppedCovered = true
     }
@@ -219,6 +219,9 @@ class LivePlayerActivity : ComponentActivity() {
 
     /** On a car's screen, or another display: asked each time, as the window can move to the phone's when the car goes. */
     private val onOtherScreen: Boolean get() = OtherScreen.shows(this)
+
+    /** On a car's screen (Android Auto): car-sized, and paused as the car moves off and covers it. */
+    private val onCar: Boolean get() = OtherScreen.isCar(this)
 
     private val pipSupported: Boolean get() = !onOtherScreen && pipAllowed
 
