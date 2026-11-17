@@ -76,7 +76,8 @@ internal class QueuePlayer(
         if (starting && now != null) {
             state.setPlaybackState(Player.STATE_BUFFERING)
                 .setPlayerError(null)
-                .setPlayWhenReady(now.playing || now.loading, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+                // Playing as it will: the output's own state between tracks (stopped, buffering) isn't a pause.
+                .setPlayWhenReady(now.playing || (if (loaded) now.loading else playback.startsPlaying), Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
             if (!loaded) state.setContentPositionMs(0)
         }
         return state.build()

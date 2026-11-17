@@ -253,6 +253,9 @@ class MusicPlayback(
     /** A track is being asked for (not the server asked about a failure): the output still holds the last one. */
     private val starting: Boolean get() = startJob.let { it != null && it === loadJob && it.isActive }
 
+    /** Whether the track being started plays once loaded (Pause pressed meanwhile: no), for the media session. */
+    internal val startsPlaying: Boolean get() = startPlays
+
     /** The job asking for the current track's session ([startTrack]). */
     private var startJob: Job? = null
 
@@ -469,6 +472,8 @@ class MusicPlayback(
 
         override fun onBuffering(buffering: Boolean) {
             if (loading == buffering) return
+            // The output stopped as the next track is asked for: still loading, not paused.
+            if (!buffering && starting) return
             loading = buffering
             publish()
         }
