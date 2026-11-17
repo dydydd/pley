@@ -6,6 +6,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.test.core.app.ApplicationProvider
 import app.pley.android.model.ItemKind
@@ -139,10 +140,20 @@ class QueuePlayerTest {
     @Test
     fun aTrackIsTheSameEntryWhileItIsAskedForLoadsAndPlays() {
         val changes = mutableListOf<String>()
+        var queues = 0
+        val seekable = mutableListOf<Boolean>()
         player.addListener(
             object : Player.Listener {
                 override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
                     changes += mediaMetadata.title.toString()
+                }
+
+                override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+                    queues++
+                }
+
+                override fun onAvailableCommandsChanged(availableCommands: Player.Commands) {
+                    seekable += availableCommands.contains(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
                 }
             },
         )
@@ -152,6 +163,8 @@ class QueuePlayerTest {
         val asked = player.currentMediaItem
         val length = player.duration
         assertEquals(180_000L, length)
+        assertEquals(0L, player.bufferedPosition)
+        assertTrue(player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM))
 
         // The output has it now, with its own name for it, a cover of its own and no length yet: a car would draw
         // Now Playing again for each of those, at every skip.
@@ -168,6 +181,10 @@ class QueuePlayerTest {
         assertEquals("Track 2", player.mediaMetadata.title.toString())
         assertEquals(length, player.duration)
         assertEquals(listOf("Track 2"), changes.distinct())
+        // Nor did the queue's entries change as it loaded (a car is sent the whole queue again when they do), nor what
+        // the session may do: seeking was on offer all along.
+        assertEquals(1, queues)
+        assertTrue(seekable.all { it })
         // A queue described without covers' addresses shows the one the output fetched.
         assertTrue(player.mediaMetadata.artworkData != null)
     }

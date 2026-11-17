@@ -31,6 +31,10 @@ import kotlin.math.abs
  * output still asks the server for it, loads it or plays it. A car draws
  * what plays again each time the entry changes, so one that changed as
  * the track loaded, and again as its art came, flickered at every skip.
+ * The same holds for what it may do: seeking stays on offer between
+ * tracks (a seek then changes nothing), so a car's scrubber isn't taken
+ * away and put back, and the queue's entries don't change as one loads,
+ * so the car isn't sent the whole queue again at each skip.
  * [words] says why a track doesn't play, in the language shown. Call
  * [queueChanged] when [playback]'s queue changes.
  */
@@ -61,7 +65,8 @@ internal class QueuePlayer(
         val playlist = queue.tracks.mapIndexed { i, track ->
             val item = describe(track)
             val listed = track.durationMs?.takeIf { it > 0 }?.let { it * 1000 } ?: C.TIME_UNSET
-            val data = MediaItemData.Builder(Uid(i, track.id))
+            // Seekable, loaded or not: every track is, and an entry that said so only once loaded would change the queue.
+            val data = MediaItemData.Builder(Uid(i, track.id)).setIsSeekable(true)
             if (i == queue.index && loaded && window != null) {
                 // The track the output plays: the entry it had while it loaded, with the output's tracks, and its length
                 // only where the library's is none or wrong (never none: a car would take its progress bar away).
@@ -71,8 +76,6 @@ internal class QueuePlayer(
                     .setMediaMetadata(metadata)
                     .setTracks(base.currentTracks)
                     .setDurationUs(lengthOf(window.durationUs, listed))
-                    .setIsSeekable(window.isSeekable)
-                    .setDefaultPositionUs(window.defaultPositionUs)
             } else {
                 // Another track, or the current one while it loads.
                 data.setMediaItem(item).setMediaMetadata(item.mediaMetadata).setDurationUs(listed)
@@ -89,7 +92,7 @@ internal class QueuePlayer(
                 .setIsLoading(false)
                 .setPlayerError(PlaybackException(words(failed), null, errorCodeOf(failed)))
                 .setPlayWhenReady(false, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
-            if (!loaded) state.setContentPositionMs(0)
+            if (!loaded) state.atTheStart()
             return state.build()
         }
         // Between tracks, and while a failed one is tried again, the output has nothing loaded, or an error: the session
@@ -101,10 +104,15 @@ internal class QueuePlayer(
                 .setPlayerError(null)
                 // Playing as it will: the output's own state between tracks (stopped, buffering) isn't a pause.
                 .setPlayWhenReady(now.wantsPlay, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
-            if (!loaded) state.setContentPositionMs(0)
+            if (!loaded) state.atTheStart()
         }
         return state.build()
     }
+
+    /** The start of a track the output doesn't hold yet, nothing of it buffered: where it is and what it has buffered are the last track's. */
+    private fun State.Builder.atTheStart(): State.Builder = setContentPositionMs(0)
+        .setContentBufferedPositionMs(PositionSupplier.ZERO)
+        .setTotalBufferedDurationMs(PositionSupplier.ZERO)
 
     /**
      * [listed], the entry's name and art as the queue lists it, with the
@@ -191,6 +199,10 @@ internal class QueuePlayer(
             Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
             Player.COMMAND_SEEK_TO_MEDIA_ITEM,
             Player.COMMAND_SEEK_TO_DEFAULT_POSITION,
+            // Within the track: the output takes them away while it prepares one, which the session doesn't pass on.
+            Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM,
+            Player.COMMAND_SEEK_BACK,
+            Player.COMMAND_SEEK_FORWARD,
             Player.COMMAND_SET_SHUFFLE_MODE,
             Player.COMMAND_SET_REPEAT_MODE,
             Player.COMMAND_GET_TIMELINE,
