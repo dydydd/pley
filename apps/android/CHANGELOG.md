@@ -18,8 +18,8 @@ describes how they are made.
   button.
 - Parked, the sideloaded app plays videos and Live TV on the car's screen
   with Android Auto (Android 15 and later, in cars that allow video
-  apps), with larger controls, 10-second skip buttons, and pausing as
-  soon as the car moves off. Music's Now Playing and its bar are larger
+  apps), with every page and control sized for the car, 10-second skip
+  buttons, and pausing as soon as the car moves off. Music's Now Playing and its bar are larger
   there too, on landscape, wide and portrait car screens.
 - Live TV's channels play as radio in Android Auto: a Live TV tab with
   favourites, channels watched lately and groups, channel search, and
@@ -30,6 +30,8 @@ describes how they are made.
 - Pause pressed while a track is starting now keeps it paused once it
   loads, instead of playing it.
 - The phone's media controls show the cover of what plays.
+- The home page's banner fits a phone turned on its side, its title and
+  Play in view.
 - Now Playing fits a phone turned on its side, with the cover beside
   the title, instead of the cover hiding the controls.
 

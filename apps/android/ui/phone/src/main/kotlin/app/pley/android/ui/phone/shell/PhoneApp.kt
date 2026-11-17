@@ -96,9 +96,12 @@ import app.pley.android.ui.phone.kit.LocalPhoneDeviceTier
 import app.pley.android.ui.phone.kit.OfflineAction
 import app.pley.android.ui.phone.kit.ToastHost
 import app.pley.android.ui.phone.library.libraryEntries
+import app.pley.android.ui.phone.livetv.liveTvEntries
 import app.pley.android.ui.phone.music.musicEntries
 import app.pley.android.ui.phone.onboarding.onboardingEntries
-import app.pley.android.ui.phone.livetv.liveTvEntries
+import app.pley.android.ui.phone.player.CarSized
+import app.pley.android.ui.phone.player.LocalCarScreen
+import app.pley.android.ui.phone.player.onCarScreen
 import app.pley.android.ui.phone.playlists.playlistsEntries
 import app.pley.android.ui.phone.remote.CastTarget
 import app.pley.android.ui.phone.remote.CastsSent
@@ -147,9 +150,13 @@ fun PhoneApp(
     graph: () -> ScreensGraph,
 ) {
     PhoneTheme {
-        Box(Modifier.fillMaxSize().semantics { testTagsAsResourceId = true }.testTag(TestTags.PHONE_ROOT)) {
-            val known by produceState(start) { if (value == null) value = awaitStart() }
-            known?.let { PhoneShell(it, graph) }
+        // On a car's screen (Android Auto, parked), every page is car-sized, as Google's car criteria ask of a parked
+        // app: 64 dp buttons, no text under 24 sp.
+        CarSized(onCarScreen()) {
+            Box(Modifier.fillMaxSize().semantics { testTagsAsResourceId = true }.testTag(TestTags.PHONE_ROOT)) {
+                val known by produceState(start) { if (value == null) value = awaitStart() }
+                known?.let { PhoneShell(it, graph) }
+            }
         }
     }
 }
@@ -345,6 +352,7 @@ private fun Tabs(navigation: PhoneNavigation, shell: PhoneShellState, entries: (
     }
     val metrics = LocalPhoneMetrics.current
     val rail = metrics.rail
+    val car = LocalCarScreen.current
     val tab = navigation.tab
     val itemColors = ShortNavigationBarItemDefaults.colors(
         selectedIconColor = PleyColors.AccentBright,
@@ -357,14 +365,17 @@ private fun Tabs(navigation: PhoneNavigation, shell: PhoneShellState, entries: (
     NavigationSuiteScaffold(
         navigationItems = {
             PhoneTab.entries.forEach { item ->
+                val name = stringResource(item.label)
                 NavigationSuiteItem(
                     selected = item == tab,
                     onClick = { navigation.select(item) },
                     icon = {
-                        val icon = @Composable { Icon(item.icon, contentDescription = null, tint = LocalContentColor.current) }
+                        // On a car's screen, icons alone, read out by name, as Android Auto's own rail has them: its
+                        // short screen has no room for labels at 24 sp.
+                        val icon = @Composable { Icon(item.icon, contentDescription = if (car) name else null, tint = LocalContentColor.current) }
                         if (item == PhoneTab.Me) RequestsTabIcon(shell.requests, icon) else icon()
                     },
-                    label = { FittedLabel(stringResource(item.label)) },
+                    label = if (car) null else ({ FittedLabel(name) }),
                     colors = itemColors,
                     modifier = Modifier.testTag(TAB_TAG + item.name),
                 )

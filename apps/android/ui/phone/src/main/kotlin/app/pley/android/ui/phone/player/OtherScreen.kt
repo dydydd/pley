@@ -2,6 +2,7 @@ package app.pley.android.ui.phone.player
 
 import android.app.Activity
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.view.Display
 import androidx.activity.compose.LocalActivity
 import androidx.car.app.connection.CarConnection
@@ -19,6 +20,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import app.pley.android.ui.phone.theme.LocalPhoneMetrics
+import app.pley.android.ui.phone.theme.rememberPhoneMetrics
 
 /**
  * Whether a window shows on a screen other than the device's own: the
@@ -35,9 +38,19 @@ object OtherScreen {
      * [activity] shows on a car's screen: another screen while Android Auto
      * projects ([CarConnection], as Google tells parked apps to check).
      * Until Android Auto has answered, another screen counts as a car's:
-     * an app it opens starts before the answer comes.
+     * an app it opens starts before the answer comes. A debuggable build
+     * counts the developer options' simulated displays as cars' too, so the
+     * car's layouts can be tried on an emulator, where Android Auto can't run.
      */
-    fun isCar(activity: Activity): Boolean = shows(activity) && projected != false
+    fun isCar(activity: Activity): Boolean {
+        if (!shows(activity)) return false
+        if (projected != false) return true
+        val debuggable = activity.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        return debuggable && ContextCompat.getDisplayOrDefault(activity).name.startsWith(SIMULATED_DISPLAY)
+    }
+
+    /** How Android names the displays its developer options simulate ("Overlay #1"). */
+    private const val SIMULATED_DISPLAY = "Overlay #"
 
     /** Whether Android Auto projects now; `null` until it says. */
     @Volatile
@@ -69,7 +82,8 @@ internal val LocalCarScreen = staticCompositionLocalOf { false }
  */
 @Composable
 internal fun CarSized(car: Boolean, content: @Composable () -> Unit) {
-    if (!car) {
+    // Already car-sized by the page around it (the whole app is, on a car's screen): not again.
+    if (!car || LocalCarScreen.current) {
         content()
         return
     }
@@ -80,7 +94,10 @@ internal fun CarSized(car: Boolean, content: @Composable () -> Unit) {
     val larger = remember(density) { Density(density.density * CAR_SCALE, fontScale = 1f) }
     val readable = remember(type) { type.atLeast((CAR_TEXT.value / CAR_SCALE).sp) }
     CompositionLocalProvider(LocalDensity provides larger, LocalCarScreen provides true) {
-        MaterialTheme(colorScheme = MaterialTheme.colorScheme, typography = readable, shapes = MaterialTheme.shapes, content = content)
+        // The page's widths and margins as the car's dp have them, not the phone's: measured again inside.
+        CompositionLocalProvider(LocalPhoneMetrics provides rememberPhoneMetrics()) {
+            MaterialTheme(colorScheme = MaterialTheme.colorScheme, typography = readable, shapes = MaterialTheme.shapes, content = content)
+        }
     }
 }
 

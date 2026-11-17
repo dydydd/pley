@@ -1059,9 +1059,10 @@ sheets, menus and messages too, and the controls over the video keep
 24 dp from each other and from the screen's edges. Play sits between
 10 seconds back and 10 seconds forward, the seek bar is taller, and the
 bottom row keeps Subtitles, Audio, Fit and Next episode (Quality is in
-Settings, chapters show on the seek bar, and there is no Lock). Music's
-Now Playing and the bar of what plays at the bottom of the pages are
-car-sized the same way; Now Playing puts the cover beside the title,
+Settings, chapters show on the seek bar, and there is no Lock). Every
+page of the app is car-sized the same way, its rail showing icons alone
+as Android Auto's own does, and the home page's banner no taller than
+the screen; music's Now Playing and the bar of what plays too; Now Playing puts the cover beside the title,
 over the scrubber and the controls, as in any short, wide window (a
 phone on its side too). These layouts hold on every screen Android Auto
 gives parked apps, as Google's Desktop Head Unit configurations test
@@ -1071,7 +1072,9 @@ such as the Mustang Mach-E's), and denser screens; their tests draw each
 and check every control. Whether a screen is a car's comes from
 Android Auto (`CarConnection`, as Google tells parked apps to check):
 another screen the phone drives, such as a monitor, keeps the phone's
-sizes. As the car moves off, Android Auto covers the
+sizes. A debuggable build counts the displays the developer options
+simulate as cars' too, so these layouts can be tried on an emulator,
+where Android Auto itself doesn't run. As the car moves off, Android Auto covers the
 window: the video pauses at once and its media session goes, so neither
 the car's buttons nor the steering wheel's can play it while driving; a
 channel is let go. Parked again, Play carries on (a channel plays again

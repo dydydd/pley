@@ -342,7 +342,8 @@ private fun titleStyle(title: String) = when {
 @Composable
 private fun bannerHeight(): Dp {
     val window = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() }
-    return if (window > 0.dp) maxOf(window * 0.72f, MinHeight).coerceAtMost(MaxHeight) else MinHeight
+    // No taller than the window: on a short one (a car's screen, a phone on its side) its title and Play stay in view.
+    return if (window > 0.dp) maxOf(window * 0.72f, MinHeight).coerceAtMost(MaxHeight).coerceAtMost(window) else MinHeight
 }
 
 private val TitleShadow = Shadow(Color.Black.copy(alpha = 0.45f), Offset(0f, 2f), blurRadius = 24f)
