@@ -66,6 +66,8 @@ describes how they are made.
 - "Loading…" no longer blinks under the title at every change of track.
 - The home page's banner fits a phone turned on its side, its title and
   Play in view, also above the bar of what plays.
+- The next episode's Play now button shows its countdown whole in French
+  and Spanish, with Cancel under it when they don't fit side by side.
 - Play and Shuffle on an artist's or album's page are the same height.
 - Now Playing fits a phone turned on its side, with the cover beside
   the title, instead of the cover hiding the controls.
