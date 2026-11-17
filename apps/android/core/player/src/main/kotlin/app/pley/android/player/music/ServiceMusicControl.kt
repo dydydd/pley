@@ -25,7 +25,13 @@ import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 /**
  * The app's [MusicControl]: the process's [MusicPlayback], with a
@@ -160,8 +166,37 @@ class ServiceMusicControl(
             )
             val playback = MusicPlayback(env, main)
             MusicHub.playback = playback
+            MusicHub.resume = remembering(playback, data, main)
             return ServiceMusicControl(app, playback)
         }
+
+        /**
+         * [playback]'s queue and place kept as they change, for Play to
+         * bring back once the app has left memory ([MusicResume]): the queue
+         * when it changes, the place at each track, pause and seek, and
+         * every [PLACE_EVERY_MS] while it plays. The empty queue a process
+         * starts with forgets nothing; one stopped does.
+         */
+        private fun remembering(playback: MusicPlayback, data: DataGraph, main: CoroutineScope): MusicResume {
+            val resume = MusicResume(data.snapshots::read, data.snapshots::write, main)
+            val keep = { resume.keep(playback.queueState.value, playback.position().positionMs) }
+            main.launch { playback.queueState.drop(1).collect { keep() } }
+            main.launch {
+                playback.nowPlaying.map { now -> now?.let { Triple(it.wantsPlay, it.seeks, it.ended) } }.distinctUntilChanged().drop(1).collect { keep() }
+            }
+            main.launch {
+                playback.nowPlaying.map { it?.playing == true }.distinctUntilChanged().collectLatest { playing ->
+                    while (playing) {
+                        delay(PLACE_EVERY_MS)
+                        keep()
+                    }
+                }
+            }
+            return resume
+        }
+
+        /** How often the place in a playing track is kept: what Play brings back is at most this far behind. */
+        private const val PLACE_EVERY_MS = 15_000L
 
         /** Music's player id: the device's, marked, so music and video don't end each other's sessions. */
         const val MUSIC_SUFFIX = "-music"

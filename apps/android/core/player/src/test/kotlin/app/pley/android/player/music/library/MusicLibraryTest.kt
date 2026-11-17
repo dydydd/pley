@@ -176,6 +176,12 @@ class MusicLibraryTest {
 
         source.found = emptyList()
         assertNull(library.selectionFor("nothing like it"))
+        // A music playlist by its name, as said ("play my Night Drive playlist"), or by a part of it when nothing
+        // else is found; never a video one.
+        val named = library.selectionFor(" night DRIVE ")!!
+        assertEquals(library.selection(MusicId.Playlist(7))!!.tracks.map { it.id }, named.tracks.map { it.id })
+        assertEquals(named.tracks.map { it.id }, library.selectionFor("night")!!.tracks.map { it.id })
+        assertNull(library.selectionFor("Trailers"))
     }
 
     @Test

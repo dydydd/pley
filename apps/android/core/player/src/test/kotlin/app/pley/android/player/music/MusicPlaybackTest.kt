@@ -669,6 +669,20 @@ class MusicPlaybackTest {
     }
 
     @Test
+    fun whatWasPlayingIsBroughtBackWhereItWas() = runTest {
+        val music = music()
+        music.setRepeat(MusicRepeat.One)
+        music.play(album, startIndex = 2, startMs = 61_000)
+        runCurrent()
+        val request = starts().single()
+        assertEquals(3L, request.itemId)
+        assertEquals(61_000L, request.startMs)
+        assertEquals(61_000L, output.startPositions.single())
+        assertTrue(output.wants)
+        assertEquals(MusicRepeat.One, music.nowPlaying.value?.repeat)
+    }
+
+    @Test
     fun aSeekFromAnywhereIsToldSoWhateverShowsThePositionReadsItAgainPausedToo() = runTest {
         val music = music()
         music.play(album, startIndex = 1)

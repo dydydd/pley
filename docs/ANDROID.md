@@ -1045,8 +1045,17 @@ A track that can't play says why on the car's screen (the server out of
 reach, the session ended by the server, a file it can't play), and Play
 tries it again.
 
-"Hey Google, play … on Pley" plays the closest artist (shuffled),
-album or track; "play music on Pley" plays the album added last. Signed
+"Hey Google, play … on Pley" plays the music playlist named so, else
+the closest artist (shuffled), album or track; "play music on Pley"
+plays on what was playing, else the album added last.
+
+Music picks up where it was after Android has ended the app (one paused
+a while, say): the queue, the place in it and what repeats are kept on
+the device with the profile's saved things, for that profile alone and
+until it signs out or the music is stopped, and Play on the car's
+steering wheel, in Android Auto or in the phone's media controls plays
+it again from there. A long queue keeps the 500 tracks around the one
+that played. Signed
 out, the car says to open Pley on the phone and sign in when it is safe,
 with a button that opens it. The car reads the covers from the app, as the server's
 pictures need the profile's token: the app grants Android Auto, and the

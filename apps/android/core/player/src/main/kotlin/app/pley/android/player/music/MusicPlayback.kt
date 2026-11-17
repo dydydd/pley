@@ -243,10 +243,11 @@ class MusicPlayback(
         return MusicPosition(position.coerceAtLeast(0), duration, o.bufferedMs.coerceAtLeast(0))
     }
 
-    fun play(tracks: List<ItemSummary>, startIndex: Int = 0, shuffle: Boolean = false) {
+    /** Plays [tracks] from the one at [startIndex], [startMs] into it (what was playing, brought back where it was). */
+    fun play(tracks: List<ItemSummary>, startIndex: Int = 0, shuffle: Boolean = false, startMs: Long = 0) {
         if (tracks.isEmpty()) return
         queue.start(tracks, startIndex, shuffle)
-        startTrack(0)
+        startTrack(startMs.coerceAtLeast(0))
     }
 
     /** Plays, or after the queue's end, a failure or a video, starts the current track again. */

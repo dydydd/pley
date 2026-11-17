@@ -13,6 +13,7 @@ import app.pley.android.model.PlaylistKind
 import app.pley.android.model.format.formatClockMs
 import app.pley.android.model.PlaylistSummary
 import app.pley.android.player.music.MusicPlayback
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -133,21 +134,32 @@ class MusicLibrary(
     }
 
     /**
-     * What a spoken request plays ("play … on Pley"): the closest artist,
-     * album or track found, an artist shuffled; with nothing said, the
-     * album added last.
+     * What a spoken request plays ("play … on Pley"): the music playlist
+     * named so, else the closest artist, album or track found, an artist
+     * shuffled, else the playlist whose name holds what was said; with
+     * nothing said, the album added last.
      */
     suspend fun selectionFor(query: String): MusicSelection? {
         if (query.isBlank()) {
             val album = source.libraries().firstNotNullOfOrNull { source.recentlyAdded(it.id).firstOrNull { a -> a.kind == ItemKind.Album } }
             return album?.let { selection(MusicId.Album(it.id)) }
         }
+        val said = query.trim()
+        // The profile's own playlists first: the search doesn't list them, and "my Road Trip playlist" names one exactly.
+        val playlists = try {
+            musicPlaylists()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            emptyList()
+        }
+        playlists.firstOrNull { it.title.trim().equals(said, ignoreCase = true) }?.let { named -> selection(MusicId.Playlist(named.id))?.let { return it } }
         val best = source.search(query).firstOrNull { it.kind == ItemKind.Artist || it.kind == ItemKind.Album || it.kind == ItemKind.Track }
         return when (best?.kind) {
             ItemKind.Artist -> selection(MusicId.ShuffleArtist(best.id))
             ItemKind.Album -> selection(MusicId.Album(best.id))
             ItemKind.Track -> selection(MusicId.Track(best.id))
-            else -> null
+            else -> playlists.firstOrNull { it.title.contains(said, ignoreCase = true) }?.let { selection(MusicId.Playlist(it.id)) }
         }
     }
 

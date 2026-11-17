@@ -22,6 +22,11 @@ describes how they are made.
 - Now Playing moves from one track to the next: the cover stays until the
   next one fades in, the title slides to the next track's, and the
   scrubber glides.
+- Music picks up where it was when Android has ended the app meanwhile:
+  Play in the car, in Android Auto or in the phone's media controls
+  plays the queue again from where it was.
+- "Hey Google, play … on Pley" finds music playlists by name, and "play
+  music on Pley" plays on what was playing.
 - Parked, the sideloaded app plays videos and Live TV on the car's screen
   with Android Auto (Android 15 and later, in cars that allow video
   apps), with every page and control sized for the car, on landscape,
