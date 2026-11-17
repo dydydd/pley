@@ -75,7 +75,9 @@ internal fun CarSized(car: Boolean, content: @Composable () -> Unit) {
     }
     val density = LocalDensity.current
     val type = MaterialTheme.typography
-    val larger = remember(density) { Density(density.density * CAR_SCALE, density.fontScale) }
+    // The car's screen sets its text's size, as Android Auto's own does: the phone's font size setting would push it out
+    // of the car's layouts, which already hold no text under 24 sp.
+    val larger = remember(density) { Density(density.density * CAR_SCALE, fontScale = 1f) }
     val readable = remember(type) { type.atLeast((CAR_TEXT.value / CAR_SCALE).sp) }
     CompositionLocalProvider(LocalDensity provides larger, LocalCarScreen provides true) {
         MaterialTheme(colorScheme = MaterialTheme.colorScheme, typography = readable, shapes = MaterialTheme.shapes, content = content)
@@ -94,7 +96,7 @@ internal fun CarSizedWindow(content: @Composable () -> Unit) {
         return
     }
     val density = LocalDensity.current
-    val larger = remember(density) { Density(density.density * CAR_SCALE, density.fontScale) }
+    val larger = remember(density) { Density(density.density * CAR_SCALE, fontScale = 1f) }
     CompositionLocalProvider(LocalDensity provides larger, content = content)
 }
 

@@ -31,7 +31,11 @@ class ShownScreen : Application.ActivityLifecycleCallbacks {
 
     override fun onActivityStarted(activity: Activity) = Unit
 
-    override fun onActivityPaused(activity: Activity) = Unit
+    // Left (a car covers it as it moves off, or the app goes to the background): a player opened now, by a cast
+    // from another device, opens on the phone's own screen rather than one nobody may watch.
+    override fun onActivityPaused(activity: Activity) {
+        if (ContextCompat.getDisplayOrDefault(activity).displayId == displayId) displayId = Display.DEFAULT_DISPLAY
+    }
 
     override fun onActivityStopped(activity: Activity) = Unit
 

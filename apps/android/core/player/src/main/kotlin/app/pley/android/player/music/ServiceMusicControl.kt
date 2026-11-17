@@ -67,6 +67,9 @@ class ServiceMusicControl(
     override fun setShuffle(shuffle: Boolean) = onMain { playback.setShuffle(shuffle) }
 
     override fun stop() = onMain {
+        // Signed out, another profile, or the app ending what plays: the car's radio stops for good too, before the
+        // music, so the service ends the session or shows the music again (MusicService.stopped).
+        MusicHub.radio?.close()
         playback.stop()
         disconnect()
     }

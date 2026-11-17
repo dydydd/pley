@@ -3,8 +3,10 @@ package app.pley.android.player.music
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.Bundle
+import android.os.Process
 import android.view.KeyEvent
 import androidx.annotation.OptIn
 import androidx.core.content.IntentCompat
@@ -123,8 +125,21 @@ class MusicService : MediaLibraryService() {
             // A track starting, failing or loaded changes what the session says plays.
             launch { playback.nowPlaying.collect { player?.queueChanged() } }
             // Shuffle's button shows whether it is on, as the queue changes from anywhere.
-            launch { playback.queueState.map { it.shuffle }.distinctUntilChanged().drop(1).collect { made.setMediaButtonPreferences(buttons(it)) } }
-            graph?.musicLibrary?.let { library -> launch { library.signedInChanges.drop(1).collect { tellCars(made, it) } } }
+            launch {
+                playback.queueState.map { it.shuffle }.distinctUntilChanged().drop(1).collect {
+                    // The radio has no Shuffle: the music's comes back with the music (showMusic).
+                    if (radio?.active != true) made.setMediaButtonPreferences(buttons(it))
+                }
+            }
+            // Signed out or another profile: the radio (the last profile's Live TV) stops, and cars read the library again.
+            graph?.musicLibrary?.let { library ->
+                launch {
+                    library.profileChanges.drop(1).collect { profile ->
+                        showMusic(made, playback, library.library)
+                        tellCars(made, signedIn = profile != null)
+                    }
+                }
+            }
             // Music playing again (from the phone, the car's own controls) takes the session back from the radio.
             launch {
                 playback.nowPlaying.map { it?.playing == true }.distinctUntilChanged().collect { playing ->
@@ -163,6 +178,7 @@ class MusicService : MediaLibraryService() {
         if (next != null) {
             made.player = next
             player = next
+            made.setMediaButtonPreferences(buttons(playback.queueState.value.shuffle))
             return
         }
         end(made, playback)
@@ -239,7 +255,7 @@ class MusicService : MediaLibraryService() {
     private fun allowed(controller: MediaSession.ControllerInfo, session: MediaSession?): Boolean =
         controller.packageName == packageName ||
             (session != null && session.isMediaNotificationController(controller)) ||
-            controller.isTrusted ||
+            (controller.isTrusted && isSystem(controller)) ||
             isCar(controller.packageName)
 
     /** Lets [packageName] read the library's pictures ([MusicArt]), and nothing else of the app's. */
@@ -251,6 +267,16 @@ class MusicService : MediaLibraryService() {
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
             )
         }
+    }
+
+    /**
+     * Whether [controller] is the system's own (its media controls, Bluetooth, the lock screen): Media3 also trusts
+     * any app given access to notifications (a watch's companion, an automation app), which may not drive the music.
+     */
+    private fun isSystem(controller: MediaSession.ControllerInfo): Boolean {
+        if (controller.uid in 0 until Process.FIRST_APPLICATION_UID) return true
+        val info = runCatching { packageManager.getApplicationInfo(controller.packageName, 0) }.getOrNull() ?: return false
+        return info.uid == controller.uid && info.flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
     }
 
     private fun isCar(packageName: String): Boolean = packageName != this.packageName && MusicCallers.allowed(packageManager, packageName)
@@ -273,8 +299,9 @@ class MusicService : MediaLibraryService() {
 
     /** Signed out, each car shows why it plays nothing, and a button opening Pley on the phone; signed in again, it clears. */
     private fun tellCars(made: MediaLibrarySession, signedIn: Boolean) {
-        // Cars read the platform session's state, which Media3 makes from its notification controller's.
-        made.setPlaybackException(made.mediaNotificationControllerInfo ?: return, if (signedIn) null else signedOutError())
+        // Cars read the platform session's state, which Media3 makes from its notification controller's: told again
+        // once that controller connects (onPostConnect), when it comes after the car.
+        made.mediaNotificationControllerInfo?.let { made.setPlaybackException(it, if (signedIn) null else signedOutError()) }
         made.notifyChildrenChanged(MusicId.Root.text, 0, null)
     }
 
@@ -304,7 +331,7 @@ class MusicService : MediaLibraryService() {
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
                 .setAvailableSessionCommands(accepted.availableSessionCommands.buildUpon().add(SHUFFLE).build())
                 .setAvailablePlayerCommands(accepted.availablePlayerCommands)
-                .setMediaButtonPreferences(buttons(playback.queueState.value.shuffle))
+                .setMediaButtonPreferences(if (radio?.active == true) emptyList() else buttons(playback.queueState.value.shuffle))
                 .build()
         }
 
@@ -322,7 +349,8 @@ class MusicService : MediaLibraryService() {
 
         override fun onPostConnect(session: MediaSession, controller: MediaSession.ControllerInfo) {
             val library = graph ?: return
-            if (isCar(controller.packageName) && !library.signedIn()) tellCars(session as MediaLibrarySession, signedIn = false)
+            val tells = isCar(controller.packageName) || session.isMediaNotificationController(controller)
+            if (tells && !library.signedIn()) tellCars(session as MediaLibrarySession, signedIn = false)
         }
 
         /**
@@ -330,8 +358,9 @@ class MusicService : MediaLibraryService() {
          * music either, the session and the service go, as after a stop.
          */
         override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
-            if (!isCar(controller.packageName)) return
-            if (session.connectedControllers.any { it != controller && isCar(it.packageName) }) return
+            // Android Auto is the car: the Google app staying connected (the Assistant) keeps neither the radio nor the session.
+            if (controller.packageName != MusicCallers.ANDROID_AUTO || !isCar(controller.packageName)) return
+            if (session.connectedControllers.any { it != controller && it.packageName == MusicCallers.ANDROID_AUTO }) return
             showMusic(session as MediaLibrarySession, playback, graph?.library)
             if (!playback.active) end(session, playback)
         }

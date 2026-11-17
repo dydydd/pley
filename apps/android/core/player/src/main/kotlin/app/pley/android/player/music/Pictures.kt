@@ -31,14 +31,21 @@ internal suspend fun fetchPicture(network: NetworkGraph, url: String): ByteArray
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    val bytes = response.use { r ->
-                        if (!r.isSuccessful) null else runCatching { r.body.bytes() }.getOrNull()?.takeIf { it.size <= MAX_PICTURE_BYTES }
-                    }
+                    val bytes = response.use { r -> if (r.isSuccessful) runCatching { bounded(r) }.getOrNull() else null }
                     continuation.resumeWith(Result.success(bytes))
                 }
             },
         )
     }
+}
+
+/** [response]'s body, read only as far as [MAX_PICTURE_BYTES]: `null` when it is bigger. */
+private fun bounded(response: Response): ByteArray? {
+    if (response.body.contentLength() > MAX_PICTURE_BYTES) return null
+    val source = response.body.source()
+    // True when that much and one byte more came: too big, and nothing more is read.
+    if (source.request(MAX_PICTURE_BYTES + 1L)) return null
+    return source.buffer.readByteArray()
 }
 
 /** Pictures bigger than this aren't shown. */

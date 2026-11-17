@@ -257,19 +257,24 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
 
     override fun onResume() {
         super.onResume()
-        // Parked again on a car's screen: the media session comes back, paused.
+        // Parked again on a car's screen: the media session comes back, paused, and the remote is obeyed again.
+        if (onCar) controller.value?.setAway(false)
         val engine = attached
         if (engine != null && mediaSession == null) mediaSession = VideoMediaSession(this, engine.player).also { it.start() }
     }
 
     /**
      * On a car's screen, covered as the car moves off: the video pauses at
-     * once, and its media session goes, so nothing plays it while driving.
+     * once, its media session goes, and it is away, so nothing plays it
+     * while driving: not the car's buttons, nor the profile's remote.
      */
     override fun onPause() {
         super.onPause()
         if (!onCar || isFinishing) return
-        controller.value?.pause()
+        controller.value?.let {
+            it.pause()
+            it.setAway(true)
+        }
         mediaSession?.stop()
         mediaSession = null
     }

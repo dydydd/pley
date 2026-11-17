@@ -127,13 +127,14 @@ class LiveRadio(
                 .setPlayWhenReady(playing, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
                 .setPlaybackState(playbackState)
                 .setPlayerError(error)
-                .setPlaylist(channels.map(::itemData))
+                .setPlaylist(channels.mapIndexed(::itemData))
                 .setCurrentMediaItemIndex(if (channels.isEmpty()) C.INDEX_UNSET else index)
                 .setContentPositionMs(0)
                 .build()
         }
 
-        private fun itemData(channel: LiveChannel): MediaItemData = MediaItemData.Builder(channel.id)
+        // By place as well as channel: a list can name a channel twice, and a playlist's uids differ.
+        private fun itemData(position: Int, channel: LiveChannel): MediaItemData = MediaItemData.Builder(position to channel.id)
             .setMediaItem(describe(channel))
             // Live: what airs now, without an end, a length or a place to seek to.
             .setIsDynamic(true)
@@ -169,6 +170,16 @@ class LiveRadio(
         // What plays is set by the service as the car picks it (MusicService.onSetMediaItems): the session's own
         // setMediaItems that follows changes nothing.
         override fun handleSetMediaItems(mediaItems: MutableList<MediaItem>, startIndex: Int, startPositionMs: Long): ListenableFuture<*> =
+            Futures.immediateVoidFuture()
+
+        // The list is the one picked from: a controller's edits to it (a car's queue) change nothing.
+        override fun handleAddMediaItems(index: Int, mediaItems: List<MediaItem>): ListenableFuture<*> = Futures.immediateVoidFuture()
+
+        override fun handleRemoveMediaItems(fromIndex: Int, toIndex: Int): ListenableFuture<*> = Futures.immediateVoidFuture()
+
+        override fun handleMoveMediaItems(fromIndex: Int, toIndex: Int, newIndex: Int): ListenableFuture<*> = Futures.immediateVoidFuture()
+
+        override fun handleReplaceMediaItems(fromIndex: Int, toIndex: Int, mediaItems: List<MediaItem>): ListenableFuture<*> =
             Futures.immediateVoidFuture()
 
         override fun handlePrepare(): ListenableFuture<*> = Futures.immediateVoidFuture()

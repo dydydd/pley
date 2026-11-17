@@ -67,7 +67,8 @@ class RepositoryLiveSource(private val data: DataGraph) : LiveSource {
             if (got.channels.isEmpty() || got.offset + got.channels.size >= got.total) break
             page++
         }
-        return found.take(limit)
+        // Pages read one after another can overlap as the list changes between them (a channel watched meanwhile).
+        return found.distinctBy { it.id }.take(limit)
     }
 
     override suspend fun channel(id: Long): LiveChannel? = live.channel(id).settledIn(data)

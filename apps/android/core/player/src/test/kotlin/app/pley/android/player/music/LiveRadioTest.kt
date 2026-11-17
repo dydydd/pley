@@ -104,6 +104,20 @@ class LiveRadioTest {
     }
 
     @Test
+    fun aCarsEditsToTheListChangeNothingAndAChannelListedTwiceIsFine() {
+        radio.play(channels + channels.first(), 0)
+        settle()
+        val player = radio.player
+        assertEquals(4, player.mediaItemCount)
+        // A car's queue may ask to remove or move entries: the list is the one picked from.
+        player.removeMediaItem(1)
+        player.moveMediaItem(0, 2)
+        player.addMediaItem(MediaItem.fromUri("http://elsewhere/other"))
+        settle()
+        assertEquals(listOf("channel:1", "channel:2", "channel:5", "channel:1"), (0 until player.mediaItemCount).map { player.getMediaItemAt(it).mediaId })
+    }
+
+    @Test
     fun closedItHasNothing() {
         val player = playing()
         radio.close()

@@ -44,8 +44,11 @@ class MusicLibraryGraph(
     /** Whether a profile is signed in now: the library has nothing to show otherwise. */
     fun signedIn(): Boolean = sessions.value != null
 
-    /** [signedIn] as it changes, now first. */
-    val signedInChanges: Flow<Boolean> get() = sessions.map { it != null }.distinctUntilChanged()
+    /**
+     * Who is signed in ("server/profile"), `null` when no one is, as it
+     * changes, now first: another profile has another library and Live TV.
+     */
+    val profileChanges: Flow<String?> get() = sessions.map { s -> s?.let { "${it.issuer}/${it.me?.id}" } }.distinctUntilChanged()
 
     private val sessions = data.session.session
 

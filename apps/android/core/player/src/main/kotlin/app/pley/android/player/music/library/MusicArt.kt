@@ -9,6 +9,8 @@ import android.os.ParcelFileDescriptor
 import app.pley.android.player.PlayerGraphOwner
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -57,16 +59,20 @@ class MusicArtProvider : ContentProvider() {
         if (mode != "r") throw FileNotFoundException("Read only")
         val path = MusicArt.pathOf(context, uri) ?: throw FileNotFoundException()
         val owner = context.applicationContext as? PlayerGraphOwner ?: throw FileNotFoundException()
-        // A binder thread: the car waits for the picture, at most FETCH_MS.
-        val bytes = runBlocking { withTimeoutOrNull(FETCH_MS) { owner.playerGraph.musicLibrary?.picture(path) } } ?: throw FileNotFoundException()
+        // The pipe goes back at once and the picture follows, fetched on the provider's own threads: a car's grid of
+        // covers asks for many at a time, and a binder thread held while each one comes from the server holds up every
+        // other call into the app. One that can't be had in FETCH_MS ends the pipe empty: the car shows no cover.
         val (read, write) = ParcelFileDescriptor.createPipe()
-        Thread {
-            try {
-                ParcelFileDescriptor.AutoCloseOutputStream(write).use { it.write(bytes) }
-            } catch (_: IOException) {
-                // The car stopped reading.
+        FETCHES.execute {
+            ParcelFileDescriptor.AutoCloseOutputStream(write).use { out ->
+                val bytes = runBlocking { withTimeoutOrNull(FETCH_MS) { owner.playerGraph.musicLibrary?.picture(path) } }
+                try {
+                    if (bytes != null) out.write(bytes)
+                } catch (_: IOException) {
+                    // The car stopped reading.
+                }
             }
-        }.start()
+        }
         return read
     }
 
@@ -82,5 +88,8 @@ class MusicArtProvider : ContentProvider() {
 
     private companion object {
         const val FETCH_MS = 10_000L
+
+        /** The pictures fetched at once; the rest wait their turn. */
+        val FETCHES: ExecutorService = Executors.newFixedThreadPool(4)
     }
 }
