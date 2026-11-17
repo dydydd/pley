@@ -25,8 +25,9 @@ describes how they are made.
 - Music picks up where it was when Android has ended the app meanwhile:
   Play in the car, in Android Auto or in the phone's media controls
   plays the queue again from where it was.
-- "Hey Google, play … on Pley" finds music playlists by name, and "play
-  music on Pley" plays on what was playing.
+- "Hey Google, play … on Pley" finds music playlists by name ("my … playlist"
+  too), says so when it finds nothing, and "play music on Pley" plays on
+  what was playing.
 - Parked, the sideloaded app plays videos and Live TV on the car's screen
   with Android Auto (Android 15 and later, in cars that allow video
   apps), with every page and control sized for the car, on landscape,

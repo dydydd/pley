@@ -1045,9 +1045,13 @@ A track that can't play says why on the car's screen (the server out of
 reach, the session ended by the server, a file it can't play), and Play
 tries it again.
 
-"Hey Google, play … on Pley" plays the music playlist named so, else
-the closest artist (shuffled), album or track; "play music on Pley"
-plays on what was playing, else the album added last.
+"Hey Google, play … on Pley" plays the music playlist named so (by the
+name the Assistant heard, or said with a word for a playlist, as in "my
+Night Drive playlist", in English, French and Spanish), else the closest
+artist (shuffled), album or track; "play music on Pley" plays on what
+was playing, else the album added last. A request that finds nothing
+says so on the car's screen for a moment ("Pley found no music for …"),
+and what was playing plays on.
 
 Music picks up where it was after Android has ended the app (one paused
 a while, say): the queue, the place in it and what repeats are kept on

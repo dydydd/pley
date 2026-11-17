@@ -135,16 +135,20 @@ class MusicLibrary(
 
     /**
      * What a spoken request plays ("play … on Pley"): the music playlist
-     * named so, else the closest artist, album or track found, an artist
-     * shuffled, else the playlist whose name holds what was said; with
-     * nothing said, the album added last.
+     * named so ([playlist], the Assistant's own reading of the name, first;
+     * then what was said, with or without its word for a playlist: "my
+     * Night Drive playlist" names "Night Drive"), else the closest artist,
+     * album or track found, an artist shuffled, else the playlist whose name
+     * holds what was said; with nothing said, the album added last.
      */
-    suspend fun selectionFor(query: String): MusicSelection? {
-        if (query.isBlank()) {
+    suspend fun selectionFor(query: String, playlist: String? = null): MusicSelection? {
+        val spoken = playlist?.trim()?.takeIf { it.isNotEmpty() }
+        if (query.isBlank() && spoken == null) {
             val album = source.libraries().firstNotNullOfOrNull { source.recentlyAdded(it.id).firstOrNull { a -> a.kind == ItemKind.Album } }
             return album?.let { selection(MusicId.Album(it.id)) }
         }
         val said = query.trim()
+        val names = listOfNotNull(spoken, said.takeIf { it.isNotEmpty() }, playlistNamed(said)).distinctBy { it.lowercase() }
         // The profile's own playlists first: the search doesn't list them, and "my Road Trip playlist" names one exactly.
         val playlists = try {
             musicPlaylists()
@@ -153,13 +157,15 @@ class MusicLibrary(
         } catch (_: Exception) {
             emptyList()
         }
-        playlists.firstOrNull { it.title.trim().equals(said, ignoreCase = true) }?.let { named -> selection(MusicId.Playlist(named.id))?.let { return it } }
-        val best = source.search(query).firstOrNull { it.kind == ItemKind.Artist || it.kind == ItemKind.Album || it.kind == ItemKind.Track }
+        for (name in names) {
+            playlists.firstOrNull { it.title.trim().equals(name, ignoreCase = true) }?.let { named -> selection(MusicId.Playlist(named.id))?.let { return it } }
+        }
+        val best = if (said.isEmpty()) null else source.search(query).firstOrNull { it.kind == ItemKind.Artist || it.kind == ItemKind.Album || it.kind == ItemKind.Track }
         return when (best?.kind) {
             ItemKind.Artist -> selection(MusicId.ShuffleArtist(best.id))
             ItemKind.Album -> selection(MusicId.Album(best.id))
             ItemKind.Track -> selection(MusicId.Track(best.id))
-            else -> playlists.firstOrNull { it.title.contains(said, ignoreCase = true) }?.let { selection(MusicId.Playlist(it.id)) }
+            else -> names.firstNotNullOfOrNull { name -> playlists.firstOrNull { it.title.contains(name, ignoreCase = true) } }?.let { selection(MusicId.Playlist(it.id)) }
         }
     }
 
@@ -363,3 +369,21 @@ class MusicLibrary(
         private val NEWEST_FIRST = compareByDescending<ItemSummary> { it.year ?: 0 }.thenBy { it.sortTitle.ifEmpty { it.title }.lowercase() }
     }
 }
+
+/**
+ * The name in a request that says it is a playlist, as people put it in
+ * English, French and Spanish ("my Night Drive playlist", "la playlist
+ * Night Drive", "mi lista Night Drive"); `null` when [said] doesn't.
+ */
+internal fun playlistNamed(said: String): String? {
+    val found = PLAYLIST_SAID.matchEntire(said.trim()) ?: return null
+    return (found.groupValues[1].ifEmpty { found.groupValues[2] }).trim().takeIf { it.isNotEmpty() }
+}
+
+/** The words for a playlist, longest first, and a possessive or article said before them. */
+private const val PLAYLIST_WORDS = "playlist|liste de lecture|lista de reproducción|lista de reproduccion|lista"
+private const val BEFORE_IT = "my|ma|mon|mes|mi|mis|la|le|el|the"
+private val PLAYLIST_SAID = Regex(
+    "^(?:(?:$BEFORE_IT) )?(?:(?:$PLAYLIST_WORDS) (.+)|(.+?) (?:$PLAYLIST_WORDS))$",
+    setOf(RegexOption.IGNORE_CASE),
+)

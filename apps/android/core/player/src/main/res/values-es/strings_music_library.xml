@@ -38,6 +38,7 @@
     <string name="music_library_signed_out">Cuando sea seguro, abre Pley en tu teléfono e inicia sesión</string>
     <string name="music_library_open_pley">Abrir Pley</string>
     <string name="music_library_offline">No se puede conectar con tu servidor Pley</string>
+    <string name="music_library_no_match">Pley no encontró música para «%1$s»</string>
     <string name="music_library_failed">Algo salió mal. Inténtalo de nuevo.</string>
     <!-- Why the track doesn't play, on the car's Now Playing. -->
     <string name="music_library_unplayable">Esta pista no se puede reproducir</string>

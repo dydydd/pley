@@ -40,6 +40,8 @@
     <string name="music_library_signed_out">When it\'s safe, open Pley on your phone and sign in</string>
     <string name="music_library_open_pley">Open Pley</string>
     <string name="music_library_offline">Can\'t reach your Pley server</string>
+    <!-- A spoken request ("play … on Pley") that found nothing, shown a moment on the car's screen. -->
+    <string name="music_library_no_match">Pley found no music for “%1$s”</string>
     <string name="music_library_failed">Something went wrong. Try again.</string>
     <!-- Why the track doesn't play, on the car's Now Playing. -->
     <string name="music_library_unplayable">This track can\'t be played</string>

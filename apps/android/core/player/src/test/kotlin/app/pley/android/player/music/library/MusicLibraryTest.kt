@@ -182,6 +182,23 @@ class MusicLibraryTest {
         assertEquals(library.selection(MusicId.Playlist(7))!!.tracks.map { it.id }, named.tracks.map { it.id })
         assertEquals(named.tracks.map { it.id }, library.selectionFor("night")!!.tracks.map { it.id })
         assertNull(library.selectionFor("Trailers"))
+        // Said with its word for a playlist, in each language, or named by the Assistant alone.
+        for (said in listOf("night drive playlist", "my Night Drive playlist", "la playlist Night Drive", "mi lista de reproducción night drive")) {
+            assertEquals(said, named.tracks.map { it.id }, library.selectionFor(said)?.tracks?.map { it.id })
+        }
+        assertEquals(named.tracks.map { it.id }, library.selectionFor("", playlist = "Night Drive")!!.tracks.map { it.id })
+    }
+
+    @Test
+    fun aPlaylistSaidIsItsNameAlone() {
+        assertEquals("Night Drive", playlistNamed("my Night Drive playlist"))
+        assertEquals("Night Drive", playlistNamed("Playlist Night Drive"))
+        assertEquals("road trip", playlistNamed("ma liste de lecture road trip"))
+        assertEquals("road trip", playlistNamed("mis lista road trip"))
+        // Not a playlist said: nothing to take from it, a name with the word inside it included.
+        assertNull(playlistNamed("Night Drive"))
+        assertNull(playlistNamed("Setlists"))
+        assertNull(playlistNamed("playlist"))
     }
 
     @Test

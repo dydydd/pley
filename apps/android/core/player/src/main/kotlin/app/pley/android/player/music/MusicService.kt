@@ -7,6 +7,7 @@ import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.Bundle
 import android.os.Process
+import android.provider.MediaStore
 import android.view.KeyEvent
 import androidx.annotation.OptIn
 import androidx.core.content.IntentCompat
@@ -496,6 +497,7 @@ class MusicService : MediaLibraryService() {
                     val live = graph.live
                     val id = MusicId.parse(picked.mediaId)
                     val query = picked.requestMetadata.searchQuery?.take(MAX_QUERY)?.takeIf { picked.mediaId.isEmpty() }
+                    val playlist = spokenPlaylist(picked)
                     val channel = when {
                         id is MusicId.Channel -> live?.lineup(id) ?: throw UnsupportedOperationException("No such channel")
                         query != null -> live?.let { runCatching { it.named(query) }.getOrNull() }?.let { listOf(it) to 0 }
@@ -507,7 +509,7 @@ class MusicService : MediaLibraryService() {
                     }
                     // "Play music" with nothing named: the queue that waits plays on, or the one kept from before the
                     // app left memory; only with neither, something new (the album added last).
-                    if (query != null && query.isBlank()) {
+                    if (query != null && query.isBlank() && playlist == null) {
                         val saved = if (playback.active) null else MusicHub.resume?.saved()
                         if (playback.active || saved != null) {
                             showMusic(made, playback, graph.library)
@@ -530,7 +532,15 @@ class MusicService : MediaLibraryService() {
                             return@launch
                         }
                     }
-                    if (selection == null) throw UnsupportedOperationException("Nothing to play")
+                    if (selection == null) {
+                        // Said, and found nowhere: the car and the Assistant say so a moment, and what played plays on.
+                        val said = playlist ?: query?.trim()
+                        if (!said.isNullOrEmpty()) {
+                            val words = AppLanguage.resources(this@MusicService).getString(R.string.music_library_no_match, said)
+                            made.sendError(SessionError(SessionError.ERROR_BAD_VALUE, words))
+                        }
+                        throw UnsupportedOperationException("Nothing to play")
+                    }
                     // The session shows the music before it is told the queue: the radio, if it played, stops.
                     showMusic(made, playback, graph.library)
                     playback.play(selection.tracks, selection.startIndex, selection.shuffle)
@@ -598,10 +608,14 @@ class MusicService : MediaLibraryService() {
             val query = item.requestMetadata.searchQuery
             return when {
                 item.mediaId.isNotEmpty() -> MusicId.parse(item.mediaId)?.let { library().selection(it) }
-                query != null -> library().selectionFor(query.take(MAX_QUERY))
+                query != null -> library().selectionFor(query.take(MAX_QUERY), spokenPlaylist(item))
                 else -> null
             }
         }
+
+        /** The playlist the Assistant heard named ("play my Night Drive playlist on Pley"), when it says. */
+        private fun spokenPlaylist(item: MediaItem): String? =
+            item.requestMetadata.extras?.getString(MediaStore.EXTRA_MEDIA_PLAYLIST)?.trim()?.take(MAX_QUERY)?.takeIf { it.isNotEmpty() }
 
         private fun library(): MusicLibrary = graph?.library ?: throw UnsupportedOperationException()
 
