@@ -29,6 +29,7 @@ describes how they are made.
 
 - Pause pressed while a track is starting now keeps it paused once it
   loads, instead of playing it.
+- The phone's media controls show the cover of what plays.
 - Now Playing fits a phone turned on its side, with the cover beside
   the title, instead of the cover hiding the controls.
 

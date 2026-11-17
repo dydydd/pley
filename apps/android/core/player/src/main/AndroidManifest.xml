@@ -18,6 +18,8 @@
     <queries>
         <package android:name="com.google.android.projection.gearhead" />
         <package android:name="com.google.android.googlequicksearchbox" />
+        <!-- The system's media controls, granted the covers the session names. -->
+        <package android:name="com.android.systemui" />
     </queries>
 
     <application>

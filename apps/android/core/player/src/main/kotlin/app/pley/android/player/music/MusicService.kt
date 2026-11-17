@@ -116,6 +116,8 @@ class MusicService : MediaLibraryService() {
             .build()
         session = made
         player = queue
+        // The phone's own media controls show the covers the session names, read from the app as the car's are.
+        grantArt(SYSTEM_UI)
         following = scope.launch {
             launch { playback.queueState.collect { player?.queueChanged() } }
             // Shuffle's button shows whether it is on, as the queue changes from anywhere.
@@ -238,6 +240,17 @@ class MusicService : MediaLibraryService() {
             controller.isTrusted ||
             isCar(controller.packageName)
 
+    /** Lets [packageName] read the library's pictures ([MusicArt]), and nothing else of the app's. */
+    private fun grantArt(packageName: String) {
+        runCatching {
+            grantUriPermission(
+                packageName,
+                Uri.parse("content://${MusicArt.authority(this)}"),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
+            )
+        }
+    }
+
     private fun isCar(packageName: String): Boolean = packageName != this.packageName && MusicCallers.allowed(packageManager, packageName)
 
     /**
@@ -282,16 +295,8 @@ class MusicService : MediaLibraryService() {
 
         override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
             if (!allowed(controller, session)) return MediaSession.ConnectionResult.reject()
-            if (isCar(controller.packageName)) {
-                // The car reads the library's pictures from the app (MusicArt): it may read them, and only them.
-                runCatching {
-                    grantUriPermission(
-                        controller.packageName,
-                        Uri.parse("content://${MusicArt.authority(this@MusicService)}"),
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
-                    )
-                }
-            }
+            // The car reads the library's pictures from the app (MusicArt): it may read them, and only them.
+            if (isCar(controller.packageName)) grantArt(controller.packageName)
             // Media3's defaults for this controller (super.onConnect only marks "use the defaults"), with Shuffle.
             val accepted = MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller).build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
@@ -510,6 +515,9 @@ class MusicService : MediaLibraryService() {
 
         /** The session's player and the output it shows, kept for the process's life (queuePlayer). */
         var made: Pair<EngineMusicOutput, QueuePlayer>? = null
+
+        /** The system's UI: its media controls, on the lock screen and in the shade, show the session's covers. */
+        const val SYSTEM_UI = "com.android.systemui"
 
         /** The longest search a car or the Assistant sends that is used. */
         const val MAX_QUERY = 200

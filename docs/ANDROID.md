@@ -1025,8 +1025,8 @@ controls have it too). "Hey Google, play … on Pley" plays the closest artist (
 album or track; "play music on Pley" plays the album added last. Signed
 out, the car says to open Pley on the phone and sign in when it is safe,
 with a button that opens it. The car reads the covers from the app, as the server's
-pictures need the profile's token: the app grants Android Auto reading
-them and nothing else. Only Android Auto and the Google app, checked by
+pictures need the profile's token: the app grants Android Auto, and the
+phone's own media controls, reading them and nothing else. Only Android Auto and the Google app, checked by
 the certificate Google signs them with, besides the system's own media
 controls, may browse or play Pley's music.
 
