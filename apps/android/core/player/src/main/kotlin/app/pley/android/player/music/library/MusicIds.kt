@@ -1,5 +1,7 @@
 package app.pley.android.player.music.library
 
+import app.pley.android.model.LiveCategory
+
 /**
  * The ids of the music library's nodes, as car screens and voice
  * assistants name them back ([MusicLibrary]): short, readable, and parsed
@@ -57,14 +59,40 @@ sealed interface MusicId {
         override val text get() = if (from == null) "track:$id" else "track:$id@${from.text}"
     }
 
+    /** Live TV's tab: favourites, the channels watched lately, and the groups. */
+    data object LiveTv : MusicId {
+        override val text = "live"
+    }
+
+    /** The channels of a Live TV [category]: one group's, or every one. */
+    data class LiveList(val category: LiveCategory) : MusicId {
+        override val text get() = "live:${category.key}"
+    }
+
+    /** A channel, picked from its [from] list: Next and Previous go through it. */
+    data class Channel(val id: Long, val from: LiveCategory? = null) : MusicId {
+        override val text get() = if (from == null) "channel:$id" else "channel:$id@${from.key}"
+    }
+
     companion object {
         /** The id [text] names; `null` for anything else. */
         fun parse(text: String): MusicId? {
+            if (text.length > MAX_LENGTH) return null
             when (text) {
                 Root.text -> return Root
                 Recent.text -> return Recent
                 Artists.text -> return Artists
                 Playlists.text -> return Playlists
+                LiveTv.text -> return LiveTv
+            }
+            val list = text.removePrefix("live:")
+            if (list != text) return category(list)?.let { LiveList(it) }
+            val channel = text.removePrefix("channel:")
+            if (channel != text) {
+                val at = channel.indexOf('@')
+                if (at < 0) return channel.toIdOrNull()?.let { Channel(it) }
+                val id = channel.substring(0, at).toIdOrNull() ?: return null
+                return category(channel.substring(at + 1))?.let { Channel(id, it) }
             }
             val track = text.removePrefix("track:")
             if (track != text) {
@@ -86,6 +114,16 @@ sealed interface MusicId {
                 else -> null
             }
         }
+
+        /** A category's key, strictly: "all", "favorites", "recent" or "group:" and a group's name. */
+        private fun category(key: String): LiveCategory? = when {
+            key == LiveCategory.All.key || key == LiveCategory.Favorites.key || key == LiveCategory.Recent.key -> LiveCategory.parse(key)
+            key.startsWith("group:") && key.length > "group:".length -> LiveCategory.parse(key)
+            else -> null
+        }
+
+        /** The longest id taken: a group's name is the provider's, and a car sends ids back. */
+        private const val MAX_LENGTH = 512
 
         /** A positive id, digits only. */
         private fun String.toIdOrNull(): Long? =

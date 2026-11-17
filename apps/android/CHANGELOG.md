@@ -21,6 +21,9 @@ describes how they are made.
   apps), with larger controls, 10-second skip buttons, and pausing as
   soon as the car moves off. Music's Now Playing and its bar are larger
   there too, on landscape, wide and portrait car screens.
+- Live TV's channels play as radio in Android Auto: a Live TV tab with
+  favourites, channels watched lately and groups, channel search, and
+  "Hey Google, play … on Pley" by channel name.
 
 ### Fixed
 

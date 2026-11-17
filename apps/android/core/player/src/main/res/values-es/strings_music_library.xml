@@ -20,7 +20,18 @@
         <item quantity="many">%1$,d álbumes</item>
         <item quantity="other">%1$,d álbumes</item>
     </plurals>
-    <string name="music_library_signed_out">Abre Pley en tu teléfono e inicia sesión</string>
+    <string name="music_library_live_tv">TV en vivo</string>
+    <string name="music_library_live_favorites">Favoritos</string>
+    <string name="music_library_live_watched_lately">Vistos recientemente</string>
+    <string name="music_library_live_groups">Grupos</string>
+    <string name="music_library_live_all_channels">Todos los canales</string>
+    <string name="music_library_live_channels">Canales</string>
+    <plurals name="music_library_live_channel_count">
+        <item quantity="one">%1$,d canal</item>
+        <item quantity="many">%1$,d de canales</item>
+        <item quantity="other">%1$,d canales</item>
+    </plurals>
+    <string name="music_library_signed_out">Cuando sea seguro, abre Pley en tu teléfono e inicia sesión</string>
     <string name="music_library_open_pley">Abrir Pley</string>
     <string name="music_library_offline">No se puede conectar con tu servidor Pley</string>
     <string name="music_library_failed">Algo salió mal. Inténtalo de nuevo.</string>

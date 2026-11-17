@@ -18,6 +18,7 @@ import app.pley.android.network.NetworkGraph
 import app.pley.android.player.engine.EngineSettings
 import app.pley.android.player.engine.Media3EngineFactory
 import app.pley.android.player.engine.RefreshRateMatching
+import app.pley.android.player.live.LivePlayback
 import app.pley.android.player.music.ServiceMusicControl
 import app.pley.android.player.music.library.MusicLibraryGraph
 import app.pley.android.player.session.SessionPlaybackServices
@@ -82,7 +83,22 @@ interface PlayerGraph {
                 engines,
                 services,
                 { data.liveTv },
-                library = { MusicLibraryGraph(context, data, network) },
+                library = {
+                    // The car's Live TV plays as radio, watched as the phone's Live TV player watches.
+                    MusicLibraryGraph(context, data, network) { scope ->
+                        LivePlayback.create(
+                            context,
+                            data.liveTv,
+                            engines,
+                            profile,
+                            scope,
+                            data.liveUpdates.events,
+                            data.liveUpdates::playing,
+                            data.remote::here,
+                            radio = true,
+                        ) { caps.capabilities.snapshot.value }
+                    }
+                },
             ) { ServiceMusicControl.create(context, data, network, caps, profile, engines) }
         }
     }

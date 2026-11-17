@@ -5,21 +5,41 @@ import android.content.Context
 import android.net.Uri
 import androidx.annotation.DrawableRes
 import app.pley.android.common.AppLanguage
+import app.pley.android.common.resolve
 import app.pley.android.data.DataGraph
 import app.pley.android.network.NetworkGraph
 import app.pley.android.player.R
+import app.pley.android.player.live.LivePlayback
+import app.pley.android.player.music.LiveRadio
 import app.pley.android.player.music.fetchPicture
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
-/** The music library for cars and voice assistants, and its pictures, over the app's data. */
-class MusicLibraryGraph(context: Context, data: DataGraph, network: NetworkGraph) {
+/** The music library and Live TV for cars and voice assistants, their pictures, and the radio, over the app's data. */
+class MusicLibraryGraph(
+    context: Context,
+    data: DataGraph,
+    network: NetworkGraph,
+    /** A playback of Live TV's sound for the radio ([LivePlayback.create] with `radio`), in a scope. */
+    private val livePlayback: ((CoroutineScope) -> LivePlayback)? = null,
+) {
     private val app = context.applicationContext
     private val source = RepositoryMusicSource(data, network)
     private val fetch: suspend (String) -> ByteArray? = { url -> fetchPicture(network, url) }
 
-    val library = MusicLibrary(source, { look() }) { path -> MusicArt.uri(app, path) }
+    /** Live TV's tab and channels, when the radio can play them. */
+    val live: LiveLibrary? = livePlayback?.let { LiveLibrary(RepositoryLiveSource(data), { liveLook() }, { path -> MusicArt.uri(app, path) }) }
+
+    val library = MusicLibrary(source, { look() }, { path -> MusicArt.uri(app, path) }, live)
+
+    /** The car's radio of Live TV's channels; `null` without Live TV here. */
+    fun radio(): LiveRadio? {
+        val make = livePlayback ?: return null
+        val channels = live ?: return null
+        return LiveRadio(make, { channels.channel(it, from = null) }) { trouble -> trouble.text.resolve(AppLanguage.resources(app)) }
+    }
 
     /** Whether a profile is signed in now: the library has nothing to show otherwise. */
     fun signedIn(): Boolean = sessions.value != null
@@ -63,6 +83,23 @@ class MusicLibraryGraph(context: Context, data: DataGraph, network: NetworkGraph
             override val artistsIcon = icon(R.drawable.music_library_artists)
             override val playlistsIcon = icon(R.drawable.music_library_playlists)
             override val shuffleIcon = icon(R.drawable.music_library_shuffle)
+        }
+    }
+
+    /** Live TV's words in the language shown now. */
+    private fun liveLook(): LiveLook {
+        val res = AppLanguage.resources(app)
+        return object : LiveLook {
+            override val liveTv = res.getString(R.string.music_library_live_tv)
+            override val favorites = res.getString(R.string.music_library_live_favorites)
+            override val watchedLately = res.getString(R.string.music_library_live_watched_lately)
+            override val groups = res.getString(R.string.music_library_live_groups)
+            override val allChannels = res.getString(R.string.music_library_live_all_channels)
+            override val channels = res.getString(R.string.music_library_live_channels)
+
+            override fun channelCount(count: Int): String = res.getQuantityString(R.plurals.music_library_live_channel_count, count, count)
+
+            override val liveIcon = icon(R.drawable.music_library_live)
         }
     }
 

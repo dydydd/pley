@@ -193,6 +193,12 @@ class LivePlayback(
     private val here: (player: Any, sessionId: String?) -> Unit = { _, _ -> },
     /** What this device plays, for the sound the server converts ([playsAsSent]); `null` until probed. */
     private val caps: () -> CapsSnapshot? = { null },
+    /**
+     * A pause lets the channel go, as [stop], where a player on screen plays
+     * on: the car's radio, whose Pause, another app's sound taking over, or
+     * headphones pulled out stop it until Play ([resume]).
+     */
+    private val pausable: Boolean = false,
 ) {
     private val mutableState = MutableStateFlow(LiveState())
     val state: StateFlow<LiveState> = mutableState.asStateFlow()
@@ -511,8 +517,15 @@ class LivePlayback(
         }
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            if (playWhenReady || holding) return
+            // The radio lets the channel go: playing on would take the sound back from whatever took it. Not
+            // inside the engine's own callback, which stop() releases.
+            if (pausable) {
+                scope.launch { if (!closed) stop() }
+                return
+            }
             // Live has no pause (headphones pulled out, a stray media key): it plays on, as a browser's does.
-            if (!playWhenReady && !holding) mutableEngine.value?.player?.play()
+            mutableEngine.value?.player?.play()
         }
 
         override fun onTracksChanged(tracks: Tracks) {
@@ -620,10 +633,12 @@ class LivePlayback(
             events: Flow<ServerEvent> = emptyFlow(),
             playing: (player: Any, playing: Boolean) -> Unit = { _, _ -> },
             here: (player: Any, sessionId: String?) -> Unit = { _, _ -> },
+            /** The car's radio: the sound alone, on the music's engine (no video decoders, the audio focus its own), and [pausable]. */
+            radio: Boolean = false,
             caps: () -> CapsSnapshot? = { null },
         ): LivePlayback {
             val app = context.applicationContext
-            return LivePlayback(live, { engines.create(app, profile, music = false) }, clientIdOf(app), scope, events, playing, here, caps)
+            return LivePlayback(live, { engines.create(app, profile, music = radio) }, clientIdOf(app), scope, events, playing, here, caps, pausable = radio)
         }
     }
 }

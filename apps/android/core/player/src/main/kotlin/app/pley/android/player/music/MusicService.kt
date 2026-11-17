@@ -24,6 +24,7 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
 import app.pley.android.common.AppLanguage
+import app.pley.android.model.LiveChannel
 import app.pley.android.network.OfflineException
 import app.pley.android.player.PlayerGraphOwner
 import app.pley.android.player.R
@@ -59,7 +60,9 @@ import kotlinx.coroutines.launch
  * Android Auto browses and plays Pley's music through it, as does the
  * Google app's Assistant ("play … on Pley"): the [MusicLibrary] (Recent,
  * Artists, Playlists, search), its pictures read through [MusicArt]. Signed
- * out, the car says so and opens Pley on the phone.
+ * out, the car says so and opens Pley on the phone. A Live TV channel
+ * picked in the car plays its sound as radio ([LiveRadio]), the session
+ * showing it until music plays again; the last car gone, the radio stops.
  *
  * Only the app itself, the system (its media controls, the notification,
  * Bluetooth and the lock screen), Media3's notification controller and
@@ -70,6 +73,9 @@ import kotlinx.coroutines.launch
 class MusicService : MediaLibraryService() {
     private var session: MediaLibrarySession? = null
     private var player: QueuePlayer? = null
+
+    /** Live TV's sound in the car, made as a channel is first picked. */
+    private var radio: LiveRadio? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** What follows the session made last (its queue, the sign-in): ended with it. */
@@ -115,6 +121,12 @@ class MusicService : MediaLibraryService() {
             // Shuffle's button shows whether it is on, as the queue changes from anywhere.
             launch { playback.queueState.map { it.shuffle }.distinctUntilChanged().drop(1).collect { made.setMediaButtonPreferences(buttons(it)) } }
             graph?.musicLibrary?.let { library -> launch { library.signedInChanges.drop(1).collect { tellCars(made, it) } } }
+            // Music playing again (from the phone, the car's own controls) takes the session back from the radio.
+            launch {
+                playback.nowPlaying.map { it?.playing == true }.distinctUntilChanged().collect { playing ->
+                    if (playing) showMusic(made, playback, graph?.musicLibrary?.library)
+                }
+            }
         }
         playback.onStopped = { stopped(made, playback, graph?.musicLibrary?.library) }
         return made
@@ -140,6 +152,8 @@ class MusicService : MediaLibraryService() {
      */
     private fun stopped(made: MediaLibrarySession, playback: MusicPlayback, library: MusicLibrary?) {
         if (session !== made) return
+        // The radio plays on in the session: the music's next output is shown when music plays again.
+        if (radio?.active == true) return
         val carStays = made.connectedControllers.any { it.packageName == MusicCallers.ANDROID_AUTO }
         val next = if (carStays) queuePlayer(playback, library) else null
         if (next != null) {
@@ -150,9 +164,43 @@ class MusicService : MediaLibraryService() {
         end(made, playback)
     }
 
+    /**
+     * The radio plays [lineup]'s channel in the session, in place of the
+     * music, which pauses and lets its session go as for a video. The
+     * channels, as the session lists them.
+     */
+    private fun playRadio(made: MediaLibrarySession, playback: MusicPlayback, graph: MusicLibraryGraph, lineup: Pair<List<LiveChannel>, Int>): MediaSession.MediaItemsWithStartPosition {
+        val live = radio ?: graph.radio()?.also {
+            radio = it
+            MusicHub.radio = it
+        } ?: throw UnsupportedOperationException("No Live TV")
+        playback.pauseForVideo()
+        val (channels, at) = lineup
+        live.play(channels, at)
+        made.player = live.player
+        // Shuffle is the music's: the radio has none.
+        made.setMediaButtonPreferences(emptyList())
+        val items = channels.map { graph.live?.channel(it, from = null) ?: MediaItem.Builder().setMediaId(it.id.toString()).build() }
+        return MediaSession.MediaItemsWithStartPosition(items, at, C.TIME_UNSET)
+    }
+
+    /** The music in the session again, the radio stopped: music plays, or the car that played the radio left. */
+    private fun showMusic(made: MediaLibrarySession, playback: MusicPlayback, library: MusicLibrary?) {
+        val live = radio ?: return
+        if (session !== made || (!live.active && made.player !== live.player)) return
+        live.close()
+        val queue = queuePlayer(playback, library) ?: return
+        made.player = queue
+        player = queue
+        made.setMediaButtonPreferences(buttons(playback.queueState.value.shuffle))
+    }
+
     /** The session goes, and the service stops: nothing plays, and no car holds it. */
     private fun end(made: MediaLibrarySession, playback: MusicPlayback) {
         if (session !== made) return
+        radio?.release()
+        radio = null
+        MusicHub.radio = null
         playback.onStopped = null
         following?.cancel()
         following = null
@@ -164,6 +212,9 @@ class MusicService : MediaLibraryService() {
 
     override fun onDestroy() {
         MusicHub.playback?.onStopped = null
+        radio?.release()
+        radio = null
+        MusicHub.radio = null
         scope.cancel()
         session?.release()
         session = null
@@ -257,6 +308,7 @@ class MusicService : MediaLibraryService() {
             args: Bundle,
         ): ListenableFuture<SessionResult> {
             if (customCommand.customAction != SHUFFLE.customAction) return super.onCustomCommand(session, controller, customCommand, args)
+            if (radio?.active == true) return Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
             playback.setShuffle(!playback.queueState.value.shuffle)
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }
@@ -266,10 +318,15 @@ class MusicService : MediaLibraryService() {
             if (isCar(controller.packageName) && !library.signedIn()) tellCars(session as MediaLibrarySession, signedIn = false)
         }
 
-        /** The last car gone with nothing playing: the session and the service go, as after a stop. */
+        /**
+         * The last car gone: the radio stops (it is the car's), and with no
+         * music either, the session and the service go, as after a stop.
+         */
         override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
-            if (!isCar(controller.packageName) || playback.active) return
-            if (session.connectedControllers.none { it != controller && isCar(it.packageName) }) end(session as MediaLibrarySession, playback)
+            if (!isCar(controller.packageName)) return
+            if (session.connectedControllers.any { it != controller && isCar(it.packageName) }) return
+            showMusic(session as MediaLibrarySession, playback, graph?.library)
+            if (!playback.active) end(session, playback)
         }
 
         override fun onMediaButtonEvent(session: MediaSession, controllerInfo: MediaSession.ControllerInfo, intent: Intent): Boolean =
@@ -333,7 +390,9 @@ class MusicService : MediaLibraryService() {
 
         /**
          * A car picked something to play, or the Assistant heard what to
-         * play: the music starts here, and the session is told its queue.
+         * play: the music starts here, and the session is told its queue. A
+         * channel, or a request naming one exactly, plays as radio; a
+         * request matching no music plays the closest channel.
          */
         override fun onSetMediaItems(
             mediaSession: MediaSession,
@@ -345,9 +404,32 @@ class MusicService : MediaLibraryService() {
             val picked = mediaItems.getOrNull(startIndex.coerceAtLeast(0)) ?: mediaItems.firstOrNull()
             val future = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
             if (picked == null || graph == null) return Futures.immediateFailedFuture(UnsupportedOperationException())
+            val made = mediaSession as MediaLibrarySession
             scope.launch {
                 try {
-                    val selection = selectionFor(picked) ?: throw UnsupportedOperationException("Nothing to play")
+                    val live = graph.live
+                    val id = MusicId.parse(picked.mediaId)
+                    val query = picked.requestMetadata.searchQuery?.take(MAX_QUERY)?.takeIf { picked.mediaId.isEmpty() }
+                    val channel = when {
+                        id is MusicId.Channel -> live?.lineup(id) ?: throw UnsupportedOperationException("No such channel")
+                        query != null -> live?.let { runCatching { it.named(query) }.getOrNull() }?.let { listOf(it) to 0 }
+                        else -> null
+                    }
+                    if (channel != null) {
+                        future.set(playRadio(made, playback, graph, channel))
+                        return@launch
+                    }
+                    val selection = selectionFor(picked)
+                    if (selection == null && query != null) {
+                        val closest = live?.let { runCatching { it.closest(query) }.getOrNull() }
+                        if (closest != null) {
+                            future.set(playRadio(made, playback, graph, listOf(closest) to 0))
+                            return@launch
+                        }
+                    }
+                    if (selection == null) throw UnsupportedOperationException("Nothing to play")
+                    // The session shows the music before it is told the queue: the radio, if it played, stops.
+                    showMusic(made, playback, graph.library)
                     playback.play(selection.tracks, selection.startIndex, selection.shuffle)
                     val queue = playback.queueState.value
                     val items = queue.tracks.map { library().queueItem(it) }
@@ -461,4 +543,8 @@ internal class StopKey(private val pause: () -> Unit) {
 object MusicHub {
     @Volatile
     var playback: MusicPlayback? = null
+
+    /** The car's radio while the service has one: a video opening stops it, as it pauses the music. */
+    @Volatile
+    var radio: LiveRadio? = null
 }

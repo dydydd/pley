@@ -54,7 +54,8 @@ data class MusicSelection(val tracks: List<ItemSummary>, val startIndex: Int = 0
  * Pley's music as cars and voice assistants browse it (Android Auto, a
  * phone's Assistant): three tabs, Recent (the albums added last to each
  * music library), Artists (by name; their albums, with Shuffle first; an
- * album's tracks) and Playlists (music ones), and search. Albums show as a
+ * album's tracks) and Playlists (music ones), and search; a fourth for
+ * Live TV ([live]). Albums show as a
  * grid of their art, artists and tracks as lists. With several music
  * libraries, Recent groups its albums by library and Artists lists the
  * libraries first.
@@ -67,6 +68,8 @@ class MusicLibrary(
     private val source: MusicSource,
     private val look: () -> MusicLibraryLook,
     private val art: (path: String) -> Uri?,
+    /** Live TV's tab and channels ([LiveLibrary]); `null` without them. */
+    val live: LiveLibrary? = null,
 ) {
     fun root(): MediaItem = node(MusicId.Root, title = "Pley", browsable = true, playable = false)
 
@@ -74,6 +77,7 @@ class MusicLibrary(
     suspend fun item(id: MusicId): MediaItem? = when (id) {
         MusicId.Root -> root()
         MusicId.Recent, MusicId.Artists, MusicId.Playlists -> tabs().firstOrNull { it.mediaId == id.text }
+        MusicId.LiveTv, is MusicId.LiveList, is MusicId.Channel -> live?.item(id)
         is MusicId.Artist -> source.item(id.id)?.takeIf { it.kind == ItemKind.Artist }?.let(::artist)
         is MusicId.Album -> source.item(id.id)?.takeIf { it.kind == ItemKind.Album }?.let(::album)
         is MusicId.Track -> source.item(id.id)?.takeIf { it.kind == ItemKind.Track }?.let { track(it, id.from) }
@@ -101,18 +105,22 @@ class MusicLibrary(
             }
             is MusicId.Album -> source.children(id.id).filter { it.kind == ItemKind.Track }.map { track(it, from = id) }
             is MusicId.Playlist -> source.playlist(id.id).entries.map { it.item }.filter { it.kind == ItemKind.Track }.map { track(it, from = id) }
-            is MusicId.ShuffleArtist, is MusicId.Track -> emptyList()
+            MusicId.LiveTv, is MusicId.LiveList -> live?.children(id).orEmpty()
+            is MusicId.ShuffleArtist, is MusicId.Track, is MusicId.Channel -> emptyList()
         }
         return all.drop(page * size).take(size)
     }
 
-    /** Artists, then albums, then tracks matching [query]: each a group of its own. */
-    suspend fun search(query: String): List<MediaItem> {
+    /** Artists, then albums, then tracks matching [query]: each a group of its own; then Live TV's channels. */
+    suspend fun search(query: String): List<MediaItem> = coroutineScope {
+        // Channels not found (Live TV closed, the server's answer failing) leave the music's results as they are.
+        val channels = async { live?.let { runCatching { it.search(query) }.getOrNull() }.orEmpty() }
         val found = source.search(query)
         val l = look()
-        return found.filter { it.kind == ItemKind.Artist }.take(SEARCH_EACH).map { artist(it).grouped(l.artists) } +
+        found.filter { it.kind == ItemKind.Artist }.take(SEARCH_EACH).map { artist(it).grouped(l.artists) } +
             found.filter { it.kind == ItemKind.Album }.take(SEARCH_EACH).map { album(it).grouped(l.albums) } +
-            found.filter { it.kind == ItemKind.Track }.take(SEARCH_EACH).map { track(it, from = null).grouped(l.songs) }
+            found.filter { it.kind == ItemKind.Track }.take(SEARCH_EACH).map { track(it, from = null).grouped(l.songs) } +
+            channels.await()
     }
 
     /** What playing [id] plays; `null` for a node that doesn't play, or plays nothing. */
@@ -176,12 +184,14 @@ class MusicLibrary(
         albums.map { async { tracksOf(it.id) } }.awaitAll().flatten()
     }
 
-    private fun tabs(): List<MediaItem> {
+    /** Recent, Artists, Playlists, and Live TV when it is open to the profile: four, as many as cars show. */
+    private suspend fun tabs(): List<MediaItem> {
         val l = look()
-        return listOf(
+        return listOfNotNull(
             node(MusicId.Recent, l.recent, browsable = true, playable = false, icon = l.recentIcon, browsableStyle = GRID),
             node(MusicId.Artists, l.artists, browsable = true, playable = false, icon = l.artistsIcon, browsableStyle = LIST),
             node(MusicId.Playlists, l.playlists, browsable = true, playable = false, icon = l.playlistsIcon, browsableStyle = GRID),
+            live?.tab(),
         )
     }
 

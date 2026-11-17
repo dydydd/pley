@@ -40,7 +40,8 @@ object MusicArt {
     private const val PICTURE = "picture"
     private const val PATH = "p"
     private const val MAX_PATH = 256
-    private val PICTURE_PATH = Regex("""/api/(items|collections)/\d{1,19}/images/[a-z]{1,16}(\?[A-Za-z0-9=&._-]{0,128})?""")
+    private val PICTURE_PATH =
+        Regex("""(/api/(items|collections)/\d{1,19}/images/[a-z]{1,16}|/api/live/channels/\d{1,19}/logo)(\?[A-Za-z0-9=&._-]{0,128})?""")
 }
 
 /**

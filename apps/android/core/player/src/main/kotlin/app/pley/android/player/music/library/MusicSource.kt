@@ -89,29 +89,7 @@ class RepositoryMusicSource(private val data: DataGraph, private val network: Ne
         return network.api(session.issuer, session.me?.id)
     }
 
-    /**
-     * The server's answer, or after [FRESH_WAIT_MS] what was saved; a
-     * failure with nothing saved throws it.
-     */
-    private suspend fun <T> Flow<Loadable<T>>.settled(): T {
-        if (data.session.session.value == null) throw SignedOutException()
-        var saved: T? = null
-        val fresh = withTimeoutOrNull(FRESH_WAIT_MS) {
-            first {
-                if (it is Loadable.Ready && !it.fresh) saved = it.value
-                (it is Loadable.Ready && it.fresh) || it is Loadable.Failed
-            }
-        }
-        return when (fresh) {
-            is Loadable.Ready -> fresh.value
-            is Loadable.Failed -> fresh.stale ?: saved ?: throw fresh.error
-            else -> saved ?: when (val late = first { it !is Loadable.Loading }) {
-                is Loadable.Ready -> late.value
-                is Loadable.Failed -> late.stale ?: throw late.error
-                Loadable.Loading -> error("Still loading")
-            }
-        }
-    }
+    private suspend fun <T> Flow<Loadable<T>>.settled(): T = settledIn(data)
 
     private companion object {
         /** A library's recently added row ("recently_added:<library id>"). */
@@ -119,8 +97,32 @@ class RepositoryMusicSource(private val data: DataGraph, private val network: Ne
 
         /** The plays read for Recently played: enough for a row of albums. */
         const val HISTORY_LIMIT = 100
-
-        /** How long the server's answer is waited for when something is saved. */
-        const val FRESH_WAIT_MS = 2_500L
     }
 }
+
+/**
+ * The server's answer, or after [FRESH_WAIT_MS] what was saved; a failure
+ * with nothing saved throws it. Signed out, [SignedOutException].
+ */
+internal suspend fun <T> Flow<Loadable<T>>.settledIn(data: DataGraph): T {
+    if (data.session.session.value == null) throw SignedOutException()
+    var saved: T? = null
+    val fresh = withTimeoutOrNull(FRESH_WAIT_MS) {
+        first {
+            if (it is Loadable.Ready && !it.fresh) saved = it.value
+            (it is Loadable.Ready && it.fresh) || it is Loadable.Failed
+        }
+    }
+    return when (fresh) {
+        is Loadable.Ready -> fresh.value
+        is Loadable.Failed -> fresh.stale ?: saved ?: throw fresh.error
+        else -> saved ?: when (val late = first { it !is Loadable.Loading }) {
+            is Loadable.Ready -> late.value
+            is Loadable.Failed -> late.stale ?: throw late.error
+            Loadable.Loading -> error("Still loading")
+        }
+    }
+}
+
+/** How long the server's answer is waited for when something is saved. */
+private const val FRESH_WAIT_MS = 2_500L

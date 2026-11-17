@@ -28,7 +28,7 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class MusicLibraryTest {
     private val source = FakeSource()
-    private val library = MusicLibrary(source, { Look }) { path -> Uri.parse("content://art$path") }
+    private val library = MusicLibrary(source, { Look }, { path -> Uri.parse("content://art$path") })
 
     @Test
     fun idsReadBackWhatTheyWrite() {

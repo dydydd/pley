@@ -1001,9 +1001,12 @@ to the home server still goes over the Wi-Fi (`LocalRoute`).
 ### Android Auto
 
 On a phone connected to a car with Android Auto, Pley is a music app on
-the car's screen, and plays videos there while the car is parked.
+the car's screen, plays Live TV's channels there as radio, and plays
+videos there while the car is parked.
 
-**Music**, while driving or parked. The car's screen has three tabs:
+**Music**, while driving or parked. The car's screen has three tabs, and
+a fourth for Live TV (below); cars show four at most, each with a white
+icon the car tints:
 
 - **Recent**: as grids of covers, the albums played last (Recently
   played, twelve at most), then those added last to each music library
@@ -1014,18 +1017,35 @@ the car's screen, and plays videos there while the car is parked.
   albums, newest first; an album lists its tracks with their lengths.
 - **Playlists**: the profile's music playlists.
 
-Search finds artists, albums and tracks. Picking a track plays on through
+Search finds artists, albums and tracks, then channels. Picking a track plays on through
 its album or playlist; a track found by search plays on through its
 album. Now Playing shows the whole queue, which the car can pick from,
 and a Shuffle button, lit while the queue is shuffled (the phone's media
 controls have it too). "Hey Google, play … on Pley" plays the closest artist (shuffled),
 album or track; "play music on Pley" plays the album added last. Signed
-out, the car says to open Pley on the phone and sign in, with a button
-that opens it. The car reads the covers from the app, as the server's
+out, the car says to open Pley on the phone and sign in when it is safe,
+with a button that opens it. The car reads the covers from the app, as the server's
 pictures need the profile's token: the app grants Android Auto reading
 them and nothing else. Only Android Auto and the Google app, checked by
 the certificate Google signs them with, besides the system's own media
 controls, may browse or play Pley's music.
+
+**Live TV**, while driving or parked, to a profile Live TV is open to:
+its tab lists the favourites, then the channels watched lately, each
+under its heading, then the provider's groups (or All channels, without
+groups); a list holds 500 channels at most, as cars don't page. A
+channel shows its logo and what is on. Picked, it plays its sound alone,
+as radio, watched through the server as the phone's Live TV player
+watches it; Next and Previous change channel through the list it was
+picked from, and Now Playing shows it live, with no position to seek to.
+Search finds channels by name and by what is on; "Hey Google, play …
+on Pley" plays a channel named exactly, else the music found, else the
+closest channel. The music pauses while the radio plays, and music played
+again (from the car or the phone) stops the radio. Pause lets the
+channel's connection go, as does another app's sound taking over or the
+phone leaving the car; Play tunes it again. The app reads the channel's
+stream as the server sends it, picture and all, and plays only its
+sound.
 
 **Videos**, while parked, on phones with Android 15 or later where the
 car allows video apps (Google brings them to Android Auto with Android 17

@@ -75,7 +75,10 @@ class ServiceMusicControl(
 
     override fun drop() = playback.drop()
 
-    override fun pauseForVideo() = onMain { playback.pauseForVideo() }
+    override fun pauseForVideo() = onMain {
+        playback.pauseForVideo()
+        MusicHub.radio?.pause()
+    }
 
     override val sleep: StateFlow<SleepState> get() = playback.sleep
 
