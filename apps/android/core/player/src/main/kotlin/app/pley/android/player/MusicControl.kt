@@ -10,8 +10,8 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * The track playing in the background, for the mini player and Now
  * Playing. It changes when the track, the queue or playing changes, never
- * with the position: that is read with [MusicControl.position] while
- * drawing.
+ * with the position as it plays: that is read with [MusicControl.position]
+ * while drawing, and again when [seeks] says it was moved.
  */
 data class NowPlaying(
     val itemId: Long,
@@ -44,6 +44,12 @@ data class NowPlaying(
      * through a seek's loading; [playing] is sound coming out.
      */
     val wantsPlay: Boolean = playing,
+    /**
+     * How many times the position was moved other than by playing: a seek
+     * from here, a car, the notification or the profile's remote. Whatever
+     * shows the position reads it again when this changes, paused too.
+     */
+    val seeks: Int = 0,
 ) {
     /** Whether Next has a track to go to: the one after, or with [repeat] the first again. */
     val hasNext: Boolean get() = index + 1 < count || repeat != MusicRepeat.Off

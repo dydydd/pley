@@ -331,13 +331,14 @@ private fun StatusLine(now: NowPlaying, keepRoom: Boolean = true) {
  * The thumb glides from one reading of the position to the next while the
  * track plays, and runs to where a seek or another track puts it (at once
  * with reduced motion). A seek shows where it went as it is made, paused
- * too: the position is read again then, not at the next reading.
+ * too, whether it is made here or from a car, the notification or the
+ * profile's remote: the position is read again then.
  */
 @Composable
 private fun Scrubber(now: NowPlaying, model: NowPlayingViewModel, inline: Boolean = false) {
     val car = LocalCarScreen.current
     val playingTrack = now.itemId to now.index
-    val reading = rememberMusicPosition(model::position, now.playing, key = playingTrack)
+    val reading = rememberMusicPosition(model::position, now.playing, key = trackKey(now))
     val position = reading.value
     var dragging by remember { mutableStateOf<Float?>(null) }
     val duration = position.durationMs.takeIf { it > 0 } ?: now.durationMs

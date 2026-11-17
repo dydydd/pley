@@ -40,6 +40,7 @@ import app.pley.android.ui.phone.music.TrackArt
 import app.pley.android.ui.phone.music.TrackChange
 import app.pley.android.ui.phone.music.rememberMusicControl
 import app.pley.android.ui.phone.music.rememberMusicPosition
+import app.pley.android.ui.phone.music.trackKey
 import app.pley.android.ui.phone.music.trackWords
 import app.pley.android.ui.phone.player.CarGap
 import app.pley.android.ui.phone.player.CarSized
@@ -68,7 +69,7 @@ private fun MiniPlayer(nowPlaying: NowPlaying, modifier: Modifier) {
     val onNowPlaying = (navigator as? PhoneNavigation)?.stack()?.lastOrNull() == PleyKey.NowPlaying
     if (onNowPlaying) return
     val music = rememberMusicControl()
-    val position by rememberMusicPosition({ music?.position() ?: MusicPosition() }, nowPlaying.playing, key = nowPlaying.itemId to nowPlaying.index)
+    val position by rememberMusicPosition({ music?.position() ?: MusicPosition() }, nowPlaying.playing, key = trackKey(nowPlaying))
     val art = remember(nowPlaying.artUrl) { nowPlaying.artUrl?.let { ArtworkImage(listOf(it)) } }
     // What Play/Pause will do, a track still starting too.
     val playing = nowPlaying.wantsPlay

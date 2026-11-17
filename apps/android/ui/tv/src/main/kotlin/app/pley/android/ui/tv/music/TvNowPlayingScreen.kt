@@ -207,7 +207,8 @@ private fun Status(now: NowPlaying, model: NowPlayingViewModel) {
 private fun Scrubber(now: NowPlaying, model: NowPlayingViewModel) {
     val interactions = remember { MutableInteractionSource() }
     val focused by interactions.collectIsFocusedAsState()
-    val position by rememberPosition(model::position, now.playing, key = now.itemId to now.index)
+    // Read again for another track, and for a seek: paused, nothing else would move the scrubber.
+    val position by rememberPosition(model::position, now.playing, key = Triple(now.itemId, now.index, now.seeks))
     val duration = position.durationMs.takeIf { it > 0 } ?: now.durationMs
     val label = stringResource(R.string.tv_music_position)
     Column(Modifier.fillMaxWidth()) {

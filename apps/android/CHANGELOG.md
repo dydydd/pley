@@ -48,7 +48,8 @@ describes how they are made.
   language, also when the server can't be reached.
 - The scrubber no longer shows the last track's position while the next
   one loads, nor jumps back for a moment after a seek, and it moves when
-  seeking while paused.
+  seeking while paused, also from the car, the notification or the
+  remote.
 - Previous pressed again while a track is still loading goes one more
   track back, instead of starting the loading track again.
 - A track that failed to start no longer starts where the track before

@@ -669,6 +669,26 @@ class MusicPlaybackTest {
     }
 
     @Test
+    fun aSeekFromAnywhereIsToldSoWhateverShowsThePositionReadsItAgainPausedToo() = runTest {
+        val music = music()
+        music.play(album, startIndex = 1)
+        runCurrent()
+        output.startPlaying()
+        music.pause()
+        val before = music.nowPlaying.value!!.seeks
+
+        // A car's scrubber, the notification's or the remote's: paused, no reading of the position is due.
+        music.seekTo(4_000)
+        assertEquals(before + 1, music.nowPlaying.value!!.seeks)
+        assertEquals(4_000L, music.position().positionMs)
+
+        // Previous back to the track's start is a seek too.
+        music.previous()
+        assertEquals(before + 2, music.nowPlaying.value!!.seeks)
+        assertEquals(0L, music.position().positionMs)
+    }
+
+    @Test
     fun playPauseShowsWhatItWillDoWhileATrackStartsAndThroughAPausedSeek() = runTest {
         val music = music()
         api.hold()

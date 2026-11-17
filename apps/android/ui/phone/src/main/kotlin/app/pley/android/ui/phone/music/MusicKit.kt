@@ -71,12 +71,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 
 /**
- * Where the track is, refreshed every [everyMs] while [playing] and once
- * otherwise. Read it while drawing (a progress line), or in a small
- * composable of its own (the times), so the rest of the screen doesn't
- * recompose with it. [MusicPositionState.refresh] reads it at once, after
- * a seek: the scrubber is where it was sent, paused too, not where the
- * last reading had it.
+ * Where the track is, refreshed every [everyMs] while [playing]. Paused,
+ * it is read until it has stood still for a moment (what is buffered goes
+ * on growing after a seek), then no more until [key] changes: the track,
+ * or a seek made from anywhere ([trackKey]). Read it while drawing (a
+ * progress line), or in a small composable of its own (the times), so the
+ * rest of the screen doesn't recompose with it.
+ * [MusicPositionState.refresh] reads it at once, after a seek made here:
+ * the scrubber is where it was sent, not where the last reading had it.
  */
 @Composable
 internal fun rememberMusicPosition(position: () -> MusicPosition, playing: Boolean, key: Any?, everyMs: Long = POSITION_EVERY_MS): MusicPositionState {
@@ -88,9 +90,22 @@ internal fun rememberMusicPosition(position: () -> MusicPosition, playing: Boole
             delay(everyMs)
             state.refresh()
         }
+        var still = 0
+        while (still < SETTLED_READS) {
+            delay(everyMs)
+            val before = state.value
+            state.refresh()
+            still = if (state.value == before) still + 1 else 0
+        }
     }
     return state
 }
+
+/** What [rememberMusicPosition] reads the position again for: another track of the queue, or a seek. */
+internal fun trackKey(now: NowPlaying): Any = Triple(now.itemId, now.index, now.seeks)
+
+/** A paused track's position has settled once this many readings in a row are the same. */
+private const val SETTLED_READS = 3
 
 /** The track's position as last read ([rememberMusicPosition]). */
 @Stable

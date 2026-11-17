@@ -130,6 +130,9 @@ class MusicPlayback(
      * one, its position and its length, which aren't this track's.
      */
     private var held = false
+
+    /** Seeks made so far ([NowPlaying.seeks]). */
+    private var seeks = 0
     private var ended = false
 
     /** A video or a channel took over ([pauseForVideo]): the session went, the place stays. */
@@ -302,6 +305,7 @@ class MusicPlayback(
                 startTrack(0, sameTrack = !ended)
             } else {
                 o.seekTo(0)
+                sought()
             }
         }
     }
@@ -309,6 +313,13 @@ class MusicPlayback(
     fun seekTo(positionMs: Long) {
         if (ended || session == null) return
         out?.seekTo(positionMs.coerceAtLeast(0))
+        sought()
+    }
+
+    /** The position moved: whatever shows it reads it again, paused too, when nothing else would tell it. */
+    private fun sought() {
+        seeks++
+        publish()
     }
 
     fun jumpTo(index: Int) {
@@ -629,6 +640,7 @@ class MusicPlayback(
                 error = error,
                 repeat = queue.repeat,
                 wantsPlay = wantsPlay,
+                seeks = seeks,
             )
         }
     }
