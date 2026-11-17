@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import app.pley.android.designsystem.text.LocalMinTextSize
 import app.pley.android.ui.phone.theme.LocalPhoneMetrics
 import app.pley.android.ui.phone.theme.rememberPhoneMetrics
 
@@ -92,8 +93,10 @@ internal fun CarSized(car: Boolean, content: @Composable () -> Unit) {
     // The car's screen sets its text's size, as Android Auto's own does: the phone's font size setting would push it out
     // of the car's layouts, which already hold no text under 24 sp.
     val larger = remember(density) { Density(density.density * CAR_SCALE, fontScale = 1f) }
-    val readable = remember(type) { type.atLeast((CAR_TEXT.value / CAR_SCALE).sp) }
-    CompositionLocalProvider(LocalDensity provides larger, LocalCarScreen provides true) {
+    val smallest = (CAR_TEXT.value / CAR_SCALE).sp
+    val readable = remember(type) { type.atLeast(smallest) }
+    // The theme's styles are raised here; text in a size of its own (a tile's caption, a badge) reads the floor itself.
+    CompositionLocalProvider(LocalDensity provides larger, LocalCarScreen provides true, LocalMinTextSize provides smallest) {
         // The page's widths and margins as the car's dp have them, not the phone's: measured again inside.
         CompositionLocalProvider(LocalPhoneMetrics provides rememberPhoneMetrics()) {
             MaterialTheme(colorScheme = MaterialTheme.colorScheme, typography = readable, shapes = MaterialTheme.shapes, content = content)
