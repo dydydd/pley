@@ -1,8 +1,10 @@
 package app.pley.android.player.music
 
 import android.os.Bundle
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.ParserException
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -57,6 +59,8 @@ class EngineMusicOutput(
                 override fun onPlayerError(error: PlaybackException) {
                     // The engine prepares again after a failed audio output itself.
                     if (error.errorCode in ENGINE_RESTARTS) return
+                    // Release builds log no stack traces: why a track didn't play, without its address.
+                    Log.w(TAG, "track failed: ${describeFailure(error)}")
                     listener?.onError(kindOf(error))
                 }
             },
@@ -132,6 +136,12 @@ class EngineMusicOutput(
     }
 
     companion object {
+        private const val TAG = "pley.music"
+
+        /** The most causes, and characters of a parser's message, a failure's log line holds. */
+        private const val MAX_CAUSES = 6
+        private const val MAX_MESSAGE = 120
+
         /** The extra of the player's item's metadata that holds the track's id. */
         const val TRACK_ID = "pley.track"
 
@@ -142,6 +152,18 @@ class EngineMusicOutput(
         )
 
         /** What [error] means for the queue. */
+        /** [error]'s code and causes, for the log: their kinds, an HTTP status, a parser's words; never an address. */
+        internal fun describeFailure(error: PlaybackException): String {
+            val causes = generateSequence(error.cause) { it.cause }.take(MAX_CAUSES).map { cause ->
+                when (cause) {
+                    is HttpDataSource.InvalidResponseCodeException -> "HTTP ${cause.responseCode}"
+                    is ParserException -> "${cause.javaClass.simpleName}: ${cause.message?.take(MAX_MESSAGE)}"
+                    else -> cause.javaClass.simpleName
+                }
+            }
+            return (sequenceOf(error.errorCodeName) + causes).joinToString(" < ")
+        }
+
         fun kindOf(error: PlaybackException): OutputError {
             var cause: Throwable? = error.cause
             while (cause != null) {

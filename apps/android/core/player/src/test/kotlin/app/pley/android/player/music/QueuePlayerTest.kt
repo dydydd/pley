@@ -89,6 +89,25 @@ class QueuePlayerTest {
     }
 
     @Test
+    fun betweenTracksTheQueuesTrackShowsAsLoadingNeverAsNothingPlaying() {
+        playback.play(album, startIndex = 1)
+        // The engine has nothing loaded yet: the track is asked of the server. A car shows its loading screen for a
+        // session with nothing in it, so the session lists the queue and says the track loads.
+        player.queueChanged()
+        idle()
+        assertEquals(3, player.mediaItemCount)
+        assertEquals("track:2", player.currentMediaItem?.mediaId)
+        assertEquals(Player.STATE_BUFFERING, player.playbackState)
+        assertTrue(player.playWhenReady)
+        assertEquals(0, player.currentPosition)
+
+        engineHolds(2)
+        player.queueChanged()
+        idle()
+        assertEquals("Track 2", player.mediaMetadata.title.toString())
+    }
+
+    @Test
     fun aPickFromTheQueueAndShuffleGoThroughTheMusic() {
         playback.play(album)
         engineHolds(1)

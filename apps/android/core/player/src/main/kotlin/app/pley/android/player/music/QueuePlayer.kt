@@ -43,13 +43,16 @@ internal class QueuePlayer(
             .setAvailableCommands(commands)
             .setShuffleModeEnabled(queue.shuffle)
             .setRepeatMode(Player.REPEAT_MODE_OFF)
+        if (queue.tracks.isEmpty()) return state.build()
         val index = base.currentMediaItemIndex
-        if (queue.tracks.isEmpty() || base.timeline.isEmpty || index !in 0 until base.timeline.windowCount) return state.build()
-        val window = base.timeline.getWindow(index, Timeline.Window())
+        val window = if (!base.timeline.isEmpty && index in 0 until base.timeline.windowCount) base.timeline.getWindow(index, Timeline.Window()) else null
+        val current = queue.tracks.getOrNull(queue.index)
+        // Whether the output plays the queue's track now; not while the next one is asked of the server and loads.
+        val loaded = window != null && current != null && window.mediaItem.mediaMetadata.extras?.getLong(EngineMusicOutput.TRACK_ID, -1) == current.id
         val playlist = queue.tracks.mapIndexed { i, track ->
             val item = describe(track)
             val data = MediaItemData.Builder(Uid(i, track.id))
-            if (i == queue.index && window.mediaItem.mediaMetadata.extras?.getLong(EngineMusicOutput.TRACK_ID, -1) == track.id) {
+            if (i == queue.index && loaded && window != null) {
                 // The track the output plays: its own item, duration and tracks, with the art's address for cars.
                 val metadata = base.currentMetadata.buildUpon().setArtworkUri(item.mediaMetadata.artworkUri).build()
                 data.setMediaItem(window.mediaItem.buildUpon().setMediaId(item.mediaId).setMediaMetadata(metadata).build())
@@ -64,7 +67,19 @@ internal class QueuePlayer(
             }
             data.build()
         }
-        return state.setPlaylist(playlist).setCurrentMediaItemIndex(queue.index.coerceIn(0, playlist.lastIndex)).build()
+        state.setPlaylist(playlist).setCurrentMediaItemIndex(queue.index.coerceIn(0, playlist.lastIndex))
+        // Between tracks, and while a failed one is tried again, the output has nothing loaded, or an error: the session
+        // says the queue's track is loading, playing as it will, so a car doesn't show its own loading screen for nothing
+        // playing at each change. A track that failed for good says so.
+        val now = playback.nowPlaying.value
+        val starting = now != null && now.error == null && (now.loading || !loaded || base.playerError != null)
+        if (starting && now != null) {
+            state.setPlaybackState(Player.STATE_BUFFERING)
+                .setPlayerError(null)
+                .setPlayWhenReady(now.playing || now.loading, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+            if (!loaded) state.setContentPositionMs(0)
+        }
+        return state.build()
     }
 
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {

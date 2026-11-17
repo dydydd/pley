@@ -120,6 +120,8 @@ class MusicService : MediaLibraryService() {
         grantArt(SYSTEM_UI)
         following = scope.launch {
             launch { playback.queueState.collect { player?.queueChanged() } }
+            // A track starting, failing or loaded changes what the session says plays.
+            launch { playback.nowPlaying.collect { player?.queueChanged() } }
             // Shuffle's button shows whether it is on, as the queue changes from anywhere.
             launch { playback.queueState.map { it.shuffle }.distinctUntilChanged().drop(1).collect { made.setMediaButtonPreferences(buttons(it)) } }
             graph?.musicLibrary?.let { library -> launch { library.signedInChanges.drop(1).collect { tellCars(made, it) } } }
