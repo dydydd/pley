@@ -16,6 +16,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
@@ -381,10 +382,19 @@ private fun Tabs(navigation: PhoneNavigation, shell: PhoneShellState, entries: (
                 )
             }
         },
-        navigationSuiteType = if (rail) NavigationSuiteType.WideNavigationRailCollapsed else NavigationSuiteType.ShortNavigationBarCompact,
+        // A car's screen is short: the wide rail's top padding and gaps, a third larger there, put its last tab under the
+        // bottom edge of the smallest one (800 × 480). The compact rail, its tabs centred, holds all five.
+        navigationSuiteType = when {
+            rail && car -> NavigationSuiteType.NavigationRail
+            rail -> NavigationSuiteType.WideNavigationRailCollapsed
+            else -> NavigationSuiteType.ShortNavigationBarCompact
+        },
+        navigationItemVerticalArrangement = if (car) Arrangement.Center else NavigationSuiteDefaults.verticalArrangement,
         navigationSuiteColors = NavigationSuiteDefaults.colors(
             shortNavigationBarContainerColor = PleyColors.Bg,
             shortNavigationBarContentColor = PleyColors.Muted,
+            navigationRailContainerColor = PleyColors.Bg,
+            navigationRailContentColor = PleyColors.Muted,
             wideNavigationRailColors = WideNavigationRailDefaults.colors(
                 containerColor = PleyColors.Bg,
                 contentColor = PleyColors.Muted,
@@ -398,6 +408,7 @@ private fun Tabs(navigation: PhoneNavigation, shell: PhoneShellState, entries: (
         Column(
             Modifier
                 .fillMaxSize()
+                .testTag(TABS_PAGE)
                 .drawWithContent {
                     drawContent()
                     // The 1 dp hairline between the page and the bar (or the rail).
@@ -489,3 +500,6 @@ private const val SHIFT = 0.073f
 
 /** The test tag of each tab's item in the bar or rail: this and the tab's name. */
 internal const val TAB_TAG = "pley.phone.tab."
+
+/** What shows beside the rail, or over the bar: the tab's pages, the remote's bar and the mini player. */
+internal const val TABS_PAGE = "pley.phone.tabs.page"

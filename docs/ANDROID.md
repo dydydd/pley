@@ -1084,8 +1084,9 @@ sheets, menus and messages too, and the controls over the video keep
 10 seconds back and 10 seconds forward, the seek bar is taller, and the
 bottom row keeps Subtitles, Audio, Fit and Next episode (Quality is in
 Settings, chapters show on the seek bar, and there is no Lock). Every
-page of the app is car-sized the same way, its rail showing icons alone
-as Android Auto's own does, and the home page's banner no taller than
+page of the app is car-sized the same way, its rail showing icons alone,
+centred on its height, as Android Auto's own does (all five tabs fit
+the smallest screen), and the home page's banner no taller than
 the screen; music's Now Playing and the bar of what plays too; Now Playing puts the cover beside the title,
 over the scrubber and the controls, as in any short, wide window (a
 phone on its side too). These layouts hold on every screen Android Auto
