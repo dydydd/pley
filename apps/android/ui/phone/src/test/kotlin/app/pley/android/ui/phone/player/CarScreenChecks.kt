@@ -68,4 +68,11 @@ internal object CarScreenChecks {
 
     /** 1280 × 720 at 240 dpi, as many wide head units report. */
     const val DENSE = "w853dp-h480dp-land-hdpi"
+
+    /**
+     * What Android Auto gives a parked app on a Ford Mustang Mach-E's tall screen: 1042 × 991 px at 185 dpi, a little
+     * wider than tall, and half of that height when the car splits its screen.
+     */
+    const val TALL = "w901dp-h857dp-land-185dpi"
+    const val TALL_SPLIT = "w901dp-h428dp-land-185dpi"
 }

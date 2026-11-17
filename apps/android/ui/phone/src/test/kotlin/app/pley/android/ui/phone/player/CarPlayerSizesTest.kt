@@ -84,4 +84,12 @@ class CarPlayerSizesTest {
     @Test
     @Config(qualifiers = CarScreenChecks.DENSE)
     fun dense() = check("dense")
+
+    @Test
+    @Config(qualifiers = CarScreenChecks.TALL)
+    fun tall() = check("tall")
+
+    @Test
+    @Config(qualifiers = CarScreenChecks.TALL_SPLIT)
+    fun tallSplit() = check("tall-split")
 }

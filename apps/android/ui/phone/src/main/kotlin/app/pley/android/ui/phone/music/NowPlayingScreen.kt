@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -192,14 +193,23 @@ private fun NowPlayingPage() {
                 if (maxWidth > maxHeight && maxHeight < WIDE_BELOW) {
                     WideNowPlaying(now, art, model, onAlbum)
                 } else {
+                    // The art is as wide as its share of the column, and no taller than what the title, the scrubber and the
+                    // controls leave: on a window a little too short for all of it at that size (a car's portrait screen,
+                    // 1042 × 991 on a Mach-E), it is the art that is smaller, not the controls that are cut off.
+                    val artSide = (minOf(maxWidth, TALL_MAX) - TALL_EDGE * 2) * ART_SHARE
                     Column(
-                        Modifier.fillMaxHeight().widthIn(max = 520.dp).padding(horizontal = 24.dp),
+                        Modifier
+                            .fillMaxHeight()
+                            .widthIn(max = TALL_MAX)
+                            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom))
+                            .padding(start = TALL_EDGE, end = TALL_EDGE, bottom = if (LocalCarScreen.current) CarGap else 16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.SpaceEvenly,
                     ) {
                         Box(
                             Modifier
-                                .fillMaxWidth(ART_SHARE)
+                                .weight(1f, fill = false)
+                                .sizeIn(maxWidth = artSide, maxHeight = artSide)
                                 .aspectRatio(1f)
                                 .clip(PleyShape.Card)
                                 .background(PleyColors.Surface2),
@@ -549,6 +559,10 @@ private fun QueueLine(row: QueueRow, origin: String, playing: Boolean, onClick: 
 
 /** Windows less tall than this, and wider than tall, put the art beside the title. */
 private val WIDE_BELOW = 560.dp
+
+/** The widest the tall layout's column gets, and its side margins. */
+private val TALL_MAX = 520.dp
+private val TALL_EDGE = 24.dp
 
 /** The widest a wide window's controls spread. */
 private val WIDE_MAX = 640.dp

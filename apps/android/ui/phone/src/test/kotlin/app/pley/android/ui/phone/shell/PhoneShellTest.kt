@@ -195,6 +195,14 @@ class PhoneShellTest {
     fun onADenseCarScreenEveryTabOfTheRailIsOnScreen() = railFitsTheCar("dense")
 
     @Test
+    @Config(qualifiers = CarScreenChecks.TALL)
+    fun onATallCarScreenEveryTabOfTheRailIsOnScreen() = railFitsTheCar("tall")
+
+    @Test
+    @Config(qualifiers = CarScreenChecks.TALL_SPLIT)
+    fun onATallCarScreenSplitInTwoEveryTabOfTheRailIsOnScreen() = railFitsTheCar("tall-split")
+
+    @Test
     fun nothingIsAskedOfSignInOrPlaybackBeforeTheFirstFrame() {
         val graph = TestGraph()
         TestApplication.graph = graph

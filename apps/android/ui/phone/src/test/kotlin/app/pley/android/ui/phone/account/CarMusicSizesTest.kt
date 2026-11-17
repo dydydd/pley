@@ -100,6 +100,14 @@ class CarMusicSizesTest {
     fun dense() = check("dense")
 
     @Test
+    @Config(qualifiers = CarScreenChecks.TALL)
+    fun tall() = check("tall")
+
+    @Test
+    @Config(qualifiers = CarScreenChecks.TALL_SPLIT)
+    fun tallSplit() = check("tall-split")
+
+    @Test
     @Config(qualifiers = CarScreenChecks.SMALL)
     fun barSmallLandscape() = checkBar("small")
 

@@ -1092,9 +1092,11 @@ over the scrubber and the controls, as in any short, wide window (a
 phone on its side too). These layouts hold on every screen Android Auto
 gives parked apps, as Google's Desktop Head Unit configurations test
 them: a small landscape screen (800 × 480), the wide strip of a wide
-screen (1920 × 484) and a portrait one (1042 × 1080, as on tall screens
-such as the Mustang Mach-E's), and denser screens; their tests draw each
-and check every control. Whether a screen is a car's comes from
+screen (1920 × 484) and a portrait one (1042 × 1080), denser screens,
+and what a Mustang Mach-E's tall screen gives the app (1042 × 991 at
+185 dpi, and half that height when the car splits its screen); their
+tests draw each and check every control. Now Playing's cover is as large
+as the title, the scrubber and the controls under it leave room for. Whether a screen is a car's comes from
 Android Auto (`CarConnection`, as Google tells parked apps to check):
 another screen the phone drives, such as a monitor, keeps the phone's
 sizes. A debuggable build counts the displays the developer options
