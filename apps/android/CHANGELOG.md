@@ -18,12 +18,17 @@ describes how they are made.
   button.
 - Parked, the sideloaded app plays videos and Live TV on the car's screen
   with Android Auto (Android 15 and later, in cars that allow video
-  apps), with every page and control sized for the car, 10-second skip
-  buttons, and pausing as soon as the car moves off. Music's Now Playing and its bar are larger
-  there too, on landscape, wide and portrait car screens.
+  apps), with every page and control sized for the car, on landscape,
+  wide and portrait car screens, 10-second skip buttons, and pausing as
+  soon as the car moves off.
 - Live TV's channels play as radio in Android Auto: a Live TV tab with
   favourites, channels watched lately and groups, channel search, and
   "Hey Google, play … on Pley" by channel name.
+- Play on… lists Google Cast and AirPlay devices for Live TV channels too.
+
+### Changed
+
+- The home banner's More info button reads Más info in Spanish.
 
 ### Fixed
 

@@ -43,6 +43,10 @@ and browse for Bonjour's `_pley._tcp`. On iPhone, iPad and Apple TV they
 play sound in the background (the `audio` background mode), for music and
 Picture in Picture; it needs no entitlement.
 
+They show no audiobooks: the server gives them no audiobook library, nor
+their books on Home, in search or in history. Audiobooks are in the web
+and desktop apps.
+
 ## Screens
 
 Both apps have the same screens, each built for its device. Signed in,
@@ -1470,15 +1474,18 @@ once its session does. A refusal says why: "Living room TV isn't on any more" (`
 in a moment" (`429`), and the server's own words otherwise.
 
 A movie or an episode goes to a Google Cast or an AirPlay device too,
-which the server plays on itself; an album, a show, a playlist or a
-channel goes to Pley's own apps alone. The server answers once the
-device plays, within about 4 minutes, so a cast waits 4 minutes for its
-answer, where other requests wait 20 seconds; so do the pairing requests
+which the server plays on itself, and so does a channel where the device
+lists `live`; an album, a show or a playlist goes to Pley's own apps
+alone. The server answers once the device plays, within about 4
+minutes, so a cast waits 4 minutes for its answer, where other requests
+wait 20 seconds; so do the pairing requests
 below, which can take the server 50 seconds. Meanwhile "Play on…" says
 "Starting on Kitchen TV…" (in the live player's overlay, a spinner) and
 its devices can't be chosen: one cast at a time. A cast there can also
 say "Kitchen TV can't reach this server" (`409` `cast_unreachable`) or
-"Kitchen TV didn't play it" (`409` `cast_failed`). An AirPlay device the
+"Kitchen TV didn't play it" (`409` `cast_failed`), and a channel "Kitchen
+TV can't play the channel: all Live TV connections are in use" (`409`
+`connections_full`). An AirPlay device the
 server hasn't paired with answers `409` `pairing_needed`: the app has it
 show its code (`POST /api/remote/devices/{id}/pairing` with no `pin`),
 and a sheet asks for it, "Pair with Den Apple TV", with "Type the code
