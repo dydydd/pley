@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.ReportDrawn
 import androidx.activity.compose.ReportDrawnWhen
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.EnterTransition
@@ -14,7 +15,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -415,8 +418,15 @@ private fun Tabs(navigation: PhoneNavigation, shell: PhoneShellState, entries: (
                 },
         ) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                key(tab) {
-                    Screens(entries = decorated.getValue(tab), onBack = navigation::back)
+                // One tab fades out, then the next in (Material's fade through): they used to swap in one frame.
+                val reduced = reducedMotion()
+                AnimatedContent(
+                    targetState = tab,
+                    modifier = Modifier.fillMaxSize(),
+                    transitionSpec = { fadeThrough(reduced) },
+                    label = "tab",
+                ) { shown ->
+                    Screens(entries = decorated.getValue(shown), onBack = navigation::back)
                 }
                 ToastHost(
                     shell.toasts,
@@ -459,8 +469,9 @@ private fun rememberDecorators() = listOf(
 /**
  * One back stack's screens: sheets over the screen under them, dialogs as
  * dialogs, and Material's shared-axis X between screens (design spec §5.1),
- * following the finger on a predictive back. With reduced motion screens
- * swap in place.
+ * following the finger on a predictive back. A screen marked [RISES] (Now
+ * Playing, opened from the bar at the bottom) comes up from there and goes
+ * back down. With reduced motion screens swap in place.
  */
 @Composable
 private fun Screens(entries: List<NavEntry<NavKey>>, onBack: () -> Unit) {
@@ -470,9 +481,9 @@ private fun Screens(entries: List<NavEntry<NavKey>>, onBack: () -> Unit) {
         entries = entries,
         modifier = Modifier.fillMaxSize(),
         sceneStrategies = strategies,
-        transitionSpec = { sharedAxis(forward = true, reduced) },
-        popTransitionSpec = { sharedAxis(forward = false, reduced) },
-        predictivePopTransitionSpec = { sharedAxis(forward = false, reduced) },
+        transitionSpec = { if (targetState.rises()) rise(up = true, reduced) else sharedAxis(forward = true, reduced) },
+        popTransitionSpec = { if (initialState.rises()) rise(up = false, reduced) else sharedAxis(forward = false, reduced) },
+        predictivePopTransitionSpec = { if (initialState.rises()) rise(up = false, reduced) else sharedAxis(forward = false, reduced) },
         onBack = onBack,
     )
 }
@@ -490,6 +501,35 @@ private fun AnimatedContentTransitionScope<Scene<NavKey>>.sharedAxis(forward: Bo
 
 /** 30 dp of a 412 dp phone, as a share of the width, so it needs no density here. */
 private const val SHIFT = 0.073f
+
+/** An entry's metadata saying its screen comes up from the bottom and goes back down ([rise]). */
+internal const val RISES = "pley.rises"
+
+private fun Scene<NavKey>.rises(): Boolean = entries.lastOrNull()?.metadata?.get(RISES) == true
+
+/**
+ * The shared axis on Y, for a screen opened from the bottom of the page: [up], it comes up a short way as it fades in
+ * over the page under it, which fades out where it is; down, it sinks as it fades out and the page fades back in.
+ */
+private fun rise(up: Boolean, reduced: Boolean): ContentTransform {
+    if (reduced) return EnterTransition.None togetherWith ExitTransition.None
+    val move = tween<androidx.compose.ui.unit.IntOffset>(PleyMotion.SCREEN_MS, easing = FastOutSlowInEasing)
+    val out = PleyMotion.SCREEN_MS / 3
+    val appear = fadeIn(tween(PleyMotion.SCREEN_MS - out, delayMillis = out, easing = LinearEasing))
+    val leave = fadeOut(tween(out, easing = LinearEasing))
+    val shift = { height: Int -> (height * RISE).toInt() }
+    return if (up) (slideInVertically(move, shift) + appear) togetherWith leave else appear togetherWith (slideOutVertically(move, shift) + leave)
+}
+
+/** How far a rising screen moves, as a share of the height. */
+private const val RISE = 0.06f
+
+/** Between tabs: the one left fades out over the first third of pley's 220 ms, the one chosen in after it. */
+private fun fadeThrough(reduced: Boolean): ContentTransform {
+    if (reduced) return EnterTransition.None togetherWith ExitTransition.None
+    val out = PleyMotion.SCREEN_MS / 3
+    return fadeIn(tween(PleyMotion.SCREEN_MS - out, delayMillis = out, easing = LinearEasing)) togetherWith fadeOut(tween(out, easing = LinearEasing))
+}
 
 /** The test tag of each tab's item in the bar or rail: this and the tab's name. */
 internal const val TAB_TAG = "pley.phone.tab."

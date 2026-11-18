@@ -1166,7 +1166,11 @@ low screen across the dashboard (1920 × 720), a full HD one, and tall
 and narrow portrait ones (1080 × 1920, 480 × 800); their
 tests draw each and check every control. Now Playing's cover is as large
 as the title, the scrubber and the controls under it leave room for,
-with air between it and the title. Whether a screen is a car's comes from
+with air between it and the title. Moving about is eased, on phones as
+on a car's screen: a tab fades out and the next one in, Now Playing
+comes up from the bar of what plays and goes back down to it, and that
+bar rises from the bottom edge as music starts (all in place with
+reduced motion). Whether a screen is a car's comes from
 Android Auto (`CarConnection`, as Google tells parked apps to check):
 another screen the phone drives, such as a monitor, keeps the phone's
 sizes. A debuggable build counts the displays the developer options

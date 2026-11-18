@@ -1,5 +1,12 @@
 package app.pley.android.ui.phone.shell
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -27,10 +34,12 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.pley.android.designsystem.PleyColors
+import app.pley.android.designsystem.PleyMotion
 import app.pley.android.designsystem.PleyShape
 import app.pley.android.designsystem.icon.Icon
 import app.pley.android.designsystem.icon.PleyIcons
 import app.pley.android.designsystem.image.ArtworkImage
+import app.pley.android.designsystem.reducedMotion
 import app.pley.android.player.MusicPosition
 import app.pley.android.player.NowPlaying
 import app.pley.android.screens.PleyKey
@@ -54,20 +63,37 @@ import app.pley.android.ui.phone.player.onCarScreen
  * its top for how far the track has played (drawn, never recomposed).
  * Tapping it opens Now Playing; it hides while Now Playing shows. As the
  * track changes, the art and the words give way to the next one's as Now
- * Playing's do.
+ * Playing's do. It rises from the bottom edge as music starts and sinks
+ * back as it stops (in place with reduced motion).
  */
 @Composable
 internal fun MiniPlayerSlot(nowPlaying: NowPlaying?, modifier: Modifier = Modifier, car: Boolean = onCarScreen()) {
-    if (nowPlaying == null) return
-    // On a car's screen, car-sized: 64 dp buttons, no text under 24 sp.
-    CarSized(car) { MiniPlayer(nowPlaying, modifier) }
+    val navigator = LocalPhoneNavigator.current
+    val onNowPlaying = (navigator as? PhoneNavigation)?.stack()?.lastOrNull() == PleyKey.NowPlaying
+    // What played last, drawn while the bar leaves.
+    val last = remember { arrayOfNulls<NowPlaying>(1) }
+    if (nowPlaying != null) last[0] = nowPlaying
+    // Composed with nothing playing too: music starting is then a change the bar can rise in on.
+    val shown = nowPlaying ?: last[0]
+    val reduced = reducedMotion()
+    // Music starting or stopping: the bar rises from the bottom edge as the page makes room, and sinks back, where it
+    // used to push the page up in one frame. Now Playing opening or closing swaps it at once: the page changes then,
+    // and a bar still shrinking would move the one coming in.
+    AnimatedVisibility(
+        visible = nowPlaying != null,
+        modifier = modifier,
+        enter = if (reduced) EnterTransition.None else expandVertically(PleyMotion.overlay(), expandFrom = Alignment.Top) + fadeIn(PleyMotion.overlay()),
+        exit = if (reduced) ExitTransition.None else shrinkVertically(PleyMotion.overlay(), shrinkTowards = Alignment.Top) + fadeOut(PleyMotion.overlay()),
+        label = "mini player",
+    ) {
+        // On a car's screen, car-sized: 64 dp buttons, no text under 24 sp.
+        if (shown != null && !onNowPlaying) CarSized(car) { MiniPlayer(shown) }
+    }
 }
 
 @Composable
-private fun MiniPlayer(nowPlaying: NowPlaying, modifier: Modifier) {
+private fun MiniPlayer(nowPlaying: NowPlaying, modifier: Modifier = Modifier) {
     val navigator = LocalPhoneNavigator.current
-    val onNowPlaying = (navigator as? PhoneNavigation)?.stack()?.lastOrNull() == PleyKey.NowPlaying
-    if (onNowPlaying) return
     val music = rememberMusicControl()
     val position by rememberMusicPosition({ music?.position() ?: MusicPosition() }, nowPlaying.playing, key = trackKey(nowPlaying))
     val art = remember(nowPlaying.artUrl) { nowPlaying.artUrl?.let { ArtworkImage(listOf(it)) } }
