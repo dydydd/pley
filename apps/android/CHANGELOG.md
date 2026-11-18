@@ -49,6 +49,8 @@ describes how they are made.
   the rows administrators chose.
 - An artist's, album's or playlist's page puts the cover beside the
   title on a phone on its side and on tablets, with Play in view.
+- The rail beside the page on a phone on its side or a tablet shows its
+  tabs' icons alone, in a column centred on its height.
 
 ### Fixed
 

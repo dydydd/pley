@@ -152,6 +152,10 @@ rates as the decoder gives them, the same in every language.
 
 ### Phones and tablets
 
+- **The tabs** are a bar under the page on a phone held upright, with
+  their names, and a rail beside it on a phone on its side, a tablet or
+  a car's screen: icons alone, centred on its height and read out by
+  name.
 - **The player** shows its controls, the title with them, for 3 s as
   playback starts and as each later item begins (the next episode, a
   queue's next), where TVs show the title alone at the top; a tap shows

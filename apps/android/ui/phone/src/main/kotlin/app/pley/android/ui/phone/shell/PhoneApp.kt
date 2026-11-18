@@ -28,7 +28,6 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.ShortNavigationBarItemDefaults
-import androidx.compose.material3.WideNavigationRailDefaults
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteDefaults
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteItem
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
@@ -101,7 +100,6 @@ import app.pley.android.ui.phone.livetv.liveTvEntries
 import app.pley.android.ui.phone.music.musicEntries
 import app.pley.android.ui.phone.onboarding.onboardingEntries
 import app.pley.android.ui.phone.player.CarSized
-import app.pley.android.ui.phone.player.LocalCarScreen
 import app.pley.android.ui.phone.player.onCarScreen
 import app.pley.android.ui.phone.playlists.playlistsEntries
 import app.pley.android.ui.phone.remote.CastTarget
@@ -353,7 +351,6 @@ private fun Tabs(navigation: PhoneNavigation, shell: PhoneShellState, entries: (
     }
     val metrics = LocalPhoneMetrics.current
     val rail = metrics.rail
-    val car = LocalCarScreen.current
     val tab = navigation.tab
     val itemColors = ShortNavigationBarItemDefaults.colors(
         selectedIconColor = PleyColors.AccentBright,
@@ -371,34 +368,27 @@ private fun Tabs(navigation: PhoneNavigation, shell: PhoneShellState, entries: (
                     selected = item == tab,
                     onClick = { navigation.select(item) },
                     icon = {
-                        // On a car's screen, icons alone, read out by name, as Android Auto's own rail has them: its
-                        // short screen has no room for labels at 24 sp.
-                        val icon = @Composable { Icon(item.icon, contentDescription = if (car) name else null, tint = LocalContentColor.current) }
+                        // The rail beside the page (a phone on its side, a tablet, a car's screen) shows icons alone,
+                        // read out by name, in a column, as Android Auto's own rail has them; centred labels of
+                        // different lengths left its icons out of line. The bar under a phone's page keeps its labels.
+                        val icon = @Composable { Icon(item.icon, contentDescription = if (rail) name else null, tint = LocalContentColor.current) }
                         if (item == PhoneTab.Me) RequestsTabIcon(shell.requests, icon) else icon()
                     },
-                    label = if (car) null else ({ FittedLabel(name) }),
+                    label = if (rail) null else ({ FittedLabel(name) }),
                     colors = itemColors,
                     modifier = Modifier.testTag(TAB_TAG + item.name),
                 )
             }
         },
-        // A car's screen is short: the wide rail's top padding and gaps, a third larger there, put its last tab under the
-        // bottom edge of the smallest one (800 × 480). The compact rail, its tabs centred, holds all five.
-        navigationSuiteType = when {
-            rail && car -> NavigationSuiteType.NavigationRail
-            rail -> NavigationSuiteType.WideNavigationRailCollapsed
-            else -> NavigationSuiteType.ShortNavigationBarCompact
-        },
-        navigationItemVerticalArrangement = if (car) Arrangement.Center else NavigationSuiteDefaults.verticalArrangement,
+        // The compact rail, its tabs centred on its height: on a car's short screen (800 × 480, a third larger) the wide
+        // rail's top padding and gaps put its last tab under the bottom edge.
+        navigationSuiteType = if (rail) NavigationSuiteType.NavigationRail else NavigationSuiteType.ShortNavigationBarCompact,
+        navigationItemVerticalArrangement = if (rail) Arrangement.Center else NavigationSuiteDefaults.verticalArrangement,
         navigationSuiteColors = NavigationSuiteDefaults.colors(
             shortNavigationBarContainerColor = PleyColors.Bg,
             shortNavigationBarContentColor = PleyColors.Muted,
             navigationRailContainerColor = PleyColors.Bg,
             navigationRailContentColor = PleyColors.Muted,
-            wideNavigationRailColors = WideNavigationRailDefaults.colors(
-                containerColor = PleyColors.Bg,
-                contentColor = PleyColors.Muted,
-            ),
         ),
         // The window's background shows through (PhoneApp).
         containerColor = Color.Transparent,
