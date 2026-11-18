@@ -246,12 +246,17 @@ class ArtworkTileTest {
         assertEquals(1, textLines(compose.onNodeWithTag("tile").captureToImage().toPixelMap()))
     }
 
-    /** Lines of light text in [image]: bands of rows with a light pixel, 4 px or more apart, inside the rounded corners. */
+    /**
+     * Lines of light text in [image]: bands of rows with a light pixel, 4 px
+     * or more apart, inside the rounded corners. The title is drawn at 70 %
+     * white, Pley's mark over a tile without a picture at 36 % at most: light
+     * is brighter than the mark.
+     */
     private fun textLines(image: PixelMap): Int {
         var lines = 0
         var gap = -1
         for (y in 16 until image.height - 16) {
-            val light = (16 until image.width - 16).any { x -> image[x, y].let { it.alpha > 0.9f && maxOf(it.red, it.green, it.blue) > 0.5f } }
+            val light = (16 until image.width - 16).any { x -> image[x, y].let { it.alpha > 0.9f && maxOf(it.red, it.green, it.blue) > 0.6f } }
             if (light) {
                 if (gap == -1 || gap >= 4) lines++
                 gap = 0

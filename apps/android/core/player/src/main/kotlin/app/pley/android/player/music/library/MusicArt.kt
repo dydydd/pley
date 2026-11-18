@@ -30,6 +30,19 @@ object MusicArt {
         return Uri.Builder().scheme("content").authority(authority(context)).appendPath(PICTURE).appendQueryParameter(PATH, path).build()
     }
 
+    /**
+     * A cover for what has none, [seed] its title ([PlaceholderCover]): drawn
+     * by the provider from the title's hue alone, the title not in the address.
+     */
+    fun placeholderUri(context: Context, seed: String): Uri = Uri.Builder().scheme("content").authority(authority(context))
+        .appendPath(PLACEHOLDER).appendQueryParameter(HUE, PlaceholderCover.hue(seed).toString()).build()
+
+    /** The hue a [placeholderUri] names; `null` for any other address. */
+    internal fun hueOf(context: Context, uri: Uri): Int? {
+        if (uri.scheme != "content" || uri.authority != authority(context) || uri.pathSegments != listOf(PLACEHOLDER)) return null
+        return uri.getQueryParameter(HUE)?.toIntOrNull()?.takeIf { it in 0 until 360 }
+    }
+
     /** The server path [uri] names, when it is one of these addresses. */
     internal fun pathOf(context: Context, uri: Uri): String? {
         if (uri.scheme != "content" || uri.authority != authority(context) || uri.pathSegments != listOf(PICTURE)) return null
@@ -41,6 +54,8 @@ object MusicArt {
 
     private const val PICTURE = "picture"
     private const val PATH = "p"
+    private const val PLACEHOLDER = "placeholder"
+    private const val HUE = "h"
     private const val MAX_PATH = 256
     private val PICTURE_PATH =
         Regex("""(/api/(items|collections)/\d{1,19}/images/[a-z]{1,16}|/api/live/channels/\d{1,19}/logo)(\?[A-Za-z0-9=&._-]{0,128})?""")
@@ -57,17 +72,25 @@ class MusicArtProvider : ContentProvider() {
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         val context = context ?: throw FileNotFoundException()
         if (mode != "r") throw FileNotFoundException("Read only")
+        MusicArt.hueOf(context, uri)?.let { hue -> return pipe { PlaceholderCover.png(context, hue) } }
         val path = MusicArt.pathOf(context, uri) ?: throw FileNotFoundException()
         val owner = context.applicationContext as? PlayerGraphOwner ?: throw FileNotFoundException()
-        // The pipe goes back at once and the picture follows, fetched on the provider's own threads: a car's grid of
-        // covers asks for many at a time, and a binder thread held while each one comes from the server holds up every
-        // other call into the app. One that can't be had in FETCH_MS ends the pipe empty: the car shows no cover.
+        // One that can't be had in FETCH_MS ends the pipe empty: the car shows no cover.
+        return pipe { runBlocking { withTimeoutOrNull(FETCH_MS) { owner.playerGraph.musicLibrary?.picture(path) } } }
+    }
+
+    /**
+     * A pipe that goes back at once, [bytes] following, made on the provider's
+     * own threads: a car's grid of covers asks for many at a time, and a binder
+     * thread held while each one comes from the server holds up every other
+     * call into the app.
+     */
+    private fun pipe(bytes: () -> ByteArray?): ParcelFileDescriptor {
         val (read, write) = ParcelFileDescriptor.createPipe()
         FETCHES.execute {
             ParcelFileDescriptor.AutoCloseOutputStream(write).use { out ->
-                val bytes = runBlocking { withTimeoutOrNull(FETCH_MS) { owner.playerGraph.musicLibrary?.picture(path) } }
                 try {
-                    if (bytes != null) out.write(bytes)
+                    bytes()?.let(out::write)
                 } catch (_: IOException) {
                     // The car stopped reading.
                 }

@@ -1,5 +1,7 @@
 package app.pley.android.player.music.library
 
+import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.net.Uri
 import androidx.media3.common.MediaItem
 import androidx.media3.session.MediaConstants
@@ -20,6 +22,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.GraphicsMode
 
 /**
  * The music library as Android Auto browses it: its tabs, the artists,
@@ -211,6 +214,42 @@ class MusicLibraryTest {
         }
         assertNull(MusicArt.pathOf(context, Uri.parse("content://${MusicArt.authority(context)}/picture?p=/api/auth/me")))
         assertNull(MusicArt.pathOf(context, Uri.parse("content://elsewhere/picture?p=/api/items/1/images/poster")))
+    }
+
+    @Test
+    fun whatHasNoPictureHasItsTitlesPlaceholderAndWhatHasOneKeepsIt() = runTest {
+        val covered = MusicLibrary(source, { Look }, { path -> Uri.parse("content://art$path") }) { seed -> Uri.parse("content://placeholder/$seed") }
+        val playlists = covered.children(MusicId.Playlists, 0, 50)
+        assertEquals("content://placeholder/Night drive", playlists.single().mediaMetadata.artworkUri.toString())
+        val albums = covered.children(MusicId.Artist(40), 0, 50).filter { it.mediaId.startsWith("album:") }
+        assertTrue(albums.all { it.mediaMetadata.artworkUri.toString().startsWith("content://art/api/items/") })
+        // The tabs keep their icons, and the library without placeholders shows none for what has no picture.
+        assertTrue(covered.children(MusicId.Root, 0, 50).none { it.mediaMetadata.artworkUri.toString().startsWith("content://placeholder") })
+        assertNull(library.children(MusicId.Playlists, 0, 50).single().mediaMetadata.artworkUri)
+    }
+
+    @Test
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun aCoverForWhatHasNoneIsDrawnFromItsTitlesHueAlone() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val uri = MusicArt.placeholderUri(context, "Deep Water")
+        // The title isn't in the address the car is given: its hue is.
+        assertFalse(uri.toString().contains("Deep"))
+        assertEquals(PlaceholderCover.hue("Deep Water"), MusicArt.hueOf(context, uri))
+        assertNull(MusicArt.pathOf(context, uri))
+        assertNull(MusicArt.hueOf(context, MusicArt.uri(context, "/api/items/50/images/poster")!!))
+        assertNull(MusicArt.hueOf(context, Uri.parse("content://${MusicArt.authority(context)}/placeholder?h=400")))
+        // The web's hue for a title, which the app's placeholder draws too.
+        assertEquals(0, PlaceholderCover.hue(""))
+        assertEquals(97 % 360, PlaceholderCover.hue("a"))
+
+        val png = PlaceholderCover.png(context, MusicArt.hueOf(context, uri)!!)
+        val cover = BitmapFactory.decodeByteArray(png, 0, png.size)
+        assertEquals(PlaceholderCover.SIZE, cover.width)
+        assertEquals(PlaceholderCover.SIZE, cover.height)
+        // Opaque all over: the gradient under the mark.
+        val middle = cover.getPixel(PlaceholderCover.SIZE / 2, PlaceholderCover.SIZE / 2)
+        assertTrue(Color.alpha(middle) == 255)
     }
 
     private val MediaItem.browsableStyle: Int? get() = mediaMetadata.extras?.takeIf { it.containsKey(BROWSABLE) }?.getInt(BROWSABLE)

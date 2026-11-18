@@ -152,6 +152,10 @@ rates as the decoder gives them, the same in every language.
 
 ### Phones and tablets
 
+- **Pictures**, here and on TVs: a title without one, or whose picture
+  doesn't load, shows its title's gradient (the web's) with Pley's mark
+  on it, and its name under the mark on a tile; while a picture loads,
+  the gradient alone.
 - **The tabs** are a bar under the page on a phone held upright, with
   their names, and a rail beside it on a phone on its side, a tablet or
   a car's screen: icons alone, centred on its height and read out by
@@ -1096,7 +1100,10 @@ that played. Signed
 out, the car says to open Pley on the phone and sign in when it is safe,
 with a button that opens it. The car reads the covers from the app, as the server's
 pictures need the profile's token: the app grants Android Auto, and the
-phone's own media controls, reading them and nothing else. Only Android Auto and the Google app, checked by
+phone's own media controls, reading them and nothing else. Music without
+a picture has the one the app shows: its title's gradient with Pley's
+mark, drawn on the phone from the title's hue alone, so no title goes
+into the address the car is given. Only Android Auto and the Google app, checked by
 the certificate Google signs them with, besides the system's own media
 controls, may browse or play Pley's music.
 

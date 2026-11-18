@@ -71,6 +71,8 @@ class MusicLibrary(
     private val art: (path: String) -> Uri?,
     /** Live TV's tab and channels ([LiveLibrary]); `null` without them. */
     val live: LiveLibrary? = null,
+    /** The cover for what has none, from its title ([MusicArt.placeholderUri]). */
+    private val placeholder: (seed: String) -> Uri? = { null },
 ) {
     fun root(): MediaItem = node(MusicId.Root, title = "Pley", browsable = true, playable = false)
 
@@ -261,6 +263,7 @@ class MusicLibrary(
         browsable = true,
         playable = false,
         artPath = item.posterUrl,
+        seed = item.title,
         browsableStyle = GRID,
         playableStyle = LIST,
         mediaType = MediaMetadata.MEDIA_TYPE_ARTIST,
@@ -273,6 +276,7 @@ class MusicLibrary(
         browsable = true,
         playable = true,
         artPath = item.posterUrl,
+        seed = item.title,
         playableStyle = LIST,
         mediaType = MediaMetadata.MEDIA_TYPE_ALBUM,
         artist = item.parentTitle,
@@ -285,6 +289,7 @@ class MusicLibrary(
         browsable = true,
         playable = true,
         artPath = item.artwork.firstOrNull(),
+        seed = item.title,
         playableStyle = LIST,
         mediaType = MediaMetadata.MEDIA_TYPE_PLAYLIST,
     )
@@ -307,7 +312,8 @@ class MusicLibrary(
             .setTrackNumber(item.index)
             .setDiscNumber(item.parentIndex)
             .setDurationMs(item.durationMs?.takeIf { it > 0 })
-            .setArtworkUri(if (inAlbum) null else MusicPlayback.artPath(item)?.let(art))
+            // Without a cover of its own, its album's placeholder, as the app shows it.
+            .setArtworkUri(if (inAlbum) null else MusicPlayback.artPath(item)?.let(art) ?: placeholder(item.parentTitle ?: item.title))
             .setIsBrowsable(false)
             .setIsPlayable(true)
             .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
@@ -322,6 +328,8 @@ class MusicLibrary(
         browsable: Boolean,
         playable: Boolean,
         artPath: String? = null,
+        /** An item's title, for its placeholder when it has no picture; `null` for the tabs and groups. */
+        seed: String? = null,
         icon: Uri? = null,
         browsableStyle: Int? = null,
         playableStyle: Int? = null,
@@ -336,7 +344,7 @@ class MusicLibrary(
             .setDisplayTitle(title)
             .setSubtitle(subtitle)
             .setArtist(artist)
-            .setArtworkUri(icon ?: artPath?.let(art))
+            .setArtworkUri(icon ?: artPath?.let(art) ?: seed?.let(placeholder))
             .setIsBrowsable(browsable)
             .setIsPlayable(playable)
             .setMediaType(mediaType)

@@ -53,6 +53,8 @@ describes how they are made.
   tabs' icons alone, in a column centred on its height.
 - A track that can't be played says so for 5 seconds, then the next one
   plays by itself, in Android Auto too; Play tries it again.
+- Music, films and shows without a picture show Pley's mark on their
+  placeholder, in Android Auto too.
 
 ### Fixed
 

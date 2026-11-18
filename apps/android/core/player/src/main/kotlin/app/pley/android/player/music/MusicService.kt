@@ -124,7 +124,13 @@ class MusicService : MediaLibraryService() {
         val playback = MusicHub.playback ?: return null
         val queue = queuePlayer(playback, graph?.musicLibrary?.library) ?: return null
         val covers = graph?.musicLibrary?.let { library ->
-            SessionArt(scope, { MusicArt.pathOf(this, it) }, library::picture, CacheBitmapLoader(DataSourceBitmapLoader(this)))
+            SessionArt(
+                scope,
+                { MusicArt.pathOf(this, it) },
+                library::picture,
+                CacheBitmapLoader(DataSourceBitmapLoader(this)),
+                drawn = { MusicArt.hueOf(this, it) != null },
+            )
         }
         val made = MediaLibrarySession.Builder(this, queue, Callback(playback, graph?.musicLibrary))
             .setId(SESSION_ID)
