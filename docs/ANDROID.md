@@ -1056,7 +1056,10 @@ icon the car tints:
   albums, newest first; an album lists its tracks with their lengths.
 - **Playlists**: the profile's music playlists.
 
-Search finds artists, albums and tracks, then channels. Picking a track plays on through
+Search finds artists, albums and tracks, then channels; asked with
+nothing typed, it lists the albums played and added last. Each search the
+car sends is asked of the server by itself, so one overtaken by the next
+letter typed still gets its answer. Picking a track plays on through
 its album or playlist; a track found by search plays on through its
 album. Now Playing shows the whole queue, which the car can pick from,
 a Shuffle button, lit while the queue is shuffled, and a Repeat button,

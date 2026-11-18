@@ -167,6 +167,19 @@ class MusicLibraryTest {
     }
 
     @Test
+    fun searchWithNothingTypedYetListsTheAlbumsPlayedAndAddedLast() = runTest {
+        // A car asks as its search opens: the server is asked nothing, and the screen isn't "No results".
+        source.found = emptyList()
+        source.played[3] = listOf(track(56, 55).copy(parentTitle = "Second Tide"), track(51, 50))
+        for (nothing in listOf("", "  ")) {
+            val suggested = library.search(nothing)
+            assertEquals(listOf("album:55", "album:50"), suggested.map { it.mediaId })
+            assertEquals(listOf("Recently played", "Recently played"), suggested.map { it.group })
+        }
+        assertEquals(emptyList<String>(), source.searched)
+    }
+
+    @Test
     fun aSpokenRequestPlaysTheBestMatchAnArtistShuffled() = runTest {
         val artist = library.selectionFor("harbour")!!
         assertTrue(artist.shuffle)
@@ -318,7 +331,12 @@ class MusicLibraryTest {
             entries = listOf(PlaylistEntry(1, track(52, 50)), PlaylistEntry(2, track(51, 50))),
         )
 
-        override suspend fun search(query: String) = found
+        val searched = mutableListOf<String>()
+
+        override suspend fun search(query: String): List<ItemSummary> {
+            searched += query
+            return found
+        }
 
         override fun pictureUrl(path: String, width: Int) = "http://server$path"
     }

@@ -84,6 +84,9 @@ describes how they are made.
 - Play and Shuffle on an artist's or album's page are the same height.
 - Now Playing fits a phone turned on its side, with the cover beside
   the title, instead of the cover hiding the controls.
+- A search in Android Auto overtaken by the next letter typed is still
+  answered, where the car could go on waiting for it; one with nothing
+  typed lists the albums played and added last.
 
 ## [0.1.14] - 2026-11-16
 

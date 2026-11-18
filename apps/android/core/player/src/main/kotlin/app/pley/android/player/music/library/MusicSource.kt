@@ -80,7 +80,9 @@ class RepositoryMusicSource(private val data: DataGraph, private val network: Ne
 
     override suspend fun playlist(playlistId: Long): PlaylistDetail = data.playlists.playlist(playlistId).settled()
 
-    override suspend fun search(query: String): List<ItemSummary> = data.search.search(query).settled().items
+    // Asked of the server itself, not through the app's search: that keeps only its latest query, so a car's search
+    // overtaken by its next one (a letter typed, its results read) was never answered, and the car went on waiting.
+    override suspend fun search(query: String): List<ItemSummary> = api().search(query.trim(), SEARCH_LIMIT).items
 
     override fun pictureUrl(path: String, width: Int): String = api().url(path, width)
 
@@ -97,6 +99,9 @@ class RepositoryMusicSource(private val data: DataGraph, private val network: Ne
 
         /** The plays read for Recently played: enough for a row of albums. */
         const val HISTORY_LIMIT = 100
+
+        /** The most results asked of a search: the library shows fifteen of each kind. */
+        const val SEARCH_LIMIT = 200
     }
 }
 

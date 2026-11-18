@@ -114,8 +114,15 @@ class MusicLibrary(
         return all.drop(page * size).take(size)
     }
 
-    /** Artists, then albums, then tracks matching [query]: each a group of its own; then Live TV's channels. */
+    /**
+     * Artists, then albums, then tracks matching [query]: each a group of
+     * its own; then Live TV's channels. With nothing typed yet, the albums
+     * played and added last, once each, as Recent has them: a car asks as
+     * its search opens, and an empty answer shows there as "No results"
+     * before anything was searched for.
+     */
     suspend fun search(query: String): List<MediaItem> = coroutineScope {
+        if (query.isBlank()) return@coroutineScope recent().distinctBy { it.mediaId }.take(SEARCH_EACH)
         // Channels not found (Live TV closed, the server's answer failing) leave the music's results as they are.
         val channels = async { live?.let { runCatching { it.search(query) }.getOrNull() }.orEmpty() }
         val found = source.search(query)
