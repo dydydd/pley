@@ -280,6 +280,34 @@ async fn libraries_list_with_filters_sorts_and_pages() {
     assert_eq!(hints["SearchHints"][0]["ItemId"], json!(app.jf_item(w.film)));
 }
 
+/// What Infuse asks for as it loads its home screen, after the views: without
+/// an answer, it shows "An error occurred". Its library mode looks for its
+/// own plugin too.
+#[tokio::test]
+async fn apps_loading_their_home_screen_get_grouping_options_and_no_folders_or_plugins() {
+    let w = world().await;
+    let (app, admin) = (&w.app, w.admin.as_str());
+    let music = app.library(admin, "Albums", "music", "music").await;
+    let options = app.jf_json("/UserViews/GroupingOptions", admin).await;
+    assert_eq!(jf_names(&options), ["Movies", "TV"], "movies and shows, by name: music isn't grouped");
+    assert_eq!(options[0]["Id"], json!(app.jf_library(w.movies)));
+    let views = jf_names(&app.jf_json("/UserViews", admin).await);
+    assert!(views.contains(&"Albums".to_owned()), "{views:?}: {music}");
+    let mine = app.jf_user(admin).await;
+    assert_eq!(app.jf_json(&format!("/Users/{mine}/GroupingOptions"), admin).await, options);
+
+    // Libraries' folders on disk are for administrators, which no one is here.
+    let folders = app.jf(Method::GET, "/Library/VirtualFolders", admin, None).await;
+    assert_eq!(folders.status, StatusCode::FORBIDDEN);
+    assert_eq!(folders.text(), "");
+    let unsigned = app.jf(Method::GET, "/Library/VirtualFolders", "", None).await;
+    assert_eq!(unsigned.status, StatusCode::UNAUTHORIZED);
+    // Its library mode looks for its own plugin, installed or to install.
+    for path in ["/Plugins", "/Packages"] {
+        assert_eq!(app.jf_json(path, admin).await, json!([]), "{path}");
+    }
+}
+
 #[tokio::test]
 async fn ids_are_this_servers_own_and_cant_be_guessed() {
     let w = world().await;
@@ -353,6 +381,162 @@ async fn details_carry_what_apps_need_and_never_where_files_are() {
     assert_ne!(bobs["MediaSources"][0]["Id"], source["Id"]);
 }
 
+/// A request to this API with a raw body, as apps upload pictures.
+async fn jf_upload(app: &TestApp, uri: &str, token: &str, content_type: &str, body: Vec<u8>) -> StatusCode {
+    let req = axum::http::Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("x-emby-token", token)
+        .header("content-type", content_type)
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    tower::ServiceExt::oneshot(app.jellyfin.clone(), req).await.unwrap().status()
+}
+
+/// The fields Pley's own API says are locked.
+async fn locked(app: &TestApp, admin: &str, id: i64) -> Vec<String> {
+    let item = app.get(&format!("/api/items/{id}"), admin).await.body;
+    item["locked_fields"].as_array().unwrap().iter().map(|f| f.as_str().unwrap().to_owned()).collect()
+}
+
+#[tokio::test]
+async fn metadata_is_edited_with_a_token_that_may_manage_libraries() {
+    let w = world().await;
+    let (app, admin) = (&w.app, w.admin.as_str());
+    let film = app.jf_item(w.film);
+    let manager = app.compatibility_token(admin, "manage").await;
+    let as_manager = |method: Method, uri: String, body: Option<Value>| {
+        let token = manager.clone();
+        async move { app.jf_raw(method, &uri, &[("x-emby-token", &token)], body).await }
+    };
+
+    // An app sends back the item it was given, with its changes.
+    let mut item = as_manager(Method::GET, format!("/Items/{film}"), None).await.body;
+    assert_eq!((&item["LockedFields"], &item["LockData"], &item["Tags"]), (&json!([]), &json!(false), &json!([])));
+    item["Name"] = json!("Alpha Redux");
+    item["Overview"] = json!("A new summary.");
+    item["Genres"] = json!(["Drama", "Mystery"]);
+    item["Tags"] = json!(["Favourites"]);
+    item["OfficialRating"] = json!("PG-13");
+    item["ProductionYear"] = json!(1980);
+    let player = app.jf(Method::POST, &format!("/Items/{film}"), admin, Some(item.clone())).await;
+    assert_eq!(player.status, StatusCode::FORBIDDEN, "a player's token edits nothing");
+    let edited = as_manager(Method::POST, format!("/Items/{film}"), Some(item)).await;
+    assert_eq!(edited.status, StatusCode::NO_CONTENT, "{}", edited.text());
+    let item = as_manager(Method::GET, format!("/Items/{film}"), None).await.body;
+    assert_eq!((&item["Name"], &item["Overview"]), (&json!("Alpha Redux"), &json!("A new summary.")));
+    assert_eq!((&item["Genres"], &item["Tags"]), (&json!(["Drama", "Mystery"]), &json!(["Favourites"])));
+    assert_eq!((&item["OfficialRating"], &item["ProductionYear"]), (&json!("PG-13"), &json!(1980)));
+    // Edits are locked, as Pley's editor locks them.
+    assert_eq!(item["LockedFields"], json!(["Name", "Overview", "Genres", "OfficialRating"]));
+    assert_eq!(locked(app, admin, w.film).await, ["content_rating", "genres", "summary", "title", "year"]);
+
+    // Left out of LockedFields, a field goes back to the metadata source;
+    // LockData locks every one.
+    let mut unlock = item.clone();
+    unlock["LockedFields"] = json!(["Name", "Genres"]);
+    assert_eq!(as_manager(Method::POST, format!("/Items/{film}"), Some(unlock)).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(locked(app, admin, w.film).await, ["genres", "title", "year"]);
+    let mut all = as_manager(Method::GET, format!("/Items/{film}"), None).await.body;
+    all["LockData"] = json!(true);
+    assert_eq!(as_manager(Method::POST, format!("/Items/{film}"), Some(all)).await.status, StatusCode::NO_CONTENT);
+    let item = as_manager(Method::GET, format!("/Items/{film}"), None).await.body;
+    assert_eq!(item["LockData"], json!(true));
+
+    // What Pley doesn't keep is refused, and nothing of that request applied.
+    let mut cast = item.clone();
+    cast["Name"] = json!("Not this");
+    cast["People"] = json!([{"Name": "Someone", "Type": "Director"}]);
+    let refused = as_manager(Method::POST, format!("/Items/{film}"), Some(cast)).await;
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+    assert!(refused.text().contains("People"), "{}", refused.text());
+    let mut lock = item.clone();
+    lock["LockedFields"] = json!(["Cast"]);
+    assert_eq!(as_manager(Method::POST, format!("/Items/{film}"), Some(lock)).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(as_manager(Method::GET, format!("/Items/{film}"), None).await.body["Name"], json!("Alpha Redux"));
+
+    // Collections: their name and overview.
+    let made = app
+        .post(
+            &format!("/api/libraries/{}/collections", w.movies),
+            admin,
+            json!({"title": "Picks", "item_ids": [w.film]}),
+        )
+        .await;
+    assert_eq!(made.status, StatusCode::CREATED, "{}", made.text());
+    let collection = app.jf_ids().of(pley::jellyfin::ids::Kind::Collection, made.body["id"].as_i64().unwrap());
+    let renamed =
+        as_manager(Method::POST, format!("/Items/{collection}"), Some(json!({"Name": "Best", "Overview": "Ours."})))
+            .await;
+    assert_eq!(renamed.status, StatusCode::NO_CONTENT, "{}", renamed.text());
+    let shown = as_manager(Method::GET, format!("/Items/{collection}"), None).await.body;
+    assert_eq!((&shown["Name"], &shown["Overview"]), (&json!("Best"), &json!("Ours.")));
+
+    let editor = as_manager(Method::GET, format!("/Items/{film}/MetadataEditor"), None).await;
+    assert_eq!(editor.status, StatusCode::OK);
+    for field in ["ParentalRatingOptions", "Countries", "Cultures", "ExternalIdInfos", "ContentTypeOptions"] {
+        assert_eq!(editor.body[field], json!([]), "{field}");
+    }
+    let refresh = as_manager(Method::POST, format!("/Items/{}/Refresh", app.jf_library(w.movies)), None).await;
+    assert_eq!(refresh.status, StatusCode::NO_CONTENT, "{}", refresh.text());
+}
+
+#[tokio::test]
+async fn pictures_and_matches_through_the_editing_endpoints() {
+    let w = world().await;
+    let (app, admin) = (&w.app, w.admin.as_str());
+    let film = app.jf_item(w.film);
+    let manager = app.compatibility_token(admin, "manage").await;
+    let as_manager = |method: Method, uri: String, body: Option<Value>| {
+        let token = manager.clone();
+        async move { app.jf_raw(method, &uri, &[("x-emby-token", &token)], body).await }
+    };
+
+    // A picture uploaded as Jellyfin takes it, in base64, then put back.
+    let mut png = Vec::new();
+    image::RgbImage::from_pixel(4, 6, image::Rgb([200, 30, 30]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png);
+    let uri = format!("/Items/{film}/Images/Primary");
+    assert_eq!(jf_upload(app, &uri, &manager, "image/png", encoded.into_bytes()).await, StatusCode::NO_CONTENT);
+    assert!(locked(app, admin, w.film).await.contains(&"poster".to_owned()));
+    let player = app.jellyfin_token(admin).await;
+    assert_eq!(jf_upload(app, &uri, &player, "image/png", png.clone()).await, StatusCode::FORBIDDEN);
+    assert_eq!(jf_upload(app, &uri, &manager, "image/png", b"not a picture".to_vec()).await, StatusCode::BAD_REQUEST);
+    assert_eq!(as_manager(Method::DELETE, uri.clone(), None).await.status, StatusCode::NO_CONTENT);
+    assert!(!locked(app, admin, w.film).await.contains(&"poster".to_owned()));
+    // A real-sized picture, past the API's usual body limit, by index as
+    // Jellyfin's Kotlin SDK sends it.
+    let mut seed = 1u32;
+    let noise = image::RgbImage::from_fn(320, 320, |_, _| {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let [r, g, b, _] = seed.to_le_bytes();
+        image::Rgb([r, g, b])
+    });
+    let mut big = Vec::new();
+    noise.write_to(&mut std::io::Cursor::new(&mut big), image::ImageFormat::Png).unwrap();
+    let big = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &big);
+    assert!(big.len() > 256 * 1024);
+    let indexed = format!("{uri}/0");
+    assert_eq!(jf_upload(app, &indexed, &manager, "image/png", big.into_bytes()).await, StatusCode::NO_CONTENT);
+    assert_eq!(as_manager(Method::DELETE, indexed, None).await.status, StatusCode::NO_CONTENT);
+
+    // Without a TMDB key: no pictures to choose from, nor matches.
+    let remote = as_manager(Method::GET, format!("/Items/{film}/RemoteImages?type=Primary"), None).await;
+    assert_eq!(remote.body, json!({"Images": [], "TotalRecordCount": 0, "Providers": []}));
+    assert_eq!(as_manager(Method::GET, format!("/Items/{film}/RemoteImages/Providers"), None).await.body, json!([]));
+    let search = json!({"SearchInfo": {"Name": "Alpha", "Year": 1979}, "ItemId": &film});
+    let searched = as_manager(Method::POST, "/Items/RemoteSearch/Movie".into(), Some(search)).await;
+    assert_eq!(searched.status, StatusCode::BAD_REQUEST);
+    // A picture is taken only from the hosts Pley takes pictures from.
+    let elsewhere = format!("/Items/{film}/RemoteImages/Download?type=Primary&imageUrl=http://192.168.1.1/a.jpg");
+    assert_eq!(as_manager(Method::POST, elsewhere, None).await.status, StatusCode::BAD_REQUEST);
+    let no_id =
+        as_manager(Method::POST, format!("/Items/RemoteSearch/Apply/{film}"), Some(json!({"Name": "Alpha"}))).await;
+    assert_eq!(no_id.status, StatusCode::BAD_REQUEST, "Pley matches by TMDB id");
+}
+
 #[tokio::test]
 async fn a_stream_opens_by_its_source_while_its_sign_in_works() {
     let w = world().await;
@@ -395,6 +579,103 @@ async fn a_stream_opens_by_its_source_while_its_sign_in_works() {
     assert_eq!(app.jf_raw(Method::GET, &bobs_stream, &[], None).await.status, StatusCode::OK);
     app.patch(&format!("/api/users/{bob_id}"), admin, json!({"disabled": true})).await;
     assert_eq!(app.jf_raw(Method::GET, &bobs_stream, &[], None).await.status, StatusCode::UNAUTHORIZED);
+}
+
+/// Fake seek previews of `item`'s first file (tests have no transcoder):
+/// one sheet of four 8x4 tiles. Its id.
+async fn previews(app: &TestApp, item: i64) -> i64 {
+    let (file, path): (i64, String) = sqlx::query_as("SELECT id, path FROM media_files WHERE item_id = ? ORDER BY id")
+        .bind(item)
+        .fetch_one(&app.state.db.read)
+        .await
+        .unwrap();
+    let fingerprint = app.state.store.fingerprint_of(file, &path, None).await.unwrap();
+    let dir = app.state.store.media_dir(&fingerprint).unwrap().join("trickplay");
+    std::fs::create_dir_all(&dir).unwrap();
+    image::RgbImage::new(16, 8).save(dir.join("0.jpg")).unwrap();
+    let info = pley_transcoder_api::TrickplayInfo {
+        id: "t".into(),
+        interval_ms: 10_000,
+        width: 8,
+        height: 4,
+        columns: 2,
+        rows: 2,
+        count: 4,
+        sheets: 1,
+        version: 1,
+    };
+    std::fs::write(dir.join("index.json"), serde_json::to_vec(&info).unwrap()).unwrap();
+    file
+}
+
+#[tokio::test]
+async fn seek_previews_are_pleys_own_and_open_as_the_stream_does() {
+    let w = world().await;
+    let (app, admin) = (&w.app, w.admin.as_str());
+    let film = app.jf_item(w.film);
+    let sheet = format!("/Videos/{film}/Trickplay/8/0.jpg");
+
+    // None made yet: none listed, none served.
+    assert_eq!(app.jf_json(&format!("/Items/{film}"), admin).await["Trickplay"], json!({}));
+    assert_eq!(app.jf(Method::GET, &sheet, admin, None).await.status, StatusCode::NOT_FOUND);
+
+    // Keyed by the file's media source, then by width, as players look them up.
+    let file = previews(app, w.film).await;
+    let source = app.jf_source(file, admin).await;
+    let item = app.jf_json(&format!("/Items/{film}"), admin).await;
+    let info = &item["Trickplay"][&source]["8"];
+    assert_eq!(
+        (&info["Width"], &info["Height"], &info["TileWidth"], &info["TileHeight"]),
+        (&json!(8), &json!(4), &json!(2), &json!(2)),
+        "{item}"
+    );
+    assert_eq!((&info["ThumbnailCount"], &info["Interval"]), (&json!(4), &json!(10_000)));
+    assert!(info["Bandwidth"].as_u64().unwrap() > 0, "{info}");
+    assert_eq!(item["MediaSources"][0]["Id"], json!(source));
+    // Lists have them when they ask.
+    let listed = app.jf_json(&format!("/Items?Ids={film}&Fields=Trickplay"), admin).await;
+    assert_eq!(listed["Items"][0]["Trickplay"], item["Trickplay"]);
+    assert!(app.jf_json(&format!("/Items?Ids={film}"), admin).await["Items"][0].get("Trickplay").is_none());
+
+    // A sheet opens with a token, or with the media source's id alone.
+    let with_token = app.jf(Method::GET, &sheet, admin, None).await;
+    assert_eq!(with_token.status, StatusCode::OK);
+    assert_eq!(with_token.headers[header::CONTENT_TYPE], "image/jpeg");
+    assert_eq!(&with_token.bytes[..2], &[0xff, 0xd8], "a JPEG");
+    let by_source = format!("{sheet}?MediaSourceId={source}");
+    assert_eq!(app.jf_raw(Method::GET, &by_source, &[], None).await.status, StatusCode::OK);
+    assert_eq!(app.jf_raw(Method::GET, &sheet, &[], None).await.status, StatusCode::UNAUTHORIZED);
+    for uri in [
+        format!("/Videos/{film}/Trickplay/320/0.jpg"),
+        format!("/Videos/{film}/Trickplay/8/1.jpg"),
+        format!("/Videos/{film}/Trickplay/8/0.png"),
+    ] {
+        assert_eq!(app.jf(Method::GET, &uri, admin, None).await.status, StatusCode::NOT_FOUND, "{uri}");
+    }
+
+    // The playlist of tiles names the sheets by the source, not the token.
+    let playlist = app.jf(Method::GET, &format!("/Videos/{film}/Trickplay/8/tiles.m3u8"), admin, None).await;
+    assert_eq!(playlist.status, StatusCode::OK);
+    assert_eq!(playlist.headers[header::CONTENT_TYPE], "application/vnd.apple.mpegurl");
+    let text = playlist.text();
+    assert!(text.contains("#EXTINF:40,\n#EXT-X-TILES:RESOLUTION=8x4,LAYOUT=2x2,DURATION=10\n"), "{text}");
+    assert!(text.contains(&format!("\n0.jpg?MediaSourceId={source}\n")), "{text}");
+    assert!(!text.contains(&app.jellyfin_token(admin).await));
+
+    // Someone who may not open the library, and a sign-in that ended: no sheet.
+    let (bob, _) = app.user(admin, "bob", json!({"all_libraries": false, "library_ids": [w.tv]})).await;
+    assert_eq!(app.jf(Method::GET, &sheet, &bob, None).await.status, StatusCode::NOT_FOUND);
+    let bobs = format!("{sheet}?MediaSourceId={}", app.jf_source(file, &bob).await);
+    assert_eq!(app.jf_raw(Method::GET, &bobs, &[], None).await.status, StatusCode::NOT_FOUND);
+    let signed_in = sign_in(app, json!({"Username": "admin", "Pw": "secret-one"})).await;
+    let token = signed_in.body["AccessToken"].as_str().unwrap().to_owned();
+    let auth = [("x-emby-token", token.as_str())];
+    let item = app.jf_raw(Method::GET, &format!("/Items/{film}"), &auth, None).await;
+    let theirs = item.body["Trickplay"].as_object().unwrap().keys().next().unwrap().clone();
+    let by_theirs = format!("{sheet}?MediaSourceId={theirs}");
+    assert_eq!(app.jf_raw(Method::GET, &by_theirs, &[], None).await.status, StatusCode::OK);
+    app.jf_raw(Method::POST, "/Sessions/Logout", &auth, None).await;
+    assert_eq!(app.jf_raw(Method::GET, &by_theirs, &[], None).await.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -448,6 +729,276 @@ async fn watch_state_favorites_and_ratings_are_pleys() {
 }
 
 #[tokio::test]
+async fn sync_tools_copy_a_place_in_a_video() {
+    let w = world().await;
+    let (app, admin) = (&w.app, w.admin.as_str());
+    let (film, me) = (app.jf_item(w.film), app.jf_user(admin).await);
+    let user_data = format!("/Users/{me}/Items/{film}/UserData");
+    let pley_state = || async { app.get(&format!("/api/items/{}", w.film), admin).await.body["user_state"].clone() };
+
+    // As WatchState sends it: the ticks as text, the time with its zone.
+    let body = json!({"PlaybackPositionTicks": "450000000", "LastPlayedDate": "2024-05-01T14:00:00+02:00"});
+    let set = app.jf(Method::POST, &user_data, admin, Some(body)).await;
+    assert_eq!(set.status, StatusCode::OK, "{}", set.text());
+    assert_eq!(set.body["PlaybackPositionTicks"], json!(450_000_000_i64));
+    assert_eq!(set.body["LastPlayedDate"], json!("2024-05-01T12:00:00.0000000Z"));
+    let state = pley_state().await;
+    assert_eq!((&state["position_ms"], &state["watched"]), (&json!(45_000), &json!(false)));
+    let resume = app.jf_json("/UserItems/Resume", admin).await;
+    assert_eq!(jf_names(&resume), ["Alpha"]);
+    let item = app.jf_json(&format!("/Users/{me}/Items/{film}"), admin).await;
+    assert_eq!(item["UserData"]["PlaybackPositionTicks"], json!(450_000_000_i64));
+
+    // An app posting back what it was given, to change something else,
+    // leaves the place and its time alone.
+    let mut echoed = item["UserData"].clone();
+    echoed["IsFavorite"] = json!(true);
+    app.jf(Method::POST, &user_data, admin, Some(echoed)).await;
+    let again = app.jf_json(&format!("/Users/{me}/Items/{film}"), admin).await;
+    assert_eq!(again["UserData"]["LastPlayedDate"], json!("2024-05-01T12:00:00.0000000Z"));
+    assert_eq!(again["UserData"]["PlaybackPositionTicks"], json!(450_000_000_i64));
+    assert_eq!(again["UserData"]["IsFavorite"], json!(true));
+
+    // Watched elsewhere and started over: unplayed, with the new place.
+    app.jf(Method::POST, &format!("/UserPlayedItems/{film}"), admin, None).await;
+    let body = json!({"PlaybackPositionTicks": 300_000_000_i64, "Played": false});
+    let restarted = app.jf(Method::POST, &user_data, admin, Some(body)).await;
+    assert_eq!(
+        (&restarted.body["Played"], &restarted.body["PlaybackPositionTicks"]),
+        (&json!(false), &json!(300_000_000_i64))
+    );
+
+    // A time to come is today at the latest, and keys go in any case, as
+    // Jellyfin reads them.
+    let body = json!({"playbackPositionTicks": 600_000_000_i64, "lastPlayedDate": "2999-01-01T00:00:00Z"});
+    let later = app.jf(Method::POST, &user_data, admin, Some(body)).await;
+    assert!(later.body["LastPlayedDate"].as_str().unwrap() < "2999", "{}", later.text());
+    assert_eq!(later.body["PlaybackPositionTicks"], json!(600_000_000_i64));
+    // What can't be read is refused, as Jellyfin does, and changes nothing.
+    for wrong in [
+        json!({"PlaybackPositionTicks": "soon"}),
+        json!({"PlaybackPositionTicks": 6.5e8}),
+        json!({"PlaybackPositionTicks": 650_000_000_i64, "LastPlayedDate": "yesterday"}),
+    ] {
+        let refused = app.jf(Method::POST, &user_data, admin, Some(wrong.clone())).await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{wrong}");
+    }
+    let nulls = json!({"PlaybackPositionTicks": null, "LastPlayedDate": null, "IsFavorite": true});
+    assert_eq!(app.jf(Method::POST, &user_data, admin, Some(nulls)).await.status, StatusCode::OK);
+    assert_eq!(pley_state().await["position_ms"], json!(60_000));
+
+    // Only what plays has a place.
+    let show_data = format!("/Users/{me}/Items/{}/UserData", app.jf_item(w.show));
+    let refused = app.jf(Method::POST, &show_data, admin, Some(json!({"PlaybackPositionTicks": "450000000"}))).await;
+    assert_eq!(refused.body["PlaybackPositionTicks"], json!(0));
+
+    // Past 90 % it is watched, and leaves My List, which devices hear of;
+    // the play counts at the time given.
+    let mut events = app.state.events.subscribe();
+    let body = json!({"PlaybackPositionTicks": "950000000", "LastPlayedDate": "2024-05-02T08:00:00Z"});
+    let finished = app.jf(Method::POST, &user_data, admin, Some(body)).await;
+    assert_eq!((&finished.body["Played"], &finished.body["PlaybackPositionTicks"]), (&json!(true), &json!(0)));
+    assert!(common::titles(&app.get("/api/watchlist", admin).await.body["items"]).is_empty());
+    let heard: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+    assert!(heard.iter().any(|e| matches!(e, pley::events::ServerEvent::WatchlistChanged { .. })), "{heard:?}");
+    let viewed: i64 = sqlx::query_scalar("SELECT viewed_at FROM play_history WHERE item_id = ? ORDER BY id DESC")
+        .bind(w.film)
+        .fetch_one(&app.state.db.read)
+        .await
+        .unwrap();
+    assert_eq!(viewed, pley::util::iso_secs("2024-05-02T08:00:00Z").unwrap());
+
+    // A place in a watched item is kept for a rewatch, which nothing shows:
+    // sent again, as sync tools do each time, it changes nothing more.
+    let again = json!({"PlaybackPositionTicks": "450000000", "LastPlayedDate": "2024-05-02T09:00:00Z"});
+    app.jf(Method::POST, &user_data, admin, Some(again.clone())).await;
+    let mut events = app.state.events.subscribe();
+    app.jf(Method::POST, &user_data, admin, Some(again)).await;
+    assert!(events.try_recv().is_err(), "nothing changed");
+
+    // Marked watched as an app posts back what it was given: what it held
+    // (in My List) doesn't put the movie back there.
+    app.jf(Method::DELETE, &format!("/UserPlayedItems/{film}"), admin, None).await;
+    app.jf(Method::POST, &format!("/UserFavoriteItems/{film}"), admin, None).await;
+    let body = json!({"Played": true, "IsFavorite": true, "PlaybackPositionTicks": 0});
+    let marked = app.jf(Method::POST, &user_data, admin, Some(body)).await;
+    assert_eq!((&marked.body["Played"], &marked.body["IsFavorite"]), (&json!(true), &json!(false)));
+
+    // A show marked with a time: its episodes were played then.
+    let body = json!({"Played": true, "LastPlayedDate": "2024-05-03T08:00:00Z"});
+    app.jf(Method::POST, &show_data, admin, Some(body)).await;
+    let pilot = app.jf_json(&format!("/Users/{me}/Items/{}", app.jf_item(w.pilot)), admin).await;
+    assert_eq!(pilot["UserData"]["LastPlayedDate"], json!("2024-05-03T08:00:00.0000000Z"));
+
+    // Only the user's own, of what they may see.
+    let (bob, _) = app.user(admin, "bob", json!({"all_libraries": false, "library_ids": [w.tv]})).await;
+    let bobs = app.jf_user(&bob).await;
+    let body = json!({"PlaybackPositionTicks": "450000000"});
+    let theirs = app.jf(Method::POST, &format!("/Users/{bobs}/Items/{film}/UserData"), admin, Some(body.clone())).await;
+    assert_eq!(theirs.status, StatusCode::NOT_FOUND);
+    let unseen = app.jf(Method::POST, &format!("/Users/{bobs}/Items/{film}/UserData"), &bob, Some(body)).await;
+    assert_eq!(unseen.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn jellyfin_apps_make_and_change_their_own_playlists() {
+    let w = world().await;
+    let (app, admin) = (&w.app, w.admin.as_str());
+    let movies = app.ids(w.movies, admin).await;
+    let (alpha, bravo, charlie) =
+        (app.jf_item(movies["Alpha"]), app.jf_item(movies["Bravo"]), app.jf_item(movies["Charlie"]));
+
+    // As the Kotlin SDK sends it: a body, every field there.
+    let me = app.jf_user(admin).await;
+    let made = app
+        .jf(
+            Method::POST,
+            "/Playlists",
+            admin,
+            Some(json!({"Name": "Evening", "Ids": [&alpha, &bravo], "UserId": me, "MediaType": "Video", "Users": [], "IsPublic": false})),
+        )
+        .await;
+    assert_eq!(made.status, StatusCode::OK, "{}", made.text());
+    let playlist = made.body["Id"].as_str().unwrap().to_owned();
+    let items = app.jf_json(&format!("/Playlists/{playlist}/Items"), admin).await;
+    assert_eq!(jf_names(&items), ["Alpha", "Bravo"]);
+    let entries: Vec<String> =
+        items["Items"].as_array().unwrap().iter().map(|i| i["PlaylistItemId"].as_str().unwrap().to_owned()).collect();
+    assert!(entries.iter().all(|e| is_hex(e, 32)) && entries[0] != entries[1], "{entries:?}");
+    // Apps that list a playlist's titles as its children get the entries too.
+    let children = app.jf_json(&format!("/Items?ParentId={playlist}"), admin).await;
+    assert_eq!(children["Items"][1]["PlaylistItemId"], json!(entries[1]));
+    let dto = app.jf_json(&format!("/Playlists/{playlist}"), admin).await;
+    assert_eq!(dto, json!({"OpenAccess": false, "Shares": [], "ItemIds": [&alpha, &bravo]}));
+
+    // Added at the end, or where asked; moved; removed by entry.
+    let added =
+        app.jf(Method::POST, &format!("/Playlists/{playlist}/Items?ids={charlie}&userId={me}"), admin, None).await;
+    assert_eq!(added.status, StatusCode::NO_CONTENT, "{}", added.text());
+    let again = app.jf(Method::POST, &format!("/Playlists/{playlist}/Items?ids={alpha}&position=0"), admin, None).await;
+    assert_eq!(again.status, StatusCode::NO_CONTENT);
+    let items = app.jf_json(&format!("/Playlists/{playlist}/Items"), admin).await;
+    assert_eq!(jf_names(&items), ["Alpha", "Alpha", "Bravo", "Charlie"], "an item may be there twice");
+    let charlie_entry = items["Items"][3]["PlaylistItemId"].as_str().unwrap().to_owned();
+    let moved = app.jf(Method::POST, &format!("/Playlists/{playlist}/Items/{charlie_entry}/Move/1"), admin, None).await;
+    assert_eq!(moved.status, StatusCode::NO_CONTENT, "{}", moved.text());
+    let items = app.jf_json(&format!("/Playlists/{playlist}/Items"), admin).await;
+    assert_eq!(jf_names(&items), ["Alpha", "Charlie", "Alpha", "Bravo"]);
+    let first = items["Items"][0]["PlaylistItemId"].as_str().unwrap();
+    let removed = app.jf(Method::DELETE, &format!("/Playlists/{playlist}/Items?entryIds={first}"), admin, None).await;
+    assert_eq!(removed.status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        jf_names(&app.jf_json(&format!("/Playlists/{playlist}/Items"), admin).await),
+        ["Charlie", "Alpha", "Bravo"]
+    );
+    // An app without the entry's id sends the item's: its first entry.
+    let by_item = app.jf(Method::POST, &format!("/Playlists/{playlist}/Items/{charlie}/Move/2"), admin, None).await;
+    assert_eq!(by_item.status, StatusCode::NO_CONTENT);
+    let items = app.jf_json(&format!("/Playlists/{playlist}/Items"), admin).await;
+    assert_eq!(jf_names(&items), ["Alpha", "Bravo", "Charlie"]);
+
+    // Renamed, and filled anew as a whole, as Feishin saves an edited one.
+    let update = json!({"Name": "Late", "Ids": [&bravo, &alpha]});
+    let updated = app.jf(Method::POST, &format!("/Playlists/{playlist}"), admin, Some(update)).await;
+    assert_eq!(updated.status, StatusCode::NO_CONTENT, "{}", updated.text());
+    assert_eq!(app.jf_json(&format!("/Items/{playlist}"), admin).await["Name"], json!("Late"));
+    assert_eq!(jf_names(&app.jf_json(&format!("/Playlists/{playlist}/Items"), admin).await), ["Bravo", "Alpha"]);
+
+    // The owner's alone: not shared, nor anyone else's to see or change.
+    let shared = app.jf(Method::POST, &format!("/Playlists/{playlist}"), admin, Some(json!({"IsPublic": true}))).await;
+    assert_eq!(shared.status, StatusCode::BAD_REQUEST);
+    assert_eq!(app.jf_json(&format!("/Playlists/{playlist}/Users"), admin).await, json!([]));
+    let mine = app.jf_json(&format!("/Playlists/{playlist}/Users/{me}"), admin).await;
+    assert_eq!(mine, json!({"UserId": me, "CanEdit": true}));
+    let (ann, _) = app.user(admin, "ann", json!({})).await;
+    for (method, uri) in [
+        (Method::GET, format!("/Playlists/{playlist}")),
+        (Method::POST, format!("/Playlists/{playlist}/Items?ids={charlie}")),
+        (Method::DELETE, format!("/Playlists/{playlist}/Items?entryIds={first}")),
+        (Method::DELETE, format!("/Items/{playlist}")),
+    ] {
+        let theirs = app.jf(method.clone(), &uri, &ann, None).await;
+        assert_eq!(theirs.status, StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+    let for_another = app.jf(Method::POST, &format!("/Playlists?Name=x&UserId={me}"), &ann, None).await;
+    assert_eq!(for_another.status, StatusCode::FORBIDDEN, "for its own account only");
+
+    // Older apps send the fields in the query. A playlist's kind holds.
+    let query = app.jf(Method::POST, &format!("/Playlists?Name=Songs&Ids={alpha}&MediaType=Audio"), &ann, None).await;
+    assert_eq!(query.status, StatusCode::BAD_REQUEST, "a film in a music playlist");
+    let query = app.jf(Method::POST, &format!("/Playlists?Name=Films&Ids={alpha}"), &ann, None).await;
+    assert_eq!(query.status, StatusCode::OK, "{}", query.text());
+    let films = query.body["Id"].as_str().unwrap();
+    assert_eq!(jf_names(&app.jf_json(&format!("/Playlists/{films}/Items"), &ann).await), ["Alpha"]);
+
+    // Deleted by its owner; a title never.
+    let listed = app.jf_json("/Items?IncludeItemTypes=Playlist&Recursive=true", admin).await;
+    assert_eq!(listed["Items"][0]["CanDelete"], json!(true));
+    assert_eq!(app.jf(Method::DELETE, &format!("/Items/{alpha}"), admin, None).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(app.jf(Method::DELETE, &format!("/Items/{playlist}"), admin, None).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(app.jf(Method::GET, &format!("/Playlists/{playlist}"), admin, None).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn collections_change_with_a_token_that_may_manage_libraries() {
+    let w = world().await;
+    let (app, admin) = (&w.app, w.admin.as_str());
+    let movies = app.ids(w.movies, admin).await;
+    let (alpha, bravo) = (app.jf_item(movies["Alpha"]), app.jf_item(movies["Bravo"]));
+    let library = app.jf_library(w.movies);
+    let manager = app.compatibility_token(admin, "manage").await;
+    let as_manager = |method: Method, uri: String| {
+        let token = manager.clone();
+        async move { app.jf_raw(method, &uri, &[("x-emby-token", &token)], None).await }
+    };
+
+    // A player's token: no collection management, and clients are told so.
+    let me = app.jf_json("/Users/Me", admin).await;
+    assert_eq!(me["Policy"]["EnableCollectionManagement"], json!(false));
+    let refused = app.jf(Method::POST, &format!("/Collections?name=Picks&ids={alpha}"), admin, None).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    let me = as_manager(Method::GET, "/Users/Me".into()).await;
+    assert_eq!(me.body["Policy"]["EnableCollectionManagement"], json!(true));
+    assert_eq!(me.body["Policy"]["IsAdministrator"], json!(false), "still no administrator");
+
+    let made = as_manager(Method::POST, format!("/Collections?name=Picks&ids={alpha}&parentId={library}")).await;
+    assert_eq!(made.status, StatusCode::OK, "{}", made.text());
+    let collection = made.body["Id"].as_str().unwrap().to_owned();
+    let added = as_manager(Method::POST, format!("/Collections/{collection}/Items?ids={bravo}")).await;
+    assert_eq!(added.status, StatusCode::NO_CONTENT, "{}", added.text());
+    let again = as_manager(Method::POST, format!("/Collections/{collection}/Items?ids={bravo}")).await;
+    assert_eq!(again.status, StatusCode::NO_CONTENT, "a title in it already: {}", again.text());
+    let items = app.jf_json(&format!("/Items?ParentId={collection}"), admin).await;
+    assert_eq!(jf_names(&items), ["Alpha", "Bravo"]);
+    let pilot = app.jf_item(w.pilot);
+    let episode = as_manager(Method::POST, format!("/Collections/{collection}/Items?ids={pilot}")).await;
+    assert_eq!(episode.status, StatusCode::BAD_REQUEST, "movies and shows of its library only");
+    let removed = as_manager(Method::DELETE, format!("/Collections/{collection}/Items?ids={alpha}")).await;
+    assert_eq!(removed.status, StatusCode::NO_CONTENT);
+    assert_eq!(jf_names(&app.jf_json(&format!("/Items?ParentId={collection}"), admin).await), ["Bravo"]);
+    // Without a library, the first title's.
+    let first = as_manager(Method::POST, format!("/Collections?name=More&ids={bravo}")).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+
+    // Changed by no one else; deleted with the right token only.
+    let (ann, _) = app.user(admin, "ann", json!({})).await;
+    let theirs = app.jf(Method::POST, &format!("/Collections/{collection}/Items?ids={alpha}"), &ann, None).await;
+    assert_eq!(theirs.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        app.jf(Method::DELETE, &format!("/Items/{collection}"), admin, None).await.status,
+        StatusCode::FORBIDDEN
+    );
+    let listed = as_manager(Method::GET, "/Items?IncludeItemTypes=BoxSet&Recursive=true".into()).await;
+    assert!(
+        listed.body["Items"].as_array().unwrap().iter().all(|c| c["CanDelete"] == json!(true)),
+        "{}",
+        listed.text()
+    );
+    assert_eq!(as_manager(Method::DELETE, format!("/Items/{collection}")).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(app.jf(Method::GET, &format!("/Items/{collection}"), admin, None).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn a_user_id_in_a_path_is_the_callers_own() {
     let w = world().await;
     let (app, admin) = (&w.app, w.admin.as_str());
@@ -464,6 +1015,8 @@ async fn a_user_id_in_a_path_is_the_callers_own() {
         (format!("/Users/{bobs}/Items/Latest"), false),
         (format!("/Users/{bobs}/Suggestions"), false),
         (format!("/Users/{bobs}/Items/Resume"), false),
+        (format!("/Users/{mine}/GroupingOptions"), true),
+        (format!("/Users/{bobs}/GroupingOptions"), false),
     ] {
         let status = app.jf(Method::GET, &uri, admin, None).await.status;
         assert_eq!(status == StatusCode::OK, ok, "{uri}: {status}");
@@ -544,15 +1097,7 @@ async fn on_pleys_port_its_requests_go_to_it_and_the_rest_to_pley() {
     let token = app.jellyfin_token(&admin).await;
     let product = |reply: &Reply| reply.body["ProductName"].clone();
 
-    // Off by default: Pley's port answers as Pley.
-    let off = app.call(Method::GET, "/System/Info/Public", None, None, &[]).await;
-    assert_eq!(product(&off), Value::Null);
-
-    // A port nothing listens on: this app serves no port of its own.
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let web = format!("127.0.0.1:{port}");
-    let on = json!({"web": [&web], "jellyfin": [], "jellyfin_on_web": true, "discovery": false});
-    assert_eq!(app.put("/api/network", &admin, on).await.status, StatusCode::OK);
+    // On by default.
     for path in ["/System/Info/Public", "/system/info/public"] {
         let reply = app.call(Method::GET, path, None, None, &[]).await;
         assert_eq!(product(&reply), json!("Jellyfin Server"), "{path}");
@@ -571,15 +1116,22 @@ async fn on_pleys_port_its_requests_go_to_it_and_the_rest_to_pley() {
     assert_eq!(health.status, StatusCode::OK);
     assert_eq!(app.call(Method::GET, "/api/auth/me", None, None, &emby).await.status, StatusCode::UNAUTHORIZED);
 
-    // Off again.
+    // Turned off, Pley's port answers as Pley. A port nothing listens on:
+    // this app serves no port of its own.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let web = format!("127.0.0.1:{port}");
     let off = json!({"web": [&web], "jellyfin": [], "jellyfin_on_web": false, "discovery": false});
     assert_eq!(app.put("/api/network", &admin, off).await.status, StatusCode::OK);
     assert_eq!(product(&app.call(Method::GET, "/System/Info/Public", None, None, &[]).await), Value::Null);
+    // And on again.
+    let on = json!({"web": [&web], "jellyfin": [], "jellyfin_on_web": true, "discovery": false});
+    assert_eq!(app.put("/api/network", &admin, on).await.status, StatusCode::OK);
+    assert_eq!(product(&app.call(Method::GET, "/System/Info/Public", None, None, &[]).await), json!("Jellyfin Server"));
 }
 
 #[tokio::test]
 async fn every_part_of_the_api_is_reached_on_pleys_port() {
-    let app = TestApp::with_config(|config| config.jellyfin_on_web = true).await;
+    let app = TestApp::new().await;
     let admin = app.setup_admin().await;
     let token = app.jellyfin_token(&admin).await;
     let x = "00000000000000000000000000000000";
@@ -590,6 +1142,7 @@ async fn every_part_of_the_api_is_reached_on_pleys_port() {
     // Every first segment of its routes, as players send them: no header.
     for path in [
         "/UserViews".to_owned(),
+        "/UserViews/GroupingOptions".to_owned(),
         "/Users/Me".to_owned(),
         "/Items".to_owned(),
         "/UserItems/Resume".to_owned(),
@@ -610,6 +1163,7 @@ async fn every_part_of_the_api_is_reached_on_pleys_port() {
         "/Branding/Configuration".to_owned(),
         "/QuickConnect/Enabled".to_owned(),
         "/Plugins".to_owned(),
+        "/Packages".to_owned(),
         "/Localization/Cultures".to_owned(),
         "/DisplayPreferences/usersettings".to_owned(),
         "/Years".to_owned(),
@@ -620,10 +1174,139 @@ async fn every_part_of_the_api_is_reached_on_pleys_port() {
         assert!(theirs(&reply), "{path}: {} {}", reply.status, reply.text());
     }
     // Paths the web app has too: with a token only.
-    for path in ["/Search/Hints?SearchTerm=x".to_owned(), format!("/Playlists/{x}/Items")] {
+    for path in
+        ["/Search/Hints?SearchTerm=x".to_owned(), format!("/Playlists/{x}/Items"), "/Library/VirtualFolders".to_owned()]
+    {
         let page = app.call(Method::GET, &path, None, None, &[]).await;
         assert!(!theirs(&page), "{path} without a token is the web app's");
         let reply = app.call(Method::GET, &path, None, None, &[("x-emby-token", token.as_str())]).await;
         assert!(theirs(&reply), "{path}: {} {}", reply.status, reply.text());
     }
+}
+
+#[tokio::test]
+async fn activity_monitors_see_what_everyone_plays() {
+    let w = world().await;
+    let (app, admin) = (&w.app, w.admin.as_str());
+    let (bob, _) = app.user(admin, "bob", json!({})).await;
+    let pilot = app.jf_item(w.pilot);
+    let report = json!({"ItemId": pilot, "PositionTicks": 600_000_000_i64, "IsPaused": true});
+    let started = app.jf(Method::POST, "/Sessions/Playing", &bob, Some(report)).await;
+    assert_eq!(started.status, StatusCode::NO_CONTENT, "{}", started.text());
+
+    // An administrator's token with `activity`, as Tracearr is given.
+    let monitor = app.compatibility_token(admin, "activity").await;
+    let listed = app.jf_raw(Method::GET, "/Sessions", &[("x-emby-token", &monitor)], None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.text());
+    let sessions = listed.body.as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{}", listed.text());
+    let session = &sessions[0];
+    assert_eq!((&session["UserName"], &session["UserId"]), (&json!("bob"), &json!(app.jf_user(&bob).await)));
+    assert_eq!(session["DeviceName"], json!("Bench"));
+    let item = &session["NowPlayingItem"];
+    assert_eq!((&item["Id"], &item["Name"], &item["Type"]), (&json!(pilot), &json!("Pilot"), &json!("Episode")));
+    assert_eq!(
+        (&item["SeriesName"], &item["ParentIndexNumber"], &item["IndexNumber"]),
+        (&json!("Show"), &json!(1), &json!(1))
+    );
+    let play = &session["PlayState"];
+    assert_eq!((&play["PositionTicks"], &play["IsPaused"]), (&json!(600_000_000_i64), &json!(true)));
+    assert_eq!(play["PlayMethod"], json!("DirectPlay"));
+    assert_eq!(play["MediaSourceId"], item["MediaSources"][0]["Id"]);
+    assert_eq!(app.state.sessions.active()[0].api, pley::playback::Api::Jellyfin);
+
+    // Pley's session id opens its stream: monitors are given a hash of it,
+    // and of a device id made from it.
+    let pleys = app.state.sessions.active()[0].clone();
+    let (id, device) = (session["Id"].as_str().unwrap(), session["DeviceId"].as_str().unwrap());
+    assert!(is_hex(id, 32) && is_hex(device, 32), "{session}");
+    assert!(!pleys.id.contains(id) && !id.contains(&pleys.id) && !device.contains(&pleys.id));
+
+    // Other tokens, the player's own included, see none.
+    for token in [app.compatibility_token(admin, "play").await, app.compatibility_token(admin, "manage").await] {
+        let none = app.jf_raw(Method::GET, "/Sessions", &[("x-emby-token", &token)], None).await;
+        assert_eq!((none.status, none.body), (StatusCode::OK, json!([])));
+    }
+    assert_eq!(app.jf(Method::GET, "/Sessions", &bob, None).await.body, json!([]));
+}
+
+#[tokio::test]
+async fn activity_tokens_say_they_administer_and_change_nothing() {
+    let w = world().await;
+    let (app, admin) = (&w.app, w.admin.as_str());
+    let administers = async |scope: &str| {
+        let token = app.compatibility_token(admin, scope).await;
+        let me = app.jf_raw(Method::GET, "/Users/Me", &[("x-emby-token", &token)], None).await;
+        assert_eq!(me.status, StatusCode::OK, "{}", me.text());
+        me.body["Policy"]["IsAdministrator"].clone()
+    };
+    // Monitors such as Tracearr refuse a key that isn't an administrator's.
+    assert_eq!(administers("activity").await, json!(true));
+    assert_eq!(administers("play").await, json!(false));
+    assert_eq!(administers("manage").await, json!(false));
+
+    // It sees; it changes nothing.
+    let monitor = app.compatibility_token(admin, "activity").await;
+    let headers = [("x-emby-token", monitor.as_str())];
+    let collection = app.jf_raw(Method::POST, "/Collections?name=Picks", &headers, None).await;
+    assert_eq!(collection.status, StatusCode::FORBIDDEN);
+    let film = format!("/Items/{}", app.jf_item(w.film));
+    let edited = app.jf_raw(Method::POST, &film, &headers, Some(json!({"Name": "Renamed"}))).await;
+    assert_eq!(edited.status, StatusCode::FORBIDDEN);
+    let refreshed = app.jf_raw(Method::POST, &format!("{film}/Refresh"), &headers, None).await;
+    assert_eq!(refreshed.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn latest_counts_a_show_from_its_newest_episode() {
+    let w = world().await;
+    let (app, admin) = (&w.app, w.admin.as_str());
+    // The show came first, the films after it, then the show's second
+    // episode, the newest of all.
+    let db = &app.state.db.write;
+    sqlx::query("UPDATE items SET added_at = CASE WHEN kind = 'movie' THEN 2000 ELSE 1000 END")
+        .execute(db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE items SET added_at = 3000 WHERE title = 'Second'").execute(db).await.unwrap();
+    for uri in ["/Items/Latest", "/Items/Suggestions"] {
+        let names = jf_names(&app.jf_json(uri, admin).await);
+        assert_eq!((names.len(), names.first().map(String::as_str)), (4, Some("Show")), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn date_episode_added_sorts_series_by_their_newest_episode() {
+    let app = TestApp::new().await;
+    let admin = app.setup_admin().await;
+    app.media_file("movies/Film (2001)/Film (2001).mkv", 1024);
+    app.media_file("tv/Old (2010)/Season 01/Old - S01E01 - Pilot.mkv", 1024);
+    app.media_file("tv/New (2012)/Season 01/New - S01E01 - Pilot.mkv", 1024);
+    app.library(&admin, "Movies", "movies", "movies").await;
+    app.library(&admin, "TV", "shows", "tv").await;
+    // The old series came first and got an episode last; the film came
+    // between the new series and that episode.
+    let db = &app.state.db.write;
+    sqlx::query("UPDATE items SET added_at = CASE title WHEN 'Old' THEN 1000 WHEN 'Film' THEN 2500 ELSE 2000 END")
+        .execute(db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE items SET added_at = 3000
+         WHERE kind = 'episode' AND grandparent_id = (SELECT id FROM items WHERE title = 'Old')",
+    )
+    .execute(db)
+    .await
+    .unwrap();
+    let (app, admin) = (&app, admin.as_str());
+    let names = |query: &str| {
+        let uri = format!("/Items?Recursive=true&SortOrder=Descending&{query}");
+        async move { jf_names(&app.jf_json(&uri, admin).await) }
+    };
+    assert_eq!(names("IncludeItemTypes=Series&SortBy=DateLastContentAdded").await, ["Old", "New"]);
+    // The date a series was added stays its own.
+    assert_eq!(names("IncludeItemTypes=Series&SortBy=DateCreated").await, ["New", "Old"]);
+    // Merged across libraries, a film by its own date.
+    assert_eq!(names("IncludeItemTypes=Series,Movie&SortBy=DateLastContentAdded").await, ["Old", "Film", "New"]);
+    assert_eq!(names("IncludeItemTypes=Series,Movie&SortBy=DateCreated").await, ["Film", "New", "Old"]);
 }

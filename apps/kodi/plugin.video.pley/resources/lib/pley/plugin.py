@@ -18,7 +18,7 @@ import xbmc
 import xbmcgui
 import xbmcplugin
 
-from . import api, asking, kodi, listing, livetv, playback, requests
+from . import api, asking, categories, kodi, listing, livetv, playback, requests
 
 PAGE = 300
 
@@ -62,12 +62,15 @@ class Plugin(asking.Asking):
         except api.ApiError:
             return {"signed_in": False, "server": None}
 
-    def folder(self, title: str, params: dict, icon: str = "DefaultFolder.png", last: bool = False) -> None:
-        li = xbmcgui.ListItem(title, offscreen=True)
+    def folder(self, title: str, params: dict, icon: str = "DefaultFolder.png", last: bool = False, first: bool = False, label2: str = "") -> None:
+        li = xbmcgui.ListItem(title, label2, offscreen=True)
         li.setArt({"icon": icon, "thumb": icon})
         if last:
             # After the items, however they're sorted ("Next page").
             li.setProperty("SpecialSort", "bottom")
+        elif first:
+            # Before them (a merged collection's libraries).
+            li.setProperty("SpecialSort", "top")
         xbmcplugin.addDirectoryItem(self.handle, self.url(**params), li, isFolder=True)
 
     def action(self, title: str, params: dict, icon: str = "DefaultAddonService.png") -> None:
@@ -91,7 +94,8 @@ class Plugin(asking.Asking):
             if item["kind"] in listing.PLAYABLE:
                 # The resume point goes along, so playing needs no details first.
                 position = (item.get("user_state") or {}).get("position_ms") or 0
-                entries.append((self.url(route="play", id=item["id"], pos=position), li, False))
+                # So is its kind: what the user's remote may do (playback.obeys).
+                entries.append((self.url(route="play", id=item["id"], pos=position, kind=item["kind"]), li, False))
             else:
                 entries.append((self.url(route="item", id=item["id"]), li, True))
         xbmcplugin.addDirectoryItems(self.handle, entries, len(entries))
@@ -239,7 +243,11 @@ class Plugin(asking.Asking):
             self.requests_summary,
         )
         for hub in home.get("hubs", []):
-            self.folder(hub["title"], {"route": "hub", "key": hub["key"]}, "DefaultRecentlyAddedMovies.png")
+            # A row of collections opens them, all their titles (the web's
+            # row title and See all); the others are their own titles.
+            ids = hub.get("collection_ids") or []
+            params = {"route": "collection", "ids": ",".join(str(i) for i in ids)} if ids else {"route": "hub", "key": hub["key"]}
+            self.folder(hub["title"], params, "DefaultRecentlyAddedMovies.png")
         if livetv.available(live):
             # Where it has channels, after Home's rows as in the web's sidebar.
             self.folder(kodi.text("live_tv"), {"route": "live"}, "DefaultPVRChannels.png")
@@ -291,8 +299,27 @@ class Plugin(asking.Asking):
         self.end()
 
     def route_collections(self) -> None:
+        """A library's collections, as its Collections tab has them: a
+        folder for each category (Other last) when they are in more than
+        one, else the collections; `category` lists one's."""
+        library = self.params["id"]
         client = self.client()
-        for collection in client.get("/api/libraries/%s/collections" % self.params["id"]).get("collections", []):
+        found, listed = api.together(
+            lambda: client.get("/api/libraries/%s/collections" % library),
+            lambda: categories.listed(client),
+        )
+        collections = found.get("collections", [])
+        choice = categories.chosen(categories.parse(self.params.get("category")), categories.groups(collections, listed))
+        groups = categories.shown(collections, listed, choice)
+        if choice == categories.ALL and len(groups) > 1:
+            for category, of in groups:
+                params = {"route": "collections", "id": library, "category": categories.key(category)}
+                self.folder(categories.title(category), params, "DefaultSets.png", label2=kodi.count("collections", len(of)))
+            xbmcplugin.addSortMethod(self.handle, xbmcplugin.SORT_METHOD_UNSORTED)
+            return self.end()
+        if choice != categories.ALL and groups:
+            xbmcplugin.setPluginCategory(self.handle, categories.title(groups[0][0]))
+        for collection in [c for _, of in groups for c in of]:
             li = xbmcgui.ListItem(collection["title"], offscreen=True)
             li.setArt(
                 {
@@ -309,7 +336,26 @@ class Plugin(asking.Asking):
         self.end()
 
     def route_collection(self) -> None:
-        self.items(self.client().get("/api/collections/%s" % self.params["id"], summaries=1).get("items", []))
+        """A collection's titles, its name and category as the listing's;
+        `ids`: a Home row of several of one title (one a library's), all
+        their titles, after a folder for each library's own."""
+        client = self.client()
+        ids = [i for i in (self.params.get("ids") or "").split(",") if i.isdigit()]
+        if len(ids) > 1:
+            found, libraries = api.together(
+                lambda: client.get("/api/collections/merged", ids=",".join(ids), summaries=1),
+                lambda: client.get("/api/libraries"),
+            )
+            names = {lib["id"]: lib.get("name") for lib in libraries}
+            for part in found.get("collections", []):
+                name = names.get(part.get("library_id"))
+                if name:
+                    self.folder(kodi.text("collection_in_library") % name, {"route": "collection", "id": part["id"]}, "DefaultSets.png", first=True)
+            xbmcplugin.setPluginCategory(self.handle, found.get("title") or "")
+        else:
+            found = client.get("/api/collections/%s" % (ids[0] if ids else self.params["id"]), summaries=1)
+            xbmcplugin.setPluginCategory(self.handle, " · ".join(p for p in (found.get("title"), categories.said(found)) if p))
+        self.items(found.get("items", []))
         self.end()
 
     def route_playlists(self) -> None:
@@ -414,14 +460,30 @@ class Plugin(asking.Asking):
         item_id = int(self.params["id"])
         listed = self.params.get("pos")
         detail = None
-        if self.resume and listed is None:
+        if (self.params.get("start") or "").isdigit():
+            # Where it was asked to start, whatever Kodi was told: a cast's
+            # place, or its resume point where the add-on's Play resumes.
+            start_ms = int(self.params["start"])
+        elif self.resume and listed is None:
             # Not from a listing: the resume point is in the details.
             detail = client.get("/api/items/%d" % item_id)
             start_ms = (detail.get("user_state") or {}).get("position_ms", 0)
         else:
             start_ms = int(listed or 0) if self.resume else 0
-        li = playback.prepare(client, self.proxy_base, item_id, start_ms, detail)
+        given = self.given_tracks()
+        li = playback.prepare(client, self.proxy_base, item_id, start_ms, detail, kind=self.params.get("kind"), given=given)
         xbmcplugin.setResolvedUrl(self.handle, True, li)
+
+    def given_tracks(self):
+        """The tracks a cast named (casting.play checked them against the
+        file): {"audio", "subtitle"}, -1 for no subtitles; None for none."""
+        found = {}
+        for name in ("audio", "subtitle"):
+            value = self.params.get(name) or ""
+            found[name] = int(value) if re.fullmatch(r"-1|\d{1,9}", value) else None
+        if found["audio"] == -1:
+            found["audio"] = None
+        return found if found["audio"] is not None or found["subtitle"] is not None else None
 
     # --------------------------------------------------------------- Live TV
 
@@ -466,7 +528,7 @@ class Plugin(asking.Asking):
     def category(self, title: str, count, params: dict, icon: str) -> None:
         """A folder of Live TV's: a category of channels, how many it has."""
         params = dict({"route": "live_channels"}, **params)
-        label = "%s  [COLOR %s](%s)[/COLOR]" % (title, "FF8B95A5", "{:,}".format(count)) if count is not None else title
+        label = "%s  [COLOR %s](%s)[/COLOR]" % (title, "FF8B95A5", kodi.number(count)) if count is not None else title
         self.folder(label, params, icon)
 
     def route_live_search(self) -> None:
@@ -628,6 +690,7 @@ class Plugin(asking.Asking):
 
         client = self.client()
         me = client.get("/api/auth/me")
+        heard(me)
         dialog = xbmcgui.Dialog()
         tracks.edit_defaults(
             client,
@@ -636,6 +699,23 @@ class Plugin(asking.Asking):
             lambda words, error: kodi.notify(words, error=error),
             kodi.text,
             api.ApiError,
+        )
+
+    def route_language(self) -> None:
+        """Profile language (from the add-on's settings): the profile's own,
+        on all its devices (this device's on a server from before
+        languages), in Kodi's list dialog."""
+        from . import language
+
+        client = self.client()
+        me = client.get("/api/auth/me")
+        heard(me)
+        dialog = xbmcgui.Dialog()
+        language.choose(
+            client,
+            me,
+            lambda heading, labels, preselect: dialog.select(heading, labels, preselect=preselect),
+            lambda words, error: kodi.notify(words, error=error),
         )
 
     def route_subtitles(self) -> None:
@@ -749,10 +829,8 @@ class Plugin(asking.Asking):
                     needs, problem = "pin", profiles.refusal(e, kodi.text, self.server_name())
                     continue
                 return kodi.notify(profiles.refusal(e, kodi.text, self.server_name()), error=True)
-        kodi.set_property(profiles.GATE, "1")
         kodi.notify(kodi.text("watching_as") % name)
-        if kodi.get_property(kodi.WINDOW_OPEN):
-            xbmc.executebuiltin("NotifyAll(%s,%s)" % (kodi.ADDON_ID, profiles.SWITCHED))
+        profiles.tell_switched()
         # Requests are the profile's own.
         self.notify_service(forget=True)
         xbmc.executebuiltin("Container.Refresh")
@@ -826,6 +904,8 @@ class Plugin(asking.Asking):
     def sign_out(self) -> None:
         """Signs out, asked already, and says so."""
         if self.sign_out_quietly():
+            # No account: this device's language.
+            heard(None)
             kodi.notify(kodi.text("signed_out"))
         else:
             kodi.notify(kodi.text("service_off"), error=True)
@@ -930,6 +1010,7 @@ ACTIONS = (
     "my_list",
     "settings",
     "tracks",
+    "language",
     "profiles",
     "rename_playlist",
     "delete_playlist",
@@ -956,12 +1037,20 @@ def choose(server: str, name: str, server_id: str) -> None:
     kodi.set_setting("server_id", server_id)
 
 
+def heard(me) -> None:
+    """The profile as GET /api/auth/me says it (None: signed out): its own
+    language shows."""
+    kodi.heard_account(me if isinstance(me, dict) else None)
+    kodi.follow_language()
+
+
 def signed_in_text(server: str, access_token: str) -> str:
     """"Signed in as Alice", or "Signed in" when the server doesn't say
-    who (the sign-in worked all the same)."""
+    who (the sign-in worked all the same), in the profile's language."""
     try:
         me = api.Client(server, kodi.user_agent(), access_token, timeout=5).get("/api/auth/me") or {}
         name = me.get("name") or me.get("username")
+        heard(me)
     except (api.ApiError, AttributeError):
         name = None
     return kodi.text("signed_in_as") % name if name else kodi.text("signed_in")
@@ -997,6 +1086,10 @@ def two_step_required(server: str) -> bool:
         found = api.Client(server, kodi.user_agent(), timeout=5).get("/api/server")
     except api.ApiError:
         return False
+    # Its language too, for a Kodi in a language Pley doesn't have: the
+    # sign-in screen's words change to it.
+    kodi.heard_server(found)
+    kodi.follow_language()
     return isinstance(found, dict) and found.get("two_step_required") is True
 
 
@@ -1004,9 +1097,7 @@ def waiting_text(seconds_left: float) -> str:
     minutes = int(seconds_left // 60)
     if minutes < 1:
         return kodi.text("waiting_last_minute")
-    if minutes == 1:
-        return kodi.text("waiting_one_minute")
-    return kodi.text("waiting") % minutes
+    return kodi.count("waiting_minutes", minutes)
 
 
 def server_setting() -> str:

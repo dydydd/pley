@@ -1,5 +1,7 @@
-//! Libraries: folders of movies, shows or music that are scanned into items.
+//! Libraries: folders of movies, shows, music or audiobooks that are scanned
+//! into items.
 
+pub mod nfo;
 pub mod parse;
 pub mod scanner;
 pub mod sidecar;
@@ -12,12 +14,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
 
+/// The order an audiobook's parts play in, as SQL over `items`: by disc,
+/// by number, then by their files' names with the numbers in them read as
+/// numbers (`Part 2` before `Part 10`), which is a part's `sort_title`
+/// (see [`parse::AudiobookName::part_sort`]).
+macro_rules! part_order {
+    () => {
+        "disc, idx IS NULL, idx, sort_title"
+    };
+}
+pub(crate) use part_order;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LibraryKind {
     Movies,
     Shows,
     Music,
+    /// Books read aloud: each a top-level `audiobook` with its files as
+    /// `part`s.
+    Audiobooks,
 }
 
 impl LibraryKind {
@@ -26,6 +42,7 @@ impl LibraryKind {
             LibraryKind::Movies => "movies",
             LibraryKind::Shows => "shows",
             LibraryKind::Music => "music",
+            LibraryKind::Audiobooks => "audiobooks",
         }
     }
 
@@ -34,6 +51,7 @@ impl LibraryKind {
             "movies" => Some(LibraryKind::Movies),
             "shows" => Some(LibraryKind::Shows),
             "music" => Some(LibraryKind::Music),
+            "audiobooks" => Some(LibraryKind::Audiobooks),
             _ => None,
         }
     }
@@ -44,7 +62,14 @@ impl LibraryKind {
             LibraryKind::Movies => "movie",
             LibraryKind::Shows => "show",
             LibraryKind::Music => "artist",
+            LibraryKind::Audiobooks => "audiobook",
         }
+    }
+
+    /// Whether the library holds sound alone: music or audiobooks, whose
+    /// files are audio, with no subtitles, samples or bonus material.
+    pub fn is_audio(self) -> bool {
+        matches!(self, LibraryKind::Music | LibraryKind::Audiobooks)
     }
 }
 
@@ -56,6 +81,9 @@ pub struct LibraryRow {
     pub paths: String,
     pub created_at: i64,
     pub scanned_at: Option<i64>,
+    /// A Plex import is bringing Plex's labels to its titles: a profile with
+    /// labels it never sees doesn't see it until then (`crate::access`).
+    pub labels_pending: bool,
 }
 
 impl LibraryRow {
@@ -69,16 +97,24 @@ impl LibraryRow {
 }
 
 pub async fn get_library(db: &Db, id: i64) -> sqlx::Result<Option<LibraryRow>> {
-    sqlx::query_as("SELECT id, name, kind, paths, created_at, scanned_at FROM libraries WHERE id = ?")
+    sqlx::query_as("SELECT id, name, kind, paths, created_at, scanned_at, labels_pending FROM libraries WHERE id = ?")
         .bind(id)
         .fetch_optional(&db.read)
+        .await
+}
+
+/// Music and audiobook libraries whose Recently Added is a row on Home,
+/// with its place among Home's rows (see `crate::rows`).
+pub async fn home_positions(db: &Db) -> sqlx::Result<Vec<(i64, i64)>> {
+    sqlx::query_as("SELECT id, home_position FROM libraries WHERE home_position IS NOT NULL ORDER BY home_position, id")
+        .fetch_all(&db.read)
         .await
 }
 
 /// Every library, in the order administrators chose (see [`set_order`]).
 pub async fn list_libraries(db: &Db) -> sqlx::Result<Vec<LibraryRow>> {
     sqlx::query_as(
-        "SELECT id, name, kind, paths, created_at, scanned_at FROM libraries
+        "SELECT id, name, kind, paths, created_at, scanned_at, labels_pending FROM libraries
          ORDER BY position, name COLLATE NOCASE, id",
     )
     .fetch_all(&db.read)

@@ -5,8 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { connectionLost, eventsLive } from "@/lib/connection";
 import { apiError, mockApi, testQueryClient } from "@/test/render";
 import { makeDetail, makeRequest, makeRequestList, makeShowDetail, makeSummary, makeTitle } from "@/test/requests";
-import { LOST_AFTER_MS, onServerEvent, useServerEvents } from "./events";
-import { keys } from "./hooks";
+import { LOST_AFTER_MS, onServerEvent, READING_REFRESH_MS, setReceiver, useServerEvents } from "./events";
+import { keys, useActivity } from "./hooks";
+import { listKeys } from "./lists";
 import { EVERY_REQUEST, requestKeys, type DiscoverPage, type DiscoverTitle } from "./requests";
 import type { Activity, Library, ServerEvent } from "./types";
 
@@ -124,6 +125,87 @@ describe("useServerEvents", () => {
     expect(client.getQueryData<Library[]>(keys.libraries)?.[0]?.scanning).toBe(false);
   });
 
+  it("leaves the activity as fetched, for Home to fetch again once it's due", () => {
+    const { client, source } = setup();
+    // Nothing fetched it: no scan is made up from what an event says.
+    act(() => source().send({ type: "scan_progress", library_id: 1, phase: "probing", processed: 3, total: 10 }));
+    expect(client.getQueryData<Activity>(keys.activity)).toBeUndefined();
+
+    // Fetched a while ago, with the first scan of library 1: the events
+    // keep what they don't say, and when it was fetched.
+    const scan = { library_id: 1, library_name: "Library 1", phase: "probing" as const, processed: 3, total: 10, started_at: 0, first: true, left_secs: 70 };
+    client.setQueryData<Activity>(keys.activity, { scans: [scan], sessions: [] }, { updatedAt: 1_000 });
+    act(() => source().send({ type: "scan_progress", library_id: 1, phase: "probing", processed: 5, total: 10 }));
+    expect(client.getQueryData<Activity>(keys.activity)?.scans).toEqual([{ ...scan, processed: 5 }]);
+    // The time left was for reading files, not for fetching details.
+    act(() => source().send({ type: "scan_progress", library_id: 1, phase: "metadata", processed: 0, total: 4 }));
+    expect(client.getQueryData<Activity>(keys.activity)?.scans).toEqual([{ ...scan, phase: "metadata", processed: 0, total: 4, left_secs: null }]);
+    expect(client.getQueryState(keys.activity)?.dataUpdatedAt).toBe(1_000);
+    expect(invalidated(client, keys.activity)).toBe(false);
+
+    // A scan it hadn't heard of: the server is asked what it is.
+    act(() => source().send({ type: "scan_progress", library_id: 2, phase: "queued", processed: 0, total: 0 }));
+    expect(invalidated(client, keys.activity)).toBe(true);
+  });
+
+  it("still fetches the activity while a scan's events keep coming, for what they don't say", async () => {
+    // Its time left, told once the server has measured the pace.
+    let fetches = 0;
+    const scan = { library_id: 1, library_name: "Library 1", phase: "probing" as const, processed: 3, total: 100, started_at: 0, first: true };
+    mockApi({ "GET /api/activity": (): Activity => ({ scans: [{ ...scan, left_secs: ++fetches > 1 ? 70 : null }], sessions: [] }) });
+    const client = testQueryClient();
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    renderHook(
+      () => {
+        useServerEvents(1);
+        return useActivity();
+      },
+      { wrapper },
+    );
+    await act(() => vi.advanceTimersByTimeAsync(10));
+    expect(fetches).toBe(1);
+    // An event every 400 ms, for six seconds.
+    for (let n = 1; n <= 15; n++) {
+      act(() => (FakeEventSource.all.at(-1) as FakeEventSource).send({ type: "scan_progress", library_id: 1, phase: "probing", processed: 3 + n, total: 100 }));
+      await act(() => vi.advanceTimersByTimeAsync(400));
+    }
+    expect(fetches).toBeGreaterThan(1);
+    expect(client.getQueryData<Activity>(keys.activity)?.scans[0]?.left_secs).toBe(70);
+  });
+
+  it("fetches Home and the library again now and then while its files are read, as their titles go in", () => {
+    const { client, source } = setup();
+    const fetched = () => {
+      client.setQueryData(keys.library(1), library(1, true));
+      client.setQueryData(keys.homeHubs, { hubs: [] });
+      client.setQueryData(keys.item(5), {});
+    };
+    fetched();
+    const read = (processed: number) => act(() => source().send({ type: "scan_progress", library_id: 1, phase: "probing", processed, total: 100 }));
+    read(0);
+    read(10);
+    expect(invalidated(client, keys.homeHubs)).toBe(false);
+    act(() => {
+      vi.advanceTimersByTime(READING_REFRESH_MS);
+    });
+    read(20);
+    expect(invalidated(client, keys.homeHubs)).toBe(true);
+    expect(invalidated(client, keys.library(1))).toBe(true);
+    // Not what a library change refreshes besides.
+    expect(invalidated(client, keys.item(5))).toBe(false);
+
+    // Not again until it's due.
+    fetched();
+    read(30);
+    expect(invalidated(client, keys.homeHubs)).toBe(false);
+    // Nor for a scan's other phases.
+    act(() => {
+      vi.advanceTimersByTime(READING_REFRESH_MS);
+    });
+    act(() => source().send({ type: "scan_progress", library_id: 1, phase: "metadata", processed: 1, total: 100 }));
+    expect(invalidated(client, keys.homeHubs)).toBe(false);
+  });
+
   it("refreshes a changed library once per burst", () => {
     const { client, source } = setup();
     client.setQueryData(keys.library(1), library(1));
@@ -139,6 +221,37 @@ describe("useServerEvents", () => {
     });
     expect(invalidated(client, keys.library(1))).toBe(true);
     expect(invalidated(client, keys.homeHubs)).toBe(true);
+  });
+
+  it("refreshes collections, their categories and Home's rows when the libraries changed", () => {
+    const { client, source } = setup();
+    client.setQueryData(listKeys.categories, { categories: [] });
+    client.setQueryData(listKeys.collections(1), { collections: [] });
+    client.setQueryData(listKeys.collection(4), { id: 4 });
+    client.setQueryData(listKeys.merged([4, 9]), { title: "Christmas" });
+    client.setQueryData(listKeys.homeRows, { rows: [] });
+
+    act(() => source().send({ type: "libraries_changed" }));
+    expect(invalidated(client, listKeys.categories)).toBe(true);
+    expect(invalidated(client, listKeys.collections(1))).toBe(true);
+    expect(invalidated(client, listKeys.collection(4))).toBe(true);
+    expect(invalidated(client, listKeys.merged([4, 9]))).toBe(true);
+    expect(invalidated(client, listKeys.homeRows)).toBe(true);
+  });
+
+  it("refreshes a changed library's collection pages and Home's rows with it", () => {
+    const { client, source } = setup();
+    client.setQueryData(listKeys.collection(4), { id: 4 });
+    client.setQueryData(listKeys.merged([4, 9]), { title: "Christmas" });
+    client.setQueryData(listKeys.homeRows, { rows: [] });
+
+    act(() => source().send({ type: "library_changed", library_id: 1 }));
+    act(() => {
+      vi.advanceTimersByTime(1500);
+    });
+    expect(invalidated(client, listKeys.collection(4))).toBe(true);
+    expect(invalidated(client, listKeys.merged([4, 9]))).toBe(true);
+    expect(invalidated(client, listKeys.homeRows)).toBe(true);
   });
 
   it("refreshes everything after a reconnect, not on the first connection", () => {
@@ -209,6 +322,30 @@ describe("useServerEvents", () => {
       vi.advanceTimersByTime(1);
     });
     expect(FakeEventSource.all).toHaveLength(3);
+  });
+
+  it("refreshes the user's own sessions and devices, for the remote, as sessions change or stop", () => {
+    const { client, source } = setup();
+    client.setQueryData(keys.sessions, []);
+    client.setQueryData(keys.remoteDevices, []);
+    client.setQueryData(keys.activity, { scans: [], sessions: [] });
+
+    // A device that takes casts coming or going says so too.
+    act(() => source().send({ type: "sessions_changed" }));
+    expect(invalidated(client, keys.sessions)).toBe(true);
+    expect(invalidated(client, keys.remoteDevices)).toBe(true);
+    expect(invalidated(client, keys.activity)).toBe(true);
+
+    client.setQueryData(keys.sessions, []);
+    act(() => source().send({ type: "session_stopped", session_id: "s1", message: null, by_admin: false }));
+    expect(invalidated(client, keys.sessions)).toBe(true);
+
+    // A command is for the player: nothing to fetch.
+    client.setQueryData(keys.sessions, []);
+    act(() =>
+      source().send({ type: "player_command", session_id: "s1", command: "pause", position_ms: null, offset_ms: null, stream_index: null }),
+    );
+    expect(invalidated(client, keys.sessions)).toBe(false);
   });
 
   it("refreshes My List when it changed on another device", () => {
@@ -491,6 +628,24 @@ describe("useServerEvents", () => {
     stop();
     act(() => source().send({ type: "sessions_changed" }));
     expect(heard).toEqual([stopped]);
+  });
+
+  it("opens again as a receiver of casts, and as a plain stream once it takes none", () => {
+    const { source } = setup();
+    act(() => source().open());
+    expect(source().url).toBe("/api/events");
+    const plain = source();
+
+    act(() => setReceiver("receiver=desktop-1&casts=item"));
+    expect(plain.readyState).toBe(FakeEventSource.CLOSED);
+    expect(source().url).toBe("/api/events?receiver=desktop-1&casts=item");
+    // The same again opens nothing.
+    const count = FakeEventSource.all.length;
+    act(() => setReceiver("receiver=desktop-1&casts=item"));
+    expect(FakeEventSource.all).toHaveLength(count);
+
+    act(() => setReceiver(null));
+    expect(source().url).toBe("/api/events");
   });
 
   it("ignores events it can't read", () => {

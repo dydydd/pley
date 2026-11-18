@@ -1,3 +1,5 @@
+import { currentLanguage, t } from "@/i18n";
+
 export type ApiErrorCode =
   | "bad_request"
   | "unauthorized"
@@ -50,6 +52,15 @@ export function setUnauthorizedHandler(handler: (() => void) | null) {
   unauthorizedHandler = handler;
 }
 
+/**
+ * Whether an expired session at `pathname` sends the person to sign in:
+ * not from the pages that come before one (signing in, making the first
+ * account, an invitation), but from setup's steps after that.
+ */
+export function signInAgainFrom(pathname: string): boolean {
+  return !(pathname.startsWith("/login") || /^\/setup\/?$/.test(pathname) || pathname.startsWith("/invite/"));
+}
+
 export interface RequestOptions {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
@@ -70,7 +81,8 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
 /** As {@link request}, with the answer's status, where 200 and 201 say different things. */
 export async function requestWithStatus<T>(path: string, opts: RequestOptions = {}): Promise<{ status: number; data: T }> {
   const { method = "GET", body, rawBody, form, signal, keepalive, noAuthRedirect } = opts;
-  const headers: Record<string, string> = { Accept: "application/json" };
+  // The server words some answers itself (Home's rows) in the language asked for.
+  const headers: Record<string, string> = { Accept: "application/json", "Accept-Language": currentLanguage() };
   if (rawBody) headers["Content-Type"] = rawBody.type || "application/octet-stream";
   else if (body !== undefined && !form) headers["Content-Type"] = "application/json";
   let res: Response;
@@ -85,13 +97,13 @@ export async function requestWithStatus<T>(path: string, opts: RequestOptions = 
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
-    throw new ApiError(0, "network", "Can't reach the server");
+    throw new ApiError(0, "network", t("errors.unreachable"));
   }
 
   if (!res.ok) {
     let code: string = statusCode(res.status);
     // Without pley's own words (a proxy's page, say), plain ones rather than "Bad Gateway".
-    let message = res.status >= 502 && res.status <= 504 ? "the server isn't answering right now" : `the server couldn't answer (error ${res.status})`;
+    let message = res.status >= 502 && res.status <= 504 ? t("errors.notAnswering") : t("errors.failed", { status: res.status });
     let answer: unknown;
     try {
       const data = (await res.json()) as { code?: string; message?: string };

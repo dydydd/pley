@@ -51,7 +51,7 @@ struct PlaylistsView: View {
             StateView(kind: .failed(title: PlaylistsModel.failedTitle, why: why) { Task { await model.load() } })
         case .loaded where model.cards.isEmpty:
             StateView(kind: .empty(symbol: "music.note.list", text: PlaylistsModel.emptyTitle,
-                                   action: ("New Playlist", { model.new() })))
+                                   action: (localized("New Playlist"), { model.new() })))
         case .loaded:
             ScrollView {
                 if let notice = model.notice {
@@ -72,7 +72,7 @@ struct PlaylistsView: View {
 }
 
 /// One playlist: its mosaic, title, Smart badge, count and length, its
-/// filter in words, Play and Shuffle, then its entries. On iPhone and iPad,
+/// filter in words, Play and Shuffle with Play on…, then its entries. On iPhone and iPad,
 /// Edit moves entries and a swipe removes one; on the Mac they are dragged,
 /// and removed from their context menu. A removal can be undone for 5
 /// seconds. Rename and Delete are in the More menu. Smart playlists are
@@ -180,7 +180,7 @@ struct PlaylistView: View {
 
     private var header: some View {
         let facts = VStack(alignment: .leading, spacing: 6) {
-            if model.smart { ListBadge(text: "Smart") }
+            if model.smart { ListBadge(text: localized("Smart")) }
             Text(model.title)
                 .font(.title2.bold())
                 .accessibilityAddTraits(.isHeader)
@@ -225,7 +225,8 @@ struct PlaylistView: View {
     private var buttons: some View {
         PlayShuffleButtons(prefix: "playlist", canPlay: model.canPlay, canShuffle: model.canShuffle,
                            play: { launcher.play(app, model.play()) },
-                           shuffle: { launcher.play(app, model.play(shuffle: true)) })
+                           shuffle: { launcher.play(app, model.play(shuffle: true)) },
+                           remote: model.canPlay ? app.remote : nil, cast: .playlist(model.playlistId))
     }
 
     private func entry(_ row: PlaylistRow) -> some View {
@@ -261,7 +262,7 @@ struct PlaylistView: View {
             Label("Play from Here", systemImage: "play.fill")
         }
         Button { app.shell.open(item: row.item) } label: {
-            Label(model.video ? "Go to Page" : "Go to Album", systemImage: "info.circle")
+            Label(model.video ? localized("Go to Page") : localized("Go to Album"), systemImage: "info.circle")
         }
         if model.editable {
             if row.number > 1 {
@@ -294,7 +295,7 @@ private struct EntryRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text("\(row.number)")
+            Text(verbatim: "\(row.number)")
                 .font(.footnote.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 22, alignment: .trailing)

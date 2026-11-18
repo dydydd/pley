@@ -19,7 +19,7 @@ const icons = [
   ["Play", "play", true], ["Pause", "pause", true], ["SkipBack", "skip-back", true], ["SkipForward", "skip-forward", true],
   ["Rewind", "rewind"], ["FastForward", "fast-forward"], ["RotateCcw", "rotate-ccw"], ["RotateCw", "rotate-cw"],
   ["Captions", "captions"], ["AudioLines", "audio-lines"], ["Gauge", "gauge"], ["PictureInPicture2", "picture-in-picture-2"],
-  ["Volume2", "volume-2"], ["Sun", "sun"], ["Maximize", "maximize"], ["Minimize", "minimize"], ["Shuffle", "shuffle"],
+  ["Volume1", "volume-1"], ["Volume2", "volume-2"], ["VolumeX", "volume-x"], ["Sun", "sun"], ["Maximize", "maximize"], ["Minimize", "minimize"], ["Shuffle", "shuffle"],
   ["Repeat", "repeat"], ["Repeat1", "repeat-1"], ["MonitorPlay", "monitor-play"],
   // Actions and state
   ["Check", "check"], ["CircleCheck", "circle-check"], ["Star", "star", true], ["Eye", "eye"], ["EyeOff", "eye-off"],
@@ -27,7 +27,7 @@ const icons = [
   ["Info", "info"], ["X", "x"], ["Delete", "delete"], ["Trash2", "trash-2"], ["Pencil", "pencil"], ["Copy", "copy"],
   ["Save", "save"], ["Download", "download"], ["RefreshCw", "refresh-cw"], ["History", "history"], ["Lock", "lock"],
   ["LockOpen", "lock-open"], ["LogOut", "log-out"], ["Link2", "link-2"], ["Sparkles", "sparkles"],
-  ["GripVertical", "grip-vertical"], ["List", "list"], ["ListOrdered", "list-ordered"], ["Square", "square"],
+  ["GripVertical", "grip-vertical"], ["List", "list"], ["ListOrdered", "list-ordered"], ["Square", "square"], ["CircleStop", "circle-stop"],
   ["LoaderCircle", "loader-circle"], ["CircleAlert", "circle-alert"], ["TriangleAlert", "triangle-alert"],
   ["ShieldCheck", "shield-check"], ["TicketX", "ticket-x"], ["MailPlus", "mail-plus"], ["Activity", "activity"],
   // My List
@@ -39,6 +39,8 @@ const icons = [
   ["ChevronUp", "chevron-up"], ["ChevronsRight", "chevrons-right"],
   // Devices, servers, files
   ["Server", "server"], ["ServerOff", "server-off"], ["Smartphone", "smartphone"], ["Laptop", "laptop"], ["Monitor", "monitor"], ["Wifi", "wifi"],
+  // The remote: a device's kind, and casting to it
+  ["Tablet", "tablet"], ["Globe", "globe"], ["MonitorSmartphone", "monitor-smartphone"], ["Cast", "cast"],
   ["HardDrive", "hard-drive"], ["Cpu", "cpu"], ["AppWindow", "app-window"], ["LayoutDashboard", "layout-dashboard"],
   ["Folder", "folder"], ["FolderOpen", "folder-open"], ["FolderPlus", "folder-plus"], ["FolderSearch", "folder-search"],
   ["ImageUp", "image-up"], ["ScanSearch", "scan-search"], ["DatabaseBackup", "database-backup"],

@@ -34,12 +34,26 @@ public actor APIClient {
         return try decode(type, response)
     }
 
+    /// With `timeout`, the request waits that long for its answer rather
+    /// than the transport's 20 seconds: for a route that answers only once
+    /// something slow is done (a cast to a Google Cast device).
     public func send<B: Encodable & Sendable, T: Decodable & Sendable>(_ method: String, _ path: String, body: B?,
-                                                                    as type: T.Type) async throws -> T {
+                                                                    as type: T.Type,
+                                                                    timeout: TimeInterval? = nil) async throws -> T {
+        let data = try body.map { try PleyJSON.encoder.encode($0) }
+        let response = try await request(method, path, query: [], body: data, maxBytes: BodyLimit.json,
+                                         accept: "application/json", timeout: timeout)
+        return try decode(type, response)
+    }
+
+    /// `send`, with the answer's status beside it: for a route whose `200`
+    /// and `201` mean different things (asking for a title).
+    public func sendWithStatus<B: Encodable & Sendable, T: Decodable & Sendable>(
+        _ method: String, _ path: String, body: B?, as type: T.Type) async throws -> (value: T, status: Int) {
         let data = try body.map { try PleyJSON.encoder.encode($0) }
         let response = try await request(method, path, query: [], body: data, maxBytes: BodyLimit.json,
                                          accept: "application/json")
-        return try decode(type, response)
+        return (try decode(type, response), response.status)
     }
 
     /// `get` with the tag of the answer shown (`If-None-Match`): `nil` when
@@ -119,7 +133,7 @@ public actor APIClient {
         let fm = FileManager.default
         try? fm.removeItem(at: part)
         guard fm.createFile(atPath: part.path, contents: nil), let handle = try? FileHandle(forWritingTo: part) else {
-            throw PleyError.unreachable("the download couldn't be saved")
+            throw PleyError.unreachable(PleyError.notSaved)
         }
         let writer = PartWriter(handle: handle, limit: maxBytes - max(offset, 0))
         defer {
@@ -136,7 +150,7 @@ public actor APIClient {
         guard let type, accept.contains(type) else { throw PleyError.unreadable(status: response.status) }
         let (written, over, failed) = writer.result
         if over { throw PleyError.tooLarge }
-        if failed { throw PleyError.unreachable("the download couldn't be saved") }
+        if failed { throw PleyError.unreachable(PleyError.notSaved) }
         writer.close()
         if response.status == 206 && offset > 0, fm.fileExists(atPath: file.path) {
             let out = try FileHandle(forWritingTo: file)
@@ -155,7 +169,7 @@ public actor APIClient {
     private func streamed(_ path: String, query: [URLQueryItem], headers: [String: String],
                           opened: (@Sendable (Int) -> Void)? = nil,
                           read: @escaping @Sendable (Data) -> Bool) async throws -> StreamedResponse {
-        guard let url = url(path, query: query) else { throw PleyError.unreachable("that isn't an address on the server") }
+        guard let url = url(path, query: query) else { throw PleyError.unreachable(PleyError.notOnServer) }
         var request = URLRequest(url: url)
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         let tokens = self.tokens.flatMap { t in
@@ -199,7 +213,7 @@ public actor APIClient {
     /// asked ahead of the player.
     public func playerData(_ url: URL, maxBytes: Int) async throws -> Data {
         guard Addresses.origin(url) == Addresses.origin(origin) else {
-            throw PleyError.unreachable("that isn't an address on the server")
+            throw PleyError.unreachable(PleyError.notOnServer)
         }
         var request = URLRequest(url: url)
         request.setValue("*/*", forHTTPHeaderField: "Accept")
@@ -212,7 +226,7 @@ public actor APIClient {
     /// `playerData`, read as it arrives and thrown away (a stream's segment, asked ahead of the player).
     public func playerBytes(_ url: URL, read: @escaping @Sendable (Int) -> Bool) async throws {
         guard Addresses.origin(url) == Addresses.origin(origin) else {
-            throw PleyError.unreachable("that isn't an address on the server")
+            throw PleyError.unreachable(PleyError.notOnServer)
         }
         try check(try await doubted {
             try await transport.stream(URLRequest(url: url), redirects: .api(issuer: origin), read: read)
@@ -252,17 +266,20 @@ public actor APIClient {
     public nonisolated func checkPlayerURL(_ url: URL) async throws {
         guard Addresses.origin(url) == Addresses.origin(origin), let host = url.host(percentEncoded: false),
               !host.isEmpty
-        else { throw PleyError.unreachable("that isn't an address on the server") }
+        else { throw PleyError.unreachable(PleyError.notOnServer) }
         if url.scheme?.lowercased() == "http" { try await transport.gate.check(host: host) }
     }
 
-    /// With `notModified`, a `304` is an answer, not an error.
+    /// With `notModified`, a `304` is an answer, not an error; with
+    /// `timeout`, the request's own wait for its answer.
     private func request(_ method: String, _ path: String, query: [URLQueryItem], body: Data?, maxBytes: Int,
-                         accept: String, headers: [String: String] = [:],
-                         notModified: Bool = false) async throws -> HTTPResponse {
-        guard let url = url(path, query: query) else { throw PleyError.unreachable("that isn't an address on the server") }
+                         accept: String, headers: [String: String] = [:], notModified: Bool = false,
+                         timeout: TimeInterval? = nil) async throws -> HTTPResponse {
+        guard let url = url(path, query: query) else { throw PleyError.unreachable(PleyError.notOnServer) }
         var request = URLRequest(url: url)
         request.httpMethod = method
+        // A request's own interval goes before the session's.
+        if let timeout { request.timeoutInterval = timeout }
         request.setValue(accept, forHTTPHeaderField: "Accept")
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         let check: (HTTPResponse) throws -> Void = { [self] response in
@@ -352,7 +369,13 @@ public actor APIClient {
         if status == 409 && !body.connections.isEmpty {
             throw PleyError.busy(message: message, connections: body.connections)
         }
-        if status == 503, let setup = body.setup { throw PleyError.notAvailable(message: message, setup: setup) }
+        if status == 503, let setup = body.setup {
+            throw PleyError.notAvailable(code: body.code, message: message, setup: setup)
+        }
+        if body.refusal {
+            throw PleyError.refused(status: status, code: body.code, message: message, retryAt: body.retryAt,
+                                    request: body.request)
+        }
         throw PleyError.api(status: status, code: body.code, message: message)
     }
 

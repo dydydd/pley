@@ -23,12 +23,19 @@ public struct LiveRequest: Hashable, Codable, Sendable {
 /// up and down through the category it was opened in (wrapping round its
 /// ends), a channel number typed on a remote or keyboard, the favourite,
 /// and the trouble a channel can run into. `playback` does the watching.
+/// The profile's remotes change channel the same way (`obey`).
 @MainActor
 public final class LivePlayerModel: ObservableObject, Identifiable {
+    /// The remote's commands the live player obeys: channel up and down. It
+    /// doesn't go back in a channel, so no pause or seek.
+    public static let controls: [Control] = [.next, .previous]
+
     /// A typed number tunes this long after its last digit.
     public static let numberWait: Duration = .milliseconds(1_400)
     /// "No channel 123" shows this long.
     public static let notFoundShown: Duration = .seconds(2)
+    /// What a cast from another device says shows this long.
+    public static let bannerShown: Duration = .seconds(4)
     /// A channel number has this many digits at most.
     public static let maxDigits = 5
 
@@ -44,6 +51,8 @@ public final class LivePlayerModel: ObservableObject, Identifiable {
     @Published public private(set) var digits = ""
     /// "No channel 123", for a moment.
     @Published public private(set) var notice: String?
+    /// "Playing from Kitchen tablet", as a cast from another device starts, for a moment.
+    @Published public private(set) var banner: String?
     /// The time now (unix seconds), moved every `LiveTvRules.playerTick`.
     @Published public private(set) var now: Int64
 
@@ -54,6 +63,7 @@ public final class LivePlayerModel: ObservableObject, Identifiable {
     private var recentOrder: [Int]?
     private var typing: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
+    private var bannerTask: Task<Void, Never>?
     private var ticking: Task<Void, Never>?
     private var zapping: Task<Void, Never>?
     private var lastRefresh: Int64 = 0
@@ -137,6 +147,19 @@ public final class LivePlayerModel: ObservableObject, Identifiable {
         return by > 0 ? next.first : next.last
     }
 
+    /// A command from the profile's remote on another device, for session
+    /// `sessionId` (`player_command`): next and previous are channel up and
+    /// down, as here, when it is the session watching now. The new
+    /// channel's watch tells the server, and so the remote.
+    public func obey(_ command: PlayerCommand, for sessionId: String) {
+        guard playback.sessionId == sessionId else { return }
+        switch command.command {
+        case .next: zap(by: 1)
+        case .previous: zap(by: -1)
+        default: break
+        }
+    }
+
     /// The Channels list moved to another category: channel up and down follow it.
     public func show(_ category: LiveCategory) {
         guard category != self.category else { return }
@@ -183,7 +206,7 @@ public final class LivePlayerModel: ObservableObject, Identifiable {
                 if self.category != .all, await !self.inCategory(found.id) { self.show(.all) }
                 self.tune(found)
             } else {
-                self.say("No channel \(number)")
+                self.say(localized("No channel \(number)"))
             }
         }
     }
@@ -203,6 +226,17 @@ public final class LivePlayerModel: ObservableObject, Identifiable {
         }
     }
 
+    /// Shows `text` over the player for a moment (`bannerShown`).
+    public func showBanner(_ text: String) {
+        banner = text
+        bannerTask?.cancel()
+        bannerTask = Task { [weak self] in
+            try? await Task.sleep(for: LivePlayerModel.bannerShown)
+            guard !Task.isCancelled else { return }
+            self?.banner = nil
+        }
+    }
+
     // MARK: Favourite
 
     /// Stars the channel playing, or takes its star off: at once, put back with a toast if refused.
@@ -214,7 +248,8 @@ public final class LivePlayerModel: ObservableObject, Identifiable {
             do {
                 try await self.live.setFavorite(channel.id, favorite)
             } catch {
-                self.toast("The favourite wasn't saved: \(describe(error))")
+                let reason = describe(error)
+                self.toast(localized("The favourite wasn't saved: \(reason)"))
             }
         }
         remark()
@@ -235,7 +270,8 @@ public final class LivePlayerModel: ObservableObject, Identifiable {
     // MARK: Life
 
     /// The app left the foreground (`false`): the channel and its
-    /// connection are let go, and tuned again from the live edge on return.
+    /// connection are let go, and tuned again from the live edge on return,
+    /// unless it had failed (stopped at the server, every connection in use).
     public func sceneActive(_ active: Bool) {
         if active {
             playback.resume()
@@ -250,6 +286,7 @@ public final class LivePlayerModel: ObservableObject, Identifiable {
     public func close() {
         typing?.cancel()
         noticeTask?.cancel()
+        bannerTask?.cancel()
         ticking?.cancel()
         zapping?.cancel()
         playback.close()

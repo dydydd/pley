@@ -360,11 +360,13 @@ public class LocalTests
         public Task<ItemDetail> Item(long id) => throw new NotSupportedException();
         public Task<PlaybackInfo> StartPlayback(IReadOnlyDictionary<string, object?> body) => throw new NotSupportedException();
         public Task StopPlayback(string session) => throw new NotSupportedException();
-        public Task Progress(long itemId, long positionMs, long? durationMs, string state, string session) => throw new NotSupportedException();
+        public Task Progress(long itemId, long positionMs, long? durationMs, string state, string session, PlayingTracks? tracks = null, string? quality = null) => throw new NotSupportedException();
         public Task<SessionStatus> PlaybackStatus(string session, int timeoutMs) => throw new NotSupportedException();
         public Task Reachable(int timeoutMs) => throw new NotSupportedException();
         public Task<SubtitleText> Subtitles(string url) => throw new NotSupportedException();
         public Task<SubtitlePictures> PictureSubtitles(string url) => throw new NotSupportedException();
+
+        public Task<SubtitlePart> PictureSubtitlesPart(string url, long from, long to) => throw new NotSupportedException();
         public Task<TrickplayInfo?> Trickplay(long fileId) => throw new NotSupportedException();
         public string TrickplaySheetUrl(long fileId, int sheet, string version) => "";
         public Task<ItemSummary?> Next(long itemId) => throw new NotSupportedException();

@@ -56,23 +56,36 @@ make the transcoder one work with FFmpeg, bound by FFmpeg's licence (the
 GPL, for the builds Pley uses) as well as Pley's. Where a build of Pley
 ships FFmpeg beside it, FFmpeg keeps its own licence:
 
-- **The Docker image** installs Debian's `ffmpeg` package, unmodified. Its
-  licence is in the image (`/usr/share/doc/ffmpeg/copyright`, as for every
-  Debian package), and its source is Debian's, for the version the image
-  lists (`dpkg -l ffmpeg`): `apt-get source ffmpeg=<version>`, or
-  <https://sources.debian.org/src/ffmpeg/>. On amd64 the image also has
-  Intel's VAAPI driver from Debian's non-free section
+- **The Docker image** carries pley-ffmpeg
+  ([deploy/ffmpeg](deploy/ffmpeg/README.md)): FFmpeg 9 (`--enable-gpl`, so
+  GPL) with patches from jellyfin-ffmpeg and two of Pley's own, which are
+  under FFmpeg's licence as the files they change, and libplacebo (LGPL),
+  unmodified, built from their release sources against Debian's libraries.
+  Their licences and sources, the patches and FFmpeg's build configuration
+  are in
+  `/usr/share/doc/ffmpeg` and `/usr/share/doc/libplacebo`. Debian's
+  packages keep their licences in `/usr/share/doc/<package>/copyright`;
+  their sources are at <https://sources.debian.org>. On amd64 the image
+  also has Intel's VAAPI driver from Debian's non-free section
   (`intel-media-va-driver-non-free`, redistributable, with GPU shaders that
   come without source), its licence in
   `/usr/share/doc/intel-media-va-driver-non-free/copyright`.
-- **The Windows installer** carries an FFmpeg build (gyan.dev's "full",
-  `--enable-gpl --enable-version3`, so GPLv3) with its `LICENSE` and
-  `README.txt`, and, for a patched build, its patch and build script
-  ([deploy/windows/README.md](deploy/windows/README.md)). Whoever
-  distributes the installer must also offer that build's source and build
-  configuration (GPLv3 §6; <https://ffmpeg.org/legal.html>). Alternatively,
-  ship without FFmpeg and let users install it: the transcoder finds it on
-  `PATH` or via `--ffmpeg`/`--ffprobe`.
+- **The Windows installer** carries pley-ffmpeg's Windows build
+  ([deploy/ffmpeg](deploy/ffmpeg/README.md)): the same FFmpeg and patches as
+  the Docker image's, with its libraries built in (`--enable-gpl
+  --enable-version3`, so GPLv3). It comes with its `LICENSE.txt`,
+  `README.txt` and source, which the installer carries in `ffmpeg\source`:
+  FFmpeg's release source, the patches and the script that builds it, its
+  configuration, and the libraries built in with their versions and the
+  image they come from (BtbN/FFmpeg-Builds, whose scripts name each
+  library's source; libzvbi's source, which the script builds itself, is
+  there too, and libplacebo's (LGPL), rebuilt with a patch of Pley's under
+  its licence). Whoever distributes the installer must also offer that source
+  (GPLv3 §6; <https://ffmpeg.org/legal.html>), which the installer does.
+  An installer can be built with another FFmpeg
+  ([deploy/windows/README.md](deploy/windows/README.md)), with that build's
+  licence and source; or ship without FFmpeg and let users install it: the
+  transcoder finds it on `PATH` or via `--ffmpeg`/`--ffprobe`.
 - **The Synology package** carries no FFmpeg: it runs the one in
   SynoCommunity's `ffmpeg7` or `ffmpeg8` package, which the user installs
   from SynoCommunity's package source under that package's own licence
@@ -89,12 +102,13 @@ licence's terms too, and some of them, the GPL version 2 only for one,
 can't be combined with the AGPL at all.
 
 - **No copyleft code in Pley's own programs.** `scripts/check-licenses.ps1`
-  walks the real dependency graphs of the server, the transcoder and the LG
-  TV app and fails on any crate that is only available under a copyleft
-  licence (GPL, LGPL, AGPL and the like), and on the server depending on
-  the transcoder crate (they are separate programs that talk over HTTP,
-  `docs/TRANSCODER.md`). `cargo deny check licenses` allows only permissive
-  licences for third-party crates (`deny.toml`). CI runs both.
+  walks the real dependency graphs of the server, the transcoder, the LG
+  TV app and the desktop app and fails on any crate that is only available
+  under a copyleft licence (GPL, LGPL, AGPL and the like), and on the
+  server depending on the transcoder crate (they are separate programs
+  that talk over HTTP, `docs/TRANSCODER.md`). `cargo deny check licenses`
+  allows only permissive licences for third-party crates (`deny.toml`). CI
+  runs both.
 - **Nothing of the TV's in the LG TV app.** It plays through the TV's own
   media pipeline, with no FFmpeg. The TV's libraries it uses (SDL2, EGL and
   GLES, luna-service2, GLib, LG's media libraries) are part of the TV's
@@ -129,7 +143,8 @@ can't be combined with the AGPL at all.
   package the app ships with, transitive ones included, and fails on one
   that isn't MIT, Apache-2.0, BSD, ISC or Zlib, or whose licence it can't
   tell; a package that puts nothing into the app is named there with why.
-  CI runs it.
+  It also fails when the app's `NOTICES.txt` doesn't hold the full licence
+  of every package the .tpk carries (`--write` writes it again). CI runs it.
 - **Rules to keep:**
   - Never link FFmpeg's libraries into the transcoder, or any GPL library
     into the server, the transcoder or an app; Pley runs FFmpeg as a program.
@@ -143,11 +158,13 @@ can't be combined with the AGPL at all.
 
 What each build contains of others' work, and where its notices are:
 
-- The server's and the transcoder's Rust dependencies are permissive (MIT,
-  Apache-2.0, BSD, ISC, Zlib, Unicode-3.0, MPL-2.0 unmodified).
-  `scripts/check-licenses.ps1` prints the full list.
-- The web UI uses React, React Router, TanStack Query and Virtual, and
-  Tailwind (all MIT), hls.js and mpegts.js (Apache-2.0) and lucide (ISC).
+- The server's, the transcoder's and the desktop app's Rust dependencies
+  are permissive (MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0, MPL-2.0
+  unmodified). `scripts/check-licenses.ps1` prints the full list.
+- The web UI uses React, React Router, TanStack Query and Virtual,
+  i18next and react-i18next, and Tailwind (all MIT), hls.js and mpegts.js
+  (Apache-2.0) and lucide (ISC). The desktop app's own pages use i18next
+  (MIT).
 - The Android app uses AndroidX, Media3, Kotlin and kotlinx, OkHttp and
   Okio, Coil, Accompanist and the Guava and annotation pieces AndroidX
   brings (Apache-2.0), Lucide's icons (ISC; the notice ships in the app's
@@ -171,6 +188,10 @@ What each build contains of others' work, and where its notices are:
 - The native Samsung app draws its sign-in QR code with
   `Net.Codecrete.QrCodeGenerator` (MIT), Nayuki's generator, as the Android
   app has it.
+- The native Samsung app's .tpk carries, in `shared/res`, `NOTICES.txt`
+  with the full licences of the NuGet packages in it (written by
+  `scripts/check-nuget-licenses.mjs --write` from the build's packages),
+  `LICENSE.txt` and this file.
 - The native Samsung app draws its text in Roboto (OFL-1.1): the files the
   web TV app ships from `@fontsource/roboto`, unpacked to TrueType by
   `apps/tizen-native/scripts/fonts.mjs`, with their licence beside them

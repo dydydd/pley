@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import app.pley.android.common.AppLanguage
 import app.pley.android.data.HubsRepository
 import app.pley.android.data.ItemRepository
 import app.pley.android.data.LibrariesRepository
@@ -16,16 +17,19 @@ import app.pley.android.data.PlayTarget
 import app.pley.android.data.ScanState
 import app.pley.android.data.Session
 import app.pley.android.data.WatchStateRepository
+import app.pley.android.data.WatchlistRepository
 import app.pley.android.data.valueOrNull
 import app.pley.android.model.Hubs
 import app.pley.android.model.ItemDetail
 import app.pley.android.model.ItemSummary
 import app.pley.android.model.Library
+import app.pley.android.model.LibraryKind
 import app.pley.android.player.PlayRequest
 import app.pley.android.screens.Navigator
 import app.pley.android.screens.PlayerLauncher
 import app.pley.android.screens.ScreensGraph
 import app.pley.android.screens.screensGraph
+import java.time.LocalDate
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +42,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emitAll
@@ -57,8 +62,9 @@ import kotlinx.coroutines.withContext
 
 /**
  * What Home reads and does: the rows, the libraries (for the empty
- * states), the scans, item details (the hero, the TV's info block, items
- * pressed ahead of their page), playing and marking watched.
+ * states and the banner's words), the scans, item details (the banner,
+ * the hero, the TV's info block, items pressed ahead of their page),
+ * playing, marking watched and My List.
  */
 interface HomeSources {
     val hubs: HubsRepository
@@ -68,7 +74,11 @@ interface HomeSources {
     val scans: StateFlow<List<ScanState>>
     val playItem: PlayItem
     val watchState: WatchStateRepository
+    val watchlist: WatchlistRepository
     val launcher: PlayerLauncher
+
+    /** Whether Home opens on its banner: on a TV as its settings say ([app.pley.android.data.Settings.homeBanner]), always on a phone. */
+    val banner: Flow<Boolean> get() = flowOf(true)
 
     companion object {
         /** The app's, each part asked for only when first used (off the main thread). */
@@ -80,7 +90,10 @@ interface HomeSources {
             override val scans get() = graph.data.liveUpdates.scans
             override val playItem get() = graph.data.playItem
             override val watchState get() = graph.data.watchState
+            override val watchlist get() = graph.data.watchlist
             override val launcher get() = graph.playerLauncher
+            override val banner
+                get() = if (graph.device.isTv) graph.data.settings.settings.map { it.homeBanner }.distinctUntilChanged() else flowOf(true)
         }
     }
 }
@@ -113,6 +126,11 @@ data class HomeProfile(
  *   further for their own tiles with [present]. It changes only when what
  *   Home shows does: whether that is the server's answer is [status], and
  *   a refresh under way [refreshing].
+ * - The banner's titles ([HomeState.Ready.featured]) and the hero come
+ *   with their details (plot, genres, content rating, My List), all asked
+ *   for at once, so turning to a title shows it whole. With the banner
+ *   turned off ([HomeSources.banner]) none of it is asked for, nor the
+ *   libraries' Top Rated rows.
  * - After the first content, the details of the first three Continue
  *   Watching items are asked for ahead: that warms the server's keyframe
  *   index, so playing from Home can remux instead of transcoding
@@ -127,6 +145,8 @@ data class HomeProfile(
 class HomeViewModel(
     private val sources: HomeSources,
     private val compute: CoroutineDispatcher = Dispatchers.Default,
+    /** The day it is, as days since 1970: which top rated titles the banner features changes with it. */
+    private val day: () -> Long = { LocalDate.now().toEpochDay() },
 ) : ViewModel() {
     private val pulled = MutableStateFlow(false)
     private val focused = MutableStateFlow<ItemSummary?>(null)
@@ -137,15 +157,54 @@ class HomeViewModel(
     /** Messages to show once (toasts). */
     val messages: Flow<HomeMessage> = messageChannel.receiveAsFlow()
 
+    /**
+     * The movie and show libraries' Top Rated rows, for the banner: each
+     * library's Recommended rows, which its page shows too, so they are
+     * kept. Nothing until they come, and nothing from a library that
+     * doesn't answer: Home never waits for them.
+     */
+    @Volatile
+    private var lastTopRated: List<ItemSummary> = emptyList()
+
+    private val libraryTopRated: Flow<List<ItemSummary>> = flow { emitAll(sources.libraries.libraries()) }
+        .map { load -> load.valueOrNull.orEmpty().filter { it.kind == LibraryKind.Movies || it.kind == LibraryKind.Shows }.map { it.id }.take(TOP_RATED_LIBRARIES) }
+        .distinctUntilChanged()
+        .flatMapLatest { ids ->
+            if (ids.isEmpty()) return@flatMapLatest flowOf(emptyList())
+            val rows = ids.map { id ->
+                flow { emitAll(sources.hubs.library(id)) }
+                    .map { load -> load.valueOrNull?.hubs?.firstOrNull { it.key == TOP_RATED_PREFIX + id }?.items.orEmpty() }
+                    .catch { emit(emptyList()) }
+                    .onStart { emit(emptyList()) }
+            }
+            combine(rows) { lists -> lists.flatMap { it } }
+        }
+        // What came last time stands until this time's answer: Home collected again (the app back in
+        // front) doesn't show the newest alone for a moment and then the mix again.
+        .onEach { lastTopRated = it }
+        .onStart { emit(lastTopRated) }
+        .distinctUntilChanged()
+
+    private val banner: Flow<Boolean> = flow { emitAll(sources.banner) }.distinctUntilChanged()
+
+    /** [libraryTopRated] while the banner is on; nothing, and no request, while it is off. */
+    private val topRated: Flow<Pair<Boolean, List<ItemSummary>>> =
+        banner.flatMapLatest { on -> if (on) libraryTopRated.map { true to it } else flowOf(false to emptyList()) }
+
     /** What the repositories hold, worked out once for [state] and [status]. */
     private val loaded: SharedFlow<HomeLoad> = combine(
-        flow { emitAll(sources.hubs.home()) },
-        flow { emitAll(sources.libraries.libraries()) },
-        flow { emitAll(sources.scans) }.map { it.isNotEmpty() }.distinctUntilChanged().onEach(::scanning),
-        flow { emitAll(sources.session) }.map { it?.issuer.orEmpty() }.distinctUntilChanged(),
-    ) { hubs, libraries, scanning, origin ->
-        val state = homeState(hubs, libraries, scanning, origin)
-        HomeLoad(state, homeStatus(hubs, state))
+        combine(
+            flow { emitAll(sources.hubs.home()) },
+            flow { emitAll(sources.libraries.libraries()) },
+            flow { emitAll(sources.scans) }.map { it.isNotEmpty() }.distinctUntilChanged().onEach(::scanning),
+            flow { emitAll(sources.session) }.map { it?.issuer.orEmpty() }.distinctUntilChanged(),
+            // Made again when the language shown changes: the hero's runtime and episode numbers are written in it.
+            AppLanguage.shown,
+        ) { hubs, libraries, scanning, origin, _ -> HomeHeld(hubs, libraries, scanning, origin) },
+        topRated,
+    ) { held, (banner, rated) ->
+        val state = homeState(held.hubs, held.libraries, held.scanning, held.origin, rated, day(), banner)
+        HomeLoad(state, homeStatus(held.hubs, state))
     }
         .flowOn(compute)
         .shareIn(viewModelScope, SharingStarted.WhileSubscribed(), replay = 1)
@@ -154,7 +213,7 @@ class HomeViewModel(
         .map { it.state }
         // An answer the same as the one before (the server asked again on coming back) goes no further.
         .distinctUntilChanged()
-        .withHeroDetails()
+        .withDetails()
         .distinctUntilChanged()
         .onEach(::prefetchContinueWatching)
         .flowOn(compute)
@@ -170,7 +229,7 @@ class HomeViewModel(
     val refreshing: StateFlow<Boolean> = pulled.asStateFlow()
 
     /** What the TV's info block shows: the item focus rests on, with its details once they are in. */
-    val info: StateFlow<HomeInfo?> = focused
+    val info: StateFlow<HomeInfo?> = combine(focused, AppLanguage.shown) { item, _ -> item }
         .flatMapLatest { item ->
             if (item == null) {
                 flowOf(null)
@@ -281,27 +340,38 @@ class HomeViewModel(
         }
     }
 
-    /**
-     * The hero's details as they come in. Details already seen are kept, so
-     * a new answer for the rows never draws the hero without them for a
-     * moment.
-     */
-    private fun Flow<HomeState>.withHeroDetails(): Flow<HomeState> {
-        var known: ItemDetail? = null
-        return flatMapLatest { state ->
-            val hero = (state as? HomeState.Ready)?.hero ?: return@flatMapLatest flowOf(state)
-            val id = hero.item.id
-            flow {
-                known?.takeIf { it.id == id }?.let { emit(state.copy(hero = homeInfo(hero.item, it))) } ?: emit(state)
-                emitAll(
-                    flow { emitAll(sources.items.detail(id)) }
-                        .mapNotNull { it.valueOrNull }
-                        .map { detail ->
-                            known = detail
-                            state.copy(hero = homeInfo(hero.item, detail))
-                        },
-                )
+    /** Puts [item] on My List, or takes it off; the banner, the rows and the item's page follow at once. */
+    fun setInList(item: ItemSummary, inList: Boolean) {
+        viewModelScope.launch(compute) {
+            try {
+                if (inList) sources.watchlist.add(item.id) else sources.watchlist.remove(item.id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                messageChannel.send(HomeMessage.Failed(e))
             }
+        }
+    }
+
+    /**
+     * The hero's and the banner's details as they come in, each title's
+     * on its own. Details already seen are kept, so a new answer for the
+     * rows never draws them without for a moment.
+     */
+    private fun Flow<HomeState>.withDetails(): Flow<HomeState> {
+        val known = HashMap<Long, ItemDetail>()
+        return flatMapLatest { state ->
+            if (state !is HomeState.Ready) return@flatMapLatest flowOf(state)
+            val ids = (listOfNotNull(state.hero?.item?.id) + state.featured.map { it.info.item.id }).distinct()
+            if (ids.isEmpty()) return@flatMapLatest flowOf(state)
+            val details = ids.map { id ->
+                flow { emitAll(sources.items.detail(id)) }
+                    .mapNotNull { it.valueOrNull }
+                    .onEach { known[id] = it }
+                    .map<ItemDetail, ItemDetail?> { it }
+                    .onStart { emit(known[id]) }
+            }
+            combine(details) { found -> state.withDetails(found.filterNotNull().associateBy { it.id }) }
         }
     }
 
@@ -328,19 +398,29 @@ class HomeViewModel(
 
         /** Continue Watching items whose details are asked for once Home shows. */
         const val PREFETCHED = 3
+
+        /** The libraries whose Top Rated rows the banner draws on: the first few, a request each. */
+        private const val TOP_RATED_LIBRARIES = 6
+
+        /** A library's Top Rated row's key, before the library's id. */
+        private const val TOP_RATED_PREFIX = "top_rated:"
     }
 }
 
 /**
  * Home from what the repositories hold: the rows when there are some, an
  * empty state when there are none, a skeleton or an error only when
- * nothing was saved.
+ * nothing was saved. [topRated] and [day] are the banner's ([featuredOf]);
+ * without the [banner], Home has no hero and features nothing.
  */
 fun homeState(
     hubs: Loadable<Hubs>,
     libraries: Loadable<List<Library>>,
     scanning: Boolean,
     origin: String,
+    topRated: List<ItemSummary> = emptyList(),
+    day: Long = 0,
+    banner: Boolean = true,
 ): HomeState {
     val libs = libraries.valueOrNull
     val value = hubs.valueOrNull
@@ -353,7 +433,13 @@ fun homeState(
         if (libs != null && libs.isEmpty()) return HomeState.NoLibraries
         return HomeState.Empty(scanning || libs.orEmpty().any { it.scanning })
     }
-    return HomeState.Ready(origin = origin, rows = rows, hero = heroOf(rows)?.let { homeInfo(it, null) })
+    return HomeState.Ready(
+        origin = origin,
+        rows = rows,
+        hero = if (banner) heroOf(rows)?.let { homeInfo(it, null) } else null,
+        featured = if (banner) featuredOf(rows, topRated, day).map { Featured(homeInfo(it.item, null), featuredLabel(it, libs)) } else emptyList(),
+        banner = banner,
+    )
 }
 
 /**
@@ -373,6 +459,9 @@ fun homeStatus(hubs: Loadable<Hubs>, state: HomeState): Loadable<Unit>? {
 
 /** Home as the repositories hold it: what it shows, and whether that is the server's answer. */
 private data class HomeLoad(val state: HomeState, val status: Loadable<Unit>?)
+
+/** What Home's own answers hold, before the banner's top rated titles join them. */
+private data class HomeHeld(val hubs: Loadable<Hubs>, val libraries: Loadable<List<Library>>, val scanning: Boolean, val origin: String)
 
 /** [url] as the API gave it ("/api/users/2/avatar?v=1") on the server at [origin]. */
 internal fun absolute(url: String, origin: String): String = when {

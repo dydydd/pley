@@ -125,10 +125,18 @@ internal fun ItemScreen(itemId: Long) {
     }
 }
 
-/** The page, with its downloads (phones and tablets) for Download and the episodes' buttons. */
+/**
+ * The page, with its [downloads] (phones and tablets) for Download and the
+ * episodes' buttons: the app's own, or a test's.
+ */
 @Composable
-internal fun ItemPageContent(page: ItemPage, model: ItemViewModel, navigator: Navigator) {
-    CompositionLocalProvider(LocalItemDownloads provides rememberItemDownloads()) {
+internal fun ItemPageContent(
+    page: ItemPage,
+    model: ItemViewModel,
+    navigator: Navigator,
+    downloads: ItemDownloads? = rememberItemDownloads(),
+) {
+    CompositionLocalProvider(LocalItemDownloads provides downloads) {
         ItemPageBody(page, model, navigator)
     }
 }
@@ -146,7 +154,8 @@ private fun ItemPageBody(page: ItemPage, model: ItemViewModel, navigator: Naviga
         related = stringResource(R.string.item_more_like_this),
         season = page.context?.seasonTitle?.let { stringResource(R.string.item_more_episodes, it) } ?: stringResource(R.string.item_episodes),
     )
-    val rows = remember(page, titles) { phoneRows(page, titles) }
+    val resources = LocalResources.current
+    val rows = remember(page, titles, resources) { phoneRows(page, titles, resources) }
     // What requests say of it, read once the page has drawn.
     val request by model.request.collectAsStateWithLifecycle()
     // The sections keep clear of the bars and the cutout at the sides, as the rows do.

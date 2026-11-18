@@ -200,7 +200,7 @@ class Asking:
             return self.cant(self.summary_error)
         if s.get("enabled") and s.get("sign_in_again") == "requests":
             # Signed in before the add-on could ask: that alone shows.
-            self.entry(T("sign_in_to_ask"), {"route": "sign_in"}, "DefaultUser.png", folder=False, plot=T("sign_in_to_ask_body"), label2=T("sign_in_again"))
+            self.entry(T("sign_in_to_ask"), {"route": "sign_in"}, "DefaultUser.png", folder=False, label2=T("sign_in_again"))
             return self.end()
         if not requests.discovers(s) and not requests.lists(s):
             # Turned off since its entry showed.
@@ -378,7 +378,7 @@ class Asking:
         heading = heading_of(detail)
         kind = detail["kind"]
         if main == "sign_in":
-            if dialog.yesno(T("sign_in_to_ask"), T("sign_in_to_ask_body"), nolabel=T("cancel"), yeslabel=T("sign_in_again")):
+            if dialog.yesno(T("sign_in_to_ask"), "", nolabel=T("cancel"), yeslabel=T("sign_in_again")):
                 self.route_sign_in()
         elif main == "restricted":
             dialog.ok(heading, detail.get("restriction") or "")
@@ -507,7 +507,7 @@ class Asking:
             tag.setSeason(season.get("number") or 0)
             if season.get("air_date"):
                 tag.setPremiered(season["air_date"])
-            count = words.plural(season["episodes"], "episode") if season.get("episodes") else ""
+            count = kodi.count("episodes", season["episodes"]) if season.get("episodes") else ""
             tag.setPlot(plot(line, "" if count == line else count, T("tmdb_credit")))
             tag.setProductionCode(line)
             url = self.url(route="title", kind="show", tmdb=detail["tmdb_id"], season=season.get("number") or 0)
@@ -670,7 +670,7 @@ class Asking:
             who = names.get(chosen.get("user_id") or "", T("everyone"))
             self.entry(who, dict(here, pick="user_id"), "DefaultActor.png", folder=False, label2=heading, top=True)
         typed = chosen.get("q")
-        self.entry(T("search"), dict(here, pick="q"), "DefaultAddonsSearch.png", folder=False, label2="“%s”" % typed if typed else heading, top=True)
+        self.entry(T("search"), dict(here, pick="q"), "DefaultAddonsSearch.png", folder=False, label2=T("quoted") % typed if typed else heading, top=True)
 
     def route_request_filter(self) -> None:
         """One of Requests' filters changed (its dialog), and the list shown

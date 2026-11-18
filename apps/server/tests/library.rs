@@ -70,6 +70,23 @@ async fn libraries_are_checked_when_created_and_changed() {
 }
 
 #[tokio::test]
+async fn a_metadata_only_scan_leaves_the_folders_alone() {
+    let app = TestApp::new().await;
+    let admin = app.setup_admin().await;
+    app.media_file("movies/Alien (1979).mkv", 1024);
+    let movies = app.library(&admin, "Movies", "movies", "movies").await;
+    app.media_file("movies/Brazil (1985).mkv", 1024);
+    // Fetching metadata doesn't walk the folders: Brazil waits for a scan.
+    app.state.scanner.enqueue_metadata(movies);
+    app.wait_for_scans().await;
+    let listed = format!("/api/libraries/{movies}/items");
+    assert_eq!(titles(&app.get(&listed, &admin).await.body["items"]), ["Alien"]);
+    app.state.scanner.enqueue_files(movies);
+    app.wait_for_scans().await;
+    assert_eq!(titles(&app.get(&listed, &admin).await.body["items"]), ["Alien", "Brazil"]);
+}
+
+#[tokio::test]
 async fn moving_and_deleting_a_library() {
     let app = TestApp::new().await;
     let admin = app.setup_admin().await;
@@ -146,14 +163,14 @@ async fn libraries_are_listed_in_the_order_administrators_choose() {
     assert_eq!(theirs.status, StatusCode::FORBIDDEN, "only administrators choose it");
     assert_eq!(library_names(&app, &admin).await, ["Music", "TV", "Movies"]);
 
-    // Everyone sees that order, with only the libraries they may open, and
-    // so do the home page's rows of each library.
+    // Everyone sees that order, with only the libraries they may open. Home
+    // keeps the order administrators give its rows.
     assert_eq!(library_names(&app, &bob).await, ["Music", "TV", "Movies"]);
     let (kid, _) = app.user(&admin, "kid", json!({"all_libraries": false, "library_ids": [movies, music]})).await;
     assert_eq!(library_names(&app, &kid).await, ["Music", "Movies"]);
-    let rows = ["Recently Added in Music", "Recently Added in TV", "Recently Added in Movies"];
+    let rows = ["Recently Added in TV", "Recently Added in Movies", "Recently Added in Music"];
     assert_eq!(titles(&app.get("/api/hubs/home", &admin).await.body["hubs"]), rows);
-    assert_eq!(titles(&app.get("/api/hubs/home", &kid).await.body["hubs"]), [rows[0], rows[2]]);
+    assert_eq!(titles(&app.get("/api/hubs/home", &kid).await.body["hubs"]), [rows[1], rows[2]]);
 
     // New libraries still go last; a deleted one leaves the others in place.
     app.media_file("anime/Akira (1988).mkv", 1024);
@@ -194,7 +211,8 @@ async fn each_profile_may_list_its_libraries_in_its_own_order() {
     let (kid, kid_id) = app.user(&admin, "kid", json!({"all_libraries": false, "library_ids": [movies, music]})).await;
 
     // An app with the play scope sorts its profile's libraries: theirs
-    // alone, on every list (the libraries, Home's rows, Jellyfin's views).
+    // alone, on every list (the libraries, Jellyfin's views). Home's rows
+    // keep the order administrators give them.
     let (app_token, _) = app.app_token(bob_id, "library play").await;
     let mut events = app.state.events.subscribe();
     let mine = app.put("/api/me/libraries/order", &app_token, json!({"ids": [music, movies, tv]})).await;
@@ -202,7 +220,7 @@ async fn each_profile_may_list_its_libraries_in_its_own_order() {
     assert_eq!(names(&mine.body), ["Music", "Movies", "TV"], "the answer is the new order");
     assert_eq!(library_names(&app, &bob).await, ["Music", "Movies", "TV"]);
     assert_eq!(library_names(&app, &admin).await, ["TV", "Movies", "Music"], "others keep the shared order");
-    let rows = ["Recently Added in Music", "Recently Added in Movies", "Recently Added in TV"];
+    let rows = ["Recently Added in TV", "Recently Added in Movies", "Recently Added in Music"];
     assert_eq!(titles(&app.get("/api/hubs/home", &bob).await.body["hubs"]), rows);
     let shared = app.get("/api/libraries?order=shared", &bob).await;
     assert_eq!(names(&shared.body), ["TV", "Movies", "Music"], "the shared order, asked for");
@@ -283,6 +301,37 @@ async fn folders_that_go_offline_keep_their_items() {
     app.media_file("local/Dune (2021).mkv", 1024);
     std::fs::remove_file(app.media.path().join("local/Casablanca (1942).mkv")).unwrap();
     assert_eq!(rescan().await, ["Alien", "Brazil", "Dune"]);
+}
+
+#[tokio::test]
+async fn copies_of_a_film_in_two_folders_are_versions_of_one_movie() {
+    let app = TestApp::new().await;
+    let admin = app.setup_admin().await;
+    // The HD copy's folder still has the year the film had when it came;
+    // its file has been renamed since.
+    app.media_file("hd/300 (2006)/300 (2007) Remux-1080p.mkv", 1024);
+    app.media_file("uhd/300 (2007)/300 (2007) Bluray-2160p.mkv", 1024);
+    app.media_file("hd/Blade Runner (1982)/Blade Runner (1982) {edition-Theatrical}.mkv", 1024);
+    app.media_file("uhd/Blade Runner (1982)/Blade Runner (1982) {edition-Final Cut}.mkv", 1024);
+    let paths = [app.media_path("hd"), app.media_path("uhd")];
+    let created = app.post("/api/libraries", &admin, json!({"name": "Movies", "kind": "movies", "paths": paths})).await;
+    let lib = created.body["id"].as_i64().unwrap();
+    app.wait_for_scans().await;
+
+    let items = app.get(&format!("/api/libraries/{lib}/items"), &admin).await.body["items"].clone();
+    assert_eq!(titles(&items), ["300", "Blade Runner"]);
+    let id = |n: usize| items[n]["id"].as_i64().unwrap();
+    assert_eq!(editions(&app, &admin, id(0)).await, [Value::Null, Value::Null]);
+    assert_eq!(editions(&app, &admin, id(1)).await, [json!("Final Cut"), json!("Theatrical")]);
+}
+
+/// The editions of an item's versions, sorted.
+async fn editions(app: &TestApp, token: &str, item: i64) -> Vec<Value> {
+    let item = app.get(&format!("/api/items/{item}"), token).await;
+    let mut editions: Vec<Value> =
+        item.body["files"].as_array().unwrap().iter().map(|f| f["edition"].clone()).collect();
+    editions.sort_by_key(|e| e.to_string());
+    editions
 }
 
 /// Languages of the sidecar subtitles of an item's first file.

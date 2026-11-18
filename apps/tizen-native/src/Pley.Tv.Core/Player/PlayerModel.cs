@@ -28,6 +28,10 @@ namespace Pley.Tv.Core.Player;
 /// /api/items/{id}/streams, the audio only when picked.</item>
 /// <item><b>Markers, Up Next, the sleep timer, speed</b>, and a session the server stopped: it says
 /// so and plays no more.</item>
+/// <item><b>The remote</b>, on another of the profile's devices (docs/API.md, "Remote control"):
+/// play, pause, seek and skip, next when something can come next, as Android's, and the audio,
+/// subtitles and quality through the panels' own path; each reported at once and toasted, without
+/// the controls (<see cref="Obey"/>), every report saying which tracks play and which quality is picked.</item>
 /// </list>
 /// Automatic plays the original: the steps down and up of the Android app's AutoQuality aren't
 /// ported, and a slow server is offered a lower quality instead. The UI thread only; the engine's
@@ -91,10 +95,16 @@ public sealed class PlayerModel : IDisposable
     /// <summary>The person named the audio (the request, or the panel): saved choices carry it.</summary>
     bool audioPicked;
     MediaStream? subtitle;
+    /// <summary>The tracks the session playing plays, which its reports say: those chosen, once they play.</summary>
+    PlayingTracks playingTracks = new PlayingTracks(null, -1);
+    /// <summary>The remote changed a track with a new session: that session reports as it begins, so the remote sees it.</summary>
+    bool reportBegun;
     /// <summary>The quality chosen: the panel's or the remembered one, Automatic included.</summary>
     QualityPreset picked = Qualities.Automatic;
     /// <summary>What plays: the original or a transcode; the original while Automatic is chosen.</summary>
     QualityPreset quality = Qualities.Original;
+    /// <summary>The server converts no video, as its last play answer had it: only the original is offered, and plays.</summary>
+    bool originalOnly;
     IReadOnlyList<Marker> markers = new Marker[0];
     /// <summary>The mode a Dolby Vision guard asked for, for this item's later sessions too.</summary>
     string? guardMode;
@@ -102,6 +112,8 @@ public sealed class PlayerModel : IDisposable
     bool picturesUnavailable;
 
     PlaybackInfo? info;
+    /// <summary>The session whose failure is being dealt with: the TV's player can say one failure twice.</summary>
+    PlaybackInfo? failed;
     bool sessionEnded = true;
     /// <summary>Bumped by every new start: what an older one finds when it resumes is no longer its own.</summary>
     int generation;
@@ -157,7 +169,7 @@ public sealed class PlayerModel : IDisposable
         pressedAt = scheduler.Elapsed;
         offsets = new SubtitleOffsets(source.Storage, () => source.ProfileId);
         presenter = new SubtitlePresenter(scheduler, source.Subtitles, LivePositionMs, () => offset, () => State.Value.Speed, () => Notice(SessionText.SubtitlesFailed),
-            source.PictureSubtitles, PicturesFailed, source.Local);
+            source.PictureSubtitles, PicturesFailed, source.Local, source.PictureSubtitlesPart);
         sleep = new SleepTimer(scheduler, ItemLeftMs, () => item?.Id, OnSleep);
         sleep.State.Changed += s => Update(st => st with { Sleep = s });
         lastPositionMs = request.StartMs;
@@ -174,7 +186,7 @@ public sealed class PlayerModel : IDisposable
     /// <summary>The picture subtitles showing now (PGS, VobSub, DVB), at the playhead moved by the offset; null when none. The screen draws them.</summary>
     public Signal<PictureFrame?> Picture => presenter.Picture;
 
-    /// <summary>A message for the top right: the playback's notices, a transcode it chose, a slow server, the CAPTIONS key.</summary>
+    /// <summary>A message for the top right: the playback's notices, a transcode it chose, a slow server, the CAPTIONS key, the remote.</summary>
     public event Action<PlayerToast>? Toast;
 
     /// <summary>The engine, once the item's details came.</summary>
@@ -205,7 +217,9 @@ public sealed class PlayerModel : IDisposable
         ArmTick();
         unsubscribe = source.OnEvent(e =>
         {
-            if (e.Type == "session_stopped" && info != null && e.SessionId == info.SessionId) StopByServer(e.Message, e.ByAdmin ?? true);
+            if (info == null || e.SessionId != info.SessionId) return;
+            if (e.Type == "session_stopped") StopByServer(e.Message, e.ByAdmin ?? true);
+            else if (e.Type == "player_command") Obey(e);
         });
         _ = PrepareFirst();
     }
@@ -236,7 +250,7 @@ public sealed class PlayerModel : IDisposable
         }
     }
 
-    static ClientCaps? ReadCaps(IReadOnlyDictionary<string, object?> report)
+    internal static ClientCaps? ReadCaps(IReadOnlyDictionary<string, object?> report)
     {
         try
         {
@@ -259,7 +273,7 @@ public sealed class PlayerModel : IDisposable
         audio = PlaybackPlan.InitialAudio(chosen, request.AudioIndex);
         audioPicked = audio != null;
         subtitle = PlaybackPlan.InitialSubtitle(chosen, request.SubtitleIndex);
-        picked = Qualities.Choose(chosen, source.Settings.Quality);
+        picked = originalOnly ? Qualities.Original : Qualities.Choose(chosen, source.Settings.Quality);
         quality = picked.Automatic ? Qualities.Original : picked;
         offset = chosen != null ? offsets.Get(source.Server, chosen.Id) : 0;
         markers = Markers.ForFile(detail, chosen?.Id);
@@ -325,6 +339,7 @@ public sealed class PlayerModel : IDisposable
         if (EndSession(atMs)) await Ui(() => Task.WhenAny(reporter.Flush(), Task.Delay(TimeSpan.FromMilliseconds(EndWaitMs))));
         if (at != generation || closed) return;
         Reset(atMs);
+        if (at == restartedFor) startedAtMs = restartedFrom;
 
         // A lower quality is always a transcode; the original keeps a fallback's mode, or a guard's.
         var mode = !quality.Original ? "transcode" : recovery.FallbackMode ?? guardMode ?? quality.Mode;
@@ -383,18 +398,31 @@ public sealed class PlayerModel : IDisposable
         {
             // The TV's player can't send the token: an address without its own key won't play.
             Discard(started);
-            Fail("This server is too old to play on this TV: update it.", canRetry: false);
+            Fail(Strings.T("player.errors.serverTooOld"), canRetry: false);
             return;
         }
         info = started;
+        originalOnly = started.OriginalOnly;
+        if (originalOnly)
+        {
+            // Whatever was asked for, the original plays: the panel says so, and the quality kept stays for servers that convert.
+            picked = Qualities.Original;
+            quality = Qualities.Original;
+        }
         sessionEnded = false;
         live = null;
         // Automatic: the track the server chose plays, switched to by the engine in direct play.
         audio ??= PlaybackPlan.PlayedAudio(chosen, started.AudioIndex);
+        playingTracks = ChosenTracks();
         Update(s => s with { Method = SessionText.Method(started), Note = NoteNow(), CanPlayOriginal = CanPlayOriginal() });
         if (started.DurationMs > 0) SetClock(durationMs: started.DurationMs);
         PublishChoices();
         ArmProgress();
+        if (reportBegun)
+        {
+            reportBegun = false;
+            Report(wantPlay ? "playing" : "paused", atMs);
+        }
         RefreshDetails(force: false);
         if (engine == null) return;
         var video = PlaybackPlan.VideoStream(chosen);
@@ -419,7 +447,9 @@ public sealed class PlayerModel : IDisposable
     }
 
     Dictionary<string, object?> Body(long itemId, PlaybackPlan.Choices choices) =>
-        PlayRequests.Body(itemId, choices, source.ClientId, report ?? new Dictionary<string, object?>(), caps);
+        PlayRequests.Body(itemId, choices, source.ClientId, report ?? new Dictionary<string, object?>(), caps,
+            controls: Remote.VideoControls(item != null && NextUp.HasNext(item.Kind, current.Queue),
+                PlaybackPlan.AudioStreams(choices.File).Count, PlaybackPlan.SubtitleStreams(choices.File).Count, quality: !source.Local));
 
     /// <summary>Keyed playback addresses live under /api/media/ (docs/API.md, "Keyed URLs").</summary>
     internal static bool IsKeyed(string url)
@@ -447,7 +477,9 @@ public sealed class PlayerModel : IDisposable
         var itemId = item?.Id ?? current.ItemId;
         var duration = s.DurationMs > 0 ? s.DurationMs : (long?)null;
         var position = Math.Max(0, positionMs);
-        reporter.Send(() => source.Progress(itemId, position, duration, "stopped", s.SessionId));
+        var tracks = playingTracks;
+        var picks = PickedQuality();
+        reporter.Send(() => source.Progress(itemId, position, duration, "stopped", s.SessionId, tracks, picks));
         reporter.Send(() => source.StopPlayback(s.SessionId));
         return true;
     }
@@ -486,6 +518,11 @@ public sealed class PlayerModel : IDisposable
         var s = info;
         if (s == null || engine == null) return;
         ApplyAudio();
+        ApplySubtitle(s);
+    }
+
+    void ApplySubtitle(PlaybackInfo s)
+    {
         var sub = subtitle;
         if (sub == null)
         {
@@ -497,8 +534,28 @@ public sealed class PlayerModel : IDisposable
             var path = s.Subtitles.FirstOrDefault(t => t.Index == sub.Index)?.Url ?? PlaybackPlan.TextSubtitlesPath(s.FileId, sub.Index);
             presenter.Show(source.Url(path));
         }
-        else if (!s.BurnSubtitles && Sideload) presenter.ShowPictures(source.Url(PlaybackPlan.PictureSubtitlesPath(s.FileId, sub.Index)));
+        else if (!s.BurnSubtitles && Sideload)
+        {
+            var url = source.Url(PlaybackPlan.PictureSubtitlesPath(s.FileId, sub.Index));
+            // A new track's .mks (a film's is tens of MB) is asked for once the picture shows: asked
+            // for at once, it took the network and the CPUs from the video's first seconds, as the
+            // TV's player fills its buffer and starts decoding. One showing already stays.
+            picturesWaiting = !mediaShown && presenter.Showing != url;
+            if (picturesWaiting) presenter.Hide();
+            else presenter.ShowPictures(url);
+        }
         else presenter.Hide();
+    }
+
+    /// <summary>The picture track chosen waits for the picture (<see cref="ApplyTracks"/>).</summary>
+    bool picturesWaiting;
+
+    /// <summary>The picture shows: a picture track waiting for it is asked for now.</summary>
+    void PicturesNow()
+    {
+        if (!picturesWaiting) return;
+        picturesWaiting = false;
+        if (info is { } s && engine != null) ApplySubtitle(s);
     }
 
     /// <summary>
@@ -555,6 +612,8 @@ public sealed class PlayerModel : IDisposable
         e.Started += OnFirstFrame;
         e.PlayingChanged += OnPlaying;
         e.Failed += OnError;
+        e.RestartAt += OnRestartAsked;
+        e.Opened += OnOpened;
     }
 
     void Detach(IVideoEngine e)
@@ -563,7 +622,39 @@ public sealed class PlayerModel : IDisposable
         e.Started -= OnFirstFrame;
         e.PlayingChanged -= OnPlaying;
         e.Failed -= OnError;
+        e.RestartAt -= OnRestartAsked;
+        e.Opened -= OnOpened;
     }
+
+    /// <summary>Prepared: the audio chosen is switched to now, before it plays.</summary>
+    void OnOpened()
+    {
+        if (closed || engineReady) return;
+        engineReady = true;
+        ApplyAudio();
+    }
+
+    /// <summary>The engine can't go on from <paramref name="atMs"/> in the stream it has: a session there, as a seek after the end starts one.</summary>
+    void OnRestartAsked(long atMs)
+    {
+        if (closed || stopped) return;
+        HideUpNext();
+        lastPositionMs = atMs;
+        SetClock(positionMs: atMs);
+        // The session Restart starts next; its start can come before Restart returns.
+        restartedFor = generation + 1;
+        restartedFrom = startedAtMs;
+        Restart(atMs);
+    }
+
+    /// <summary>
+    /// The session the engine asked for (<see cref="OnRestartAsked"/>), and where playing started
+    /// before it: its end is weighed from there (<see cref="EndedShort"/>). Weighed from the new
+    /// session's start, a film whose file ends early ended "short" again where the engine opened
+    /// it, and fell back to a transcode instead of ending.
+    /// </summary>
+    int restartedFor = -1;
+    long restartedFrom;
 
     /// <summary>It plays again by itself (after waiting for data): the screen says so.</summary>
     void OnPlaying(bool playing)
@@ -591,6 +682,7 @@ public sealed class PlayerModel : IDisposable
                     engineReady = true;
                     ApplyAudio();
                 }
+                PicturesNow();
                 if (outage == null) Phase(engine?.Playing == true ? PlayerPhase.Playing : PlayerPhase.Paused);
                 break;
             case EngineStatus.Ended:
@@ -612,6 +704,7 @@ public sealed class PlayerModel : IDisposable
             pressedAt = null;
             Update(s => s with { FirstFrameMs = scheduler.Elapsed - from });
         }
+        PicturesNow();
         presenter.Refresh();
     }
 
@@ -625,6 +718,10 @@ public sealed class PlayerModel : IDisposable
             StopByServer(stop.Message, byAdmin: true);
             return;
         }
+        // Once a session: the TV's player can say one failure twice (its error, and the call it
+        // failed in), and each would start a session, the second a step further down the ladder.
+        if (failed == s) return;
+        failed = s;
         // A TV's player can't say why a request failed: the session's own answer tells a stop from the rest.
         if (error is EngineError.Http or EngineError.Network or EngineError.Playlist)
         {
@@ -682,6 +779,9 @@ public sealed class PlayerModel : IDisposable
                     else if (e is SessionStoppedException stop) StopByServer(stop.Note, byAdmin: true);
                     else Act(recovery.AfterServerCheck(null, starving), starving);
                 });
+                break;
+            // Not where there is none to choose.
+            case RecoveryAction.SuggestLowerQuality when originalOnly:
                 break;
             case RecoveryAction.SuggestLowerQuality:
                 Update(st => st with { SuggestLowerQuality = true, Note = SessionText.SlowServer });
@@ -863,15 +963,27 @@ public sealed class PlayerModel : IDisposable
         progressTimer = null;
     }
 
-    void Report(string state)
+    /// <summary>
+    /// Reports <paramref name="state"/> where the video is, or at <paramref name="atMs"/>: a seek the
+    /// engine may not have caught up with. With the tracks playing and the quality picked.
+    /// </summary>
+    void Report(string state, long? atMs = null)
     {
         var s = info;
         if (s == null || sessionEnded) return;
         var itemId = item?.Id ?? current.ItemId;
-        var position = Math.Max(0, LivePositionMs());
+        var position = Math.Max(0, atMs ?? LivePositionMs());
         var duration = s.DurationMs > 0 ? s.DurationMs : (long?)null;
-        reporter.Send(() => source.Progress(itemId, position, duration, state, s.SessionId));
+        var tracks = playingTracks;
+        var picks = PickedQuality();
+        reporter.Send(() => source.Progress(itemId, position, duration, state, s.SessionId, tracks, picks));
     }
+
+    /// <summary>The tracks chosen, by stream index (-1: no subtitles).</summary>
+    PlayingTracks ChosenTracks() => new PlayingTracks(audio?.Index, subtitle?.Index ?? -1);
+
+    /// <summary>The Quality menu's pick, by id ("auto", "original", "8m"…), which reports say for the remote; none for a file on a drive, which has no menu.</summary>
+    string? PickedQuality() => source.Local ? null : picked.Id;
 
     /// <summary>How long the item playing has left, for the sleep timer; null while unknown.</summary>
     long? ItemLeftMs()
@@ -908,7 +1020,9 @@ public sealed class PlayerModel : IDisposable
             ClearProgress();
             var itemId = item?.Id ?? current.ItemId;
             var duration = s.DurationMs > 0 ? s.DurationMs : (long?)null;
-            reporter.Send(() => source.Progress(itemId, Math.Max(0, position), duration, "stopped", s.SessionId));
+            var tracks = playingTracks;
+            var picks = PickedQuality();
+            reporter.Send(() => source.Progress(itemId, Math.Max(0, position), duration, "stopped", s.SessionId, tracks, picks));
         }
         EndOutage();
         seekReportTimer?.Dispose();
@@ -918,6 +1032,127 @@ public sealed class PlayerModel : IDisposable
         sleep.Cancel();
         engine?.Stop();
         Update(st => st with { Phase = PlayerPhase.Error(SessionText.Stopped(message, byAdmin), canRetry: false, PlayerText.StoppedTitle), SkipLabel = null, StoppedByServer = true });
+    }
+
+    // ---------------------------------------------------------------- the remote
+
+    /// <summary>
+    /// A command of the profile's remote for the session playing, as Android's player obeys it
+    /// (<see cref="Remote.Action"/>): a seek stays within the title, a skip goes from where it is
+    /// now, next plays what comes next (nothing at the end, and nothing said here), and a video
+    /// has no previous. What changed is reported at once, so the remote sees it: a pause reports
+    /// by itself, and a new item with its new session; a play or pause that finds it so already
+    /// says it again. A change is toasted for 2 s, as the CAPTIONS key's is ("Paused", "+30 s",
+    /// "Jumped to 12:34"), so those watching see what happened, and shows none of the controls,
+    /// which are for keys pressed here (Android TV's player); next toasts nothing, as the screen's
+    /// banner shows the next title as it begins.
+    /// </summary>
+    void Obey(ServerEvent command)
+    {
+        var s = info;
+        if (closed || stopped || s == null || sessionEnded || State.Value.Phase.Kind == PhaseKind.Error) return;
+        if (command.Command is "audio" or "subtitles")
+        {
+            ObeyTrack(s, command);
+            return;
+        }
+        if (command.Command == "quality")
+        {
+            ObeyQuality(s, command);
+            return;
+        }
+        var duration = Clock.Value.DurationMs;
+        var player = new RemotePlayer(RemoteKind.Video, s.SessionId, wantPlay, LivePositionMs(), duration > 0 ? duration : null,
+            item != null && NextUp.HasNext(item.Kind, current.Queue));
+        var action = Remote.Action(player, command);
+        switch (action.Act)
+        {
+            case RemoteAct.Play:
+                Play();
+                Report("playing");
+                Remark(PlayerText.PlayingToast);
+                break;
+            case RemoteAct.Pause:
+                Pause();
+                // Not the person's pause: the screen keeps no controls for it.
+                Update(s => s with { PausedByRemote = true });
+                Remark(PlayerText.PausedToast);
+                break;
+            case RemoteAct.None:
+                // Playing or paused already: said again, so a remote a little behind settles.
+                if (action.Report) Report(wantPlay ? "playing" : "paused");
+                break;
+            case RemoteAct.Seek:
+                SeekTo(action.PositionMs);
+                // A skip by the offset asked for, as the seek badge says it; a seek where it went.
+                Remark(command.Command == "skip" ? PlayerText.Badge(command.OffsetMs ?? 0) : PlayerText.JumpedToast(lastPositionMs));
+                // Seeking past the end starts a new session, which reports itself.
+                if (ended || info == null || sessionEnded) return;
+                seekReportTimer?.Dispose();
+                seekReportTimer = null;
+                Report(wantPlay ? "playing" : "paused", lastPositionMs);
+                break;
+            case RemoteAct.Next:
+                Advance(fromRemote: true);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// The remote's audio or subtitles (<see cref="Remote.Track"/>), through the panels' own path,
+    /// picks saved as theirs are. Switched in place, it reports at once; a new session (a stream's
+    /// audio, pictures to burn in) reports as it begins. A pick of what is chosen already says so
+    /// again. The track is toasted by the name its panel gives it.
+    /// </summary>
+    void ObeyTrack(PlaybackInfo s, ServerEvent command)
+    {
+        var player = new TrackPlayer(s.SessionId, PlaybackPlan.AudioStreams(file).Select(t => t.Index).ToList(),
+            PlaybackPlan.SubtitleStreams(file).Select(t => t.Index).ToList(), audio?.Index, subtitle?.Index ?? -1);
+        var action = Remote.Track(player, command);
+        if (action.Act == TrackAct.None)
+        {
+            if (action.Report) Report(wantPlay ? "playing" : "paused");
+            return;
+        }
+        var choices = action.Act == TrackAct.Audio ? State.Value.Audio : State.Value.Subtitles;
+        var label = choices.FirstOrDefault(t => t.Index == action.Index)?.Label;
+        // Set first: the new session may begin before the switch returns.
+        reportBegun = true;
+        var at = generation;
+        if (action.Act == TrackAct.Audio) SelectAudio(action.Index);
+        else SelectSubtitle(action.Index < 0 ? null : action.Index);
+        if (action.Index < 0) Remark(PlayerText.SubtitlesOffToast);
+        else if (label != null) Remark(action.Act == TrackAct.Audio ? PlayerText.AudioToast(label) : PlayerText.SubtitlesToast(label));
+        if (generation != at) return;
+        // Switched in place: no new session to say so.
+        reportBegun = false;
+        Report(wantPlay ? "playing" : "paused");
+    }
+
+    /// <summary>
+    /// The remote's quality (<see cref="Remote.Quality"/>), as picking it in the Quality panel does,
+    /// the pick kept for the next titles as the panel's is. A new session reports as it begins; a
+    /// pick that plays the same (Original and Automatic) reports at once, as does one picked already.
+    /// The pick is toasted by the name the panel gives it.
+    /// </summary>
+    void ObeyQuality(PlaybackInfo s, ServerEvent command)
+    {
+        var offered = source.Local ? new List<string>() : Qualities.Offered(file, originalOnly).Select(q => q.Id).ToList();
+        var action = Remote.Quality(new QualityPlayer(s.SessionId, offered, picked.Id), command);
+        if (action.Id == null)
+        {
+            if (action.Report) Report(wantPlay ? "playing" : "paused");
+            return;
+        }
+        var label = State.Value.Qualities.FirstOrDefault(q => q.Id == action.Id)?.Label;
+        // Set first: the new session may begin before the switch returns.
+        reportBegun = true;
+        var at = generation;
+        SelectQuality(action.Id);
+        if (label != null) Remark(PlayerText.QualityToast(label));
+        if (generation != at) return;
+        reportBegun = false;
+        Report(wantPlay ? "playing" : "paused");
     }
 
     // ---------------------------------------------------------------- commands
@@ -946,6 +1181,8 @@ public sealed class PlayerModel : IDisposable
         var was = wantPlay;
         wantPlay = play;
         if (play) sleep.Resumed();
+        // Playing again, whoever asked, ends the remote's pause.
+        if (play && State.Value.PausedByRemote) Update(s => s with { PausedByRemote = false });
         if (info == null || was == play) return;
         if (!play)
         {
@@ -1007,6 +1244,7 @@ public sealed class PlayerModel : IDisposable
             && engine.SelectAudio(ordinal, CheckedLanguage(chosen)))
         {
             QuietFrames();
+            playingTracks = playingTracks with { Audio = chosen.Index };
             return;
         }
         Restart(LivePositionMs());
@@ -1029,7 +1267,11 @@ public sealed class PlayerModel : IDisposable
         if (s == null) return;
         var burn = PlaybackPlan.IsImage(chosen) && !Sideload;
         if (burn != s.BurnSubtitles || (burn && s.SubtitleIndex != chosen?.Index)) Restart(LivePositionMs());
-        else ApplyTracks();
+        else
+        {
+            ApplyTracks();
+            playingTracks = playingTracks with { Subtitle = chosen?.Index ?? -1 };
+        }
     }
 
     /// <summary>
@@ -1098,7 +1340,7 @@ public sealed class PlayerModel : IDisposable
     public void SelectQuality(string id)
     {
         var wanted = Qualities.ByIdOrLabel(id);
-        var choice = Qualities.ForFile(file).FirstOrDefault(q => q.Id == wanted.Id);
+        var choice = Qualities.Offered(file, originalOnly).FirstOrDefault(q => q.Id == wanted.Id);
         if (choice == null || choice.Id == picked.Id) return;
         var before = quality;
         picked = choice;
@@ -1196,7 +1438,10 @@ public sealed class PlayerModel : IDisposable
     }
 
     /// <summary>What comes next, at once (Up Next's Play now, the Next button of an episode); says so when nothing does.</summary>
-    public void PlayNext()
+    public void PlayNext() => Advance(fromRemote: false);
+
+    /// <summary>What comes next plays; at the end, the screen says so, unless the remote asked (<paramref name="fromRemote"/>): whoever sent it is elsewhere.</summary>
+    void Advance(bool fromRemote)
     {
         if (closed || stopped) return;
         if (next != null)
@@ -1206,8 +1451,8 @@ public sealed class PlayerModel : IDisposable
         }
         LookUpNext(found =>
         {
-            if (found == null) Notice(current.Queue != null ? SessionText.LastInQueue : SessionText.LastEpisode);
-            else SwitchTo(found);
+            if (found != null) SwitchTo(found);
+            else if (!fromRemote) Notice(current.Queue != null ? SessionText.LastInQueue : SessionText.LastEpisode);
         });
     }
 
@@ -1446,7 +1691,8 @@ public sealed class PlayerModel : IDisposable
         // The speed is this title's: the next one plays at normal speed.
         if (State.Value.Speed != 1) engine?.SetSpeed(1);
         var was = State.Value;
-        State.Value = new PlayerState { ItemId = target.Id, Title = was.Title, Sleep = was.Sleep, Speeds = was.Speeds };
+        // The next title starts paused when this one is: the remote's pause stays the remote's.
+        State.Value = new PlayerState { ItemId = target.Id, Title = was.Title, Sleep = was.Sleep, Speeds = was.Speeds, PausedByRemote = was.PausedByRemote };
         SetClock(positionMs: request.StartMs, bufferedMs: 0);
         var at = NextGeneration();
         var prefetched = nextDetail?.Id == target.Id ? nextDetail : null;
@@ -1534,7 +1780,7 @@ public sealed class PlayerModel : IDisposable
         var automatic = picked.Automatic;
         var fileHint = Qualities.FileHint(chosenFile);
         // Nothing converts a file on a drive: it plays as it is.
-        var qualities = (source.Local ? new List<QualityPreset>() : Qualities.ForFile(chosenFile)).Select(p => new QualityChoice(
+        var qualities = (source.Local ? new List<QualityPreset>() : Qualities.Offered(chosenFile, originalOnly)).Select(p => new QualityChoice(
             p.Id,
             Label(p),
             p.Automatic ? (automatic && (auto != null || !quality.Original) ? SessionText.AutomaticNow(playing) : SessionText.AutomaticHint)
@@ -1590,9 +1836,13 @@ public sealed class PlayerModel : IDisposable
 
     void Notice(string text) => Say(new PlayerToast(text, PlayerText.ToastMs));
 
+    /// <summary>What the remote did, for as long as the CAPTIONS key's toast.</summary>
+    void Remark(string text) => Say(new PlayerToast(text, PlayerText.CaptionsToastMs));
+
     void Say(PlayerToast toast) => Toast?.Invoke(toast);
 
-    void Fail(string message, bool canRetry, string title = PlayerText.ErrorTitle) =>
+    /// <param name="title">The heading; "Can't play this item" without.</param>
+    void Fail(string message, bool canRetry, string? title = null) =>
         Update(s => s with { Phase = PlayerPhase.Error(message, canRetry, title), SkipLabel = null });
 
     void FailWith(Exception e)

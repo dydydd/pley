@@ -6,12 +6,13 @@
 
 use pley_base::Icon;
 use pley_core::format::{
-    card_subtitle, episode_label, format_runtime, format_time_left, is_in_progress, pluralize, progress_fraction,
-    quality_badges, unwatched_count,
+    card_subtitle, episode_label, format_runtime, format_time_left, is_in_progress, progress_fraction, quality_badges,
+    unwatched_count,
 };
 use pley_core::model::{Hub, ItemDetail, ItemKind, ItemSummary, Library, LibraryKind, LibrarySort};
+use pley_i18n::t;
 use pley_kit::TileKind;
-use pley_shell::{PlayRequest, Route};
+use pley_shell::{LibraryTab, PlayRequest, Route};
 
 /// A row's tiles (`rowShape`, `HomeState.kt:137-157`): Continue Watching wide, a music library's
 /// rows square, a row starting with an episode wide, of artists, albums or tracks square, the
@@ -44,10 +45,15 @@ pub fn see_all_sort(hub: &Hub) -> Option<LibrarySort> {
     }
 }
 
-/// Where a row's "See all" goes: its library, sorted as the row is. Only a library's own rows
-/// have one.
-pub fn see_all_of(hub: &Hub) -> Option<(i64, LibrarySort)> {
-    Some((hub.library_id?, see_all_sort(hub)?))
+/// Where a row's "See all" goes: the collection it shows, or the merged page of several
+/// libraries' same-titled ones; from a server before collections were rows, its library sorted
+/// as the row is. Continue Watching and My List have none.
+pub fn see_all_of(hub: &Hub) -> Option<Route> {
+    if let Some(route) = Route::of_collections(&hub.collection_ids) {
+        return Some(route);
+    }
+    let sort = see_all_sort(hub)?;
+    Some(Route::Library { id: hub.library_id?, tab: Some(LibraryTab::Library), sort: Some(sort) })
 }
 
 /// The hero (`heroOf`, `HomeState.kt:178-188`): the first title of Continue Watching, else the
@@ -159,7 +165,8 @@ pub struct HomeInfo {
     /// "58 min" for a title that plays; "3 seasons", "12 episodes" or an album's artist and year
     /// for the rest.
     pub runtime: String,
-    /// The critics' rating as the line writes it after its star ("7.4"); empty at 0.
+    /// The critics' rating as the line writes it after its star ("7.4", "7,4" in French); empty
+    /// at 0.
     pub rating: String,
     pub badges: Vec<String>,
     pub summary: String,
@@ -200,7 +207,7 @@ pub fn home_info(item: &ItemSummary, facts: Option<&Facts>) -> HomeInfo {
         year: item.year.or(facts.and_then(|f| f.year)).map(|y| y.to_string()).unwrap_or_default(),
         content_rating: facts.and_then(|f| f.content_rating.clone()).unwrap_or_default(),
         runtime: if says_year { String::new() } else { runtime },
-        rating: rating.map(|r| format!("{r:.1}")).unwrap_or_default(),
+        rating: rating.map(|r| pley_i18n::decimal(r, 1)).unwrap_or_default(),
         badges: facts.map(|f| f.badges.clone()).unwrap_or_default(),
         summary: summary.trim().to_string(),
         time_left: if in_progress {
@@ -408,12 +415,12 @@ pub fn marked(item: &ItemSummary, watched: bool) -> ItemSummary {
 pub fn library_count_line(library: &Library, scanning: bool) -> String {
     let n = library.item_count;
     let base = match library.kind {
-        LibraryKind::Movies => pluralize(n, "movie", None),
-        LibraryKind::Shows => pluralize(n, "show", None),
-        LibraryKind::Music => pluralize(n, "artist", None),
-        LibraryKind::Unknown => pluralize(n, "item", None),
+        LibraryKind::Movies => t!("library.count.movies", count = n),
+        LibraryKind::Shows => t!("library.count.shows", count = n),
+        LibraryKind::Music => t!("library.count.artists", count = n),
+        LibraryKind::Unknown => t!("library.count.items", count = n),
     };
-    if scanning { format!("{base} · Scanning…") } else { base }
+    if scanning { format!("{base} · {}", t!("library.libraries.scanning")) } else { base }
 }
 
 /// A library's icon by kind, as the rail draws it (`kindIcon`).
@@ -471,7 +478,7 @@ mod tests {
     }
 
     fn hub(key: &str, library: Option<i64>, items: Vec<ItemSummary>) -> Hub {
-        Hub { key: key.into(), title: key.into(), library_id: library, items }
+        Hub { key: key.into(), title: key.into(), library_id: library, items, ..Hub::default() }
     }
 
     fn library(id: i64, kind: LibraryKind, count: i64) -> Library {
@@ -493,12 +500,25 @@ mod tests {
 
     #[test]
     fn see_all_goes_to_the_rows_library_in_the_rows_order() {
-        assert_eq!(see_all_of(&hub("recently_added:1", Some(1), vec![])), Some((1, LibrarySort::Added)));
-        assert_eq!(see_all_of(&hub("recently_released:2", Some(2), vec![])), Some((2, LibrarySort::Release)));
-        assert_eq!(see_all_of(&hub("top_rated:2", Some(2), vec![])), Some((2, LibrarySort::Rating)));
+        let library = |id, sort| Some(Route::Library { id, tab: Some(LibraryTab::Library), sort: Some(sort) });
+        assert_eq!(see_all_of(&hub("recently_added:1", Some(1), vec![])), library(1, LibrarySort::Added));
+        assert_eq!(see_all_of(&hub("recently_released:2", Some(2), vec![])), library(2, LibrarySort::Release));
+        assert_eq!(see_all_of(&hub("top_rated:2", Some(2), vec![])), library(2, LibrarySort::Rating));
         assert_eq!(see_all_of(&hub("continue_watching", None, vec![])), None);
         assert_eq!(see_all_of(&hub("my_list", None, vec![])), None);
         assert_eq!(see_all_of(&hub("recently_added", None, vec![])), None);
+    }
+
+    #[test]
+    fn see_all_opens_the_rows_collection_or_the_merged_page() {
+        let mut one = hub("recently_added:1", Some(1), vec![]);
+        one.collection_ids = vec![7];
+        assert_eq!(see_all_of(&one), Some(Route::Collection { id: 7 }));
+        let mut merged = hub("collections:7,9", None, vec![]);
+        merged.collection_ids = vec![7, 9];
+        assert_eq!(see_all_of(&merged), Some(Route::MergedCollection { ids: vec![7, 9] }));
+        // A collection's row without a library sort has nowhere else to go.
+        assert_eq!(see_all_of(&hub("collection:7", Some(1), vec![])), None);
     }
 
     #[test]
@@ -682,6 +702,26 @@ mod tests {
         assert_eq!(library_count_line(&library(3, LibraryKind::Music, 1), false), "1 artist");
         assert_eq!(library_count_line(&library(4, LibraryKind::Unknown, 12), false), "12 items");
         assert_eq!(kind_icon(LibraryKind::Shows), Icon::Tv);
+    }
+
+    #[test]
+    fn libraries_count_in_the_language_shown() {
+        use pley_i18n::{Language, with_language};
+        let line = |l: Library, scanning| library_count_line(&l, scanning);
+        with_language(Language::Fr, || {
+            assert_eq!(line(library(1, LibraryKind::Movies, 1500), false), "1\u{a0}500 films");
+            assert_eq!(line(library(2, LibraryKind::Shows, 1), true), "1 série · Analyse…");
+            assert_eq!(line(library(3, LibraryKind::Music, 0), false), "0 artiste");
+            assert_eq!(line(library(4, LibraryKind::Movies, 2_000_000), false), "2\u{a0}000\u{a0}000 de films");
+        });
+        with_language(Language::Es, || {
+            assert_eq!(line(library(1, LibraryKind::Movies, 1500), false), "1500 películas");
+            assert_eq!(line(library(2, LibraryKind::Shows, 12_000), true), "12.000 series · Analizando…");
+            assert_eq!(line(library(4, LibraryKind::Unknown, 1), false), "1 elemento");
+        });
+        // The critics' rating as the language writes a decimal.
+        let movie = ItemSummary { rating: Some(7.94), ..item(9, ItemKind::Movie, "M") };
+        assert_eq!(with_language(Language::Fr, || home_info(&movie, None).rating), "7,9");
     }
 
     #[test]

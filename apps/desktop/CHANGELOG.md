@@ -8,6 +8,40 @@ describes how they are made.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-14
+
+### Added
+
+- Notifications about requests are in French and Spanish too, in the
+  language the server's pages are in.
+
+### Fixed
+
+- A notification that a show's specials are ready says they "are" ready.
+
+On a Mac:
+
+- A download from a server with video transcoding turned off comes as the
+  original file, for a player such as IINA or VLC.
+
+## [0.1.4] - 2026-11-06
+
+### Added
+
+- The app's own pages, choosing a server and the downloads it keeps, are in
+  French and Spanish as well as English, in the computer's language: their
+  messages too, such as why a server didn't answer or a download failed.
+
+## [0.1.3] - 2026-11-05
+
+### Added
+
+- The app takes casts: your phone's or browser's Play on… lists it as
+  "Pley for Windows", "Pley for Mac" or "Pley for Linux", and a title,
+  music, a playlist or a Live TV channel sent to it plays there, with the
+  audio and subtitles picked on the page, and says where it came from. Its
+  remote leaves itself out.
+
 ## [0.1.2] - 2026-11-02
 
 ### Security
@@ -65,7 +99,10 @@ describes how they are made.
 - First release with a version of its own (builds before it carried 0.2.0,
   the version every app shared).
 
-[Unreleased]: https://github.com/pley-media-server/pley/compare/release-2026-11-02.2...HEAD
+[Unreleased]: https://github.com/pley-media-server/pley/compare/release-2026-11-14...HEAD
+[0.1.5]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-14
+[0.1.4]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-06
+[0.1.3]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-05
 [0.1.2]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-02.2
 [0.1.1]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-01
 [0.1.0]: https://github.com/pley-media-server/pley/tree/94985f768f39f4a230060cb47af9498ee8779ddf

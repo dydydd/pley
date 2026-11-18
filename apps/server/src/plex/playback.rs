@@ -8,19 +8,20 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use axum::Json;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderValue, header};
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use parking_lot::Mutex;
 use pley_transcoder_api::{JobStatus, VideoMode};
 
 use super::meta::{self, Detail, Sections};
 use super::{ClientInfo, Node, Params, PlexAdmin, PlexError, PlexResult, PlexUser};
-use crate::auth::{AuthUser, SourceIp, compatibility};
+use crate::auth::{AuthUser, CurrentToken, SourceIp, compatibility};
 use crate::catalog::{self, ItemRow};
 use crate::events::ServerEvent;
 use crate::library::list_libraries;
 use crate::library::sidecar::EXTERNAL_INDEX_BASE;
-use crate::playback::{Caps, Method, PlaybackMode, PlaybackRequest, Session};
+use crate::oauth::clients::clean_name;
+use crate::playback::{Api, Caps, Controls, Method, PlaybackMode, PlaybackRequest, Session};
 use crate::state::AppState;
 
 /// Plex client details of a server's sessions (by pley session id) and the
@@ -131,14 +132,16 @@ pub async fn part_file(
 ) -> PlexResult<Response> {
     let file = catalog::file(&state.db, id).await?.ok_or(PlexError::NotFound)?;
     catalog::item(&state.db, user.id, file.item_id).await?.ok_or(PlexError::NotFound)?;
-    let mut response = crate::api::playback::serve_library_file(&file.path, request.method(), request.headers())
-        .await
-        .map_err(PlexError::from)?;
+    // A `.strm` file's media, through Pley, named as what it is.
+    let file = crate::strm::ready(&state, file).await.map_err(PlexError::from)?;
+    let served = if file.is_strm() {
+        crate::strm::serve(&state, &file, request.method(), request.headers()).await
+    } else {
+        crate::api::playback::serve_library_file(&file.path, request.method(), request.headers()).await
+    };
+    let mut response = served.map_err(PlexError::from)?;
     if params.flag("download") {
-        let name = std::path::Path::new(&file.path)
-            .file_name()
-            .map(|n| n.to_string_lossy().replace('"', ""))
-            .unwrap_or_else(|| "file".into());
+        let name = crate::strm::download_name(&file).replace('"', "");
         if let Ok(value) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
             response.headers_mut().insert(header::CONTENT_DISPOSITION, value);
         }
@@ -188,9 +191,10 @@ pub async fn stream_file(
         .ok_or(PlexError::NotFound)?;
         return Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], bytes).into_response());
     }
+    let input = crate::strm::input(&state, &file).await.map_err(PlexError::from)?;
     let text = state
         .transcoder
-        .subtitles(&file.path, Some(index))
+        .subtitles(&input, Some(index))
         .await
         .map_err(|e| PlexError::from(crate::error::AppError::from(e)))?;
     Ok(([(header::CONTENT_TYPE, "text/vtt; charset=utf-8")], text).into_response())
@@ -253,7 +257,7 @@ async fn report(
                 });
             }
             if changed {
-                state.events.send(ServerEvent::SessionsChanged);
+                state.events.send(ServerEvent::SessionsChanged { user_id: session.user_id });
             }
         }
         None if play_state != "stopped" && !stopped => {
@@ -261,7 +265,7 @@ async fn report(
                 end_sessions(state, state.sessions.take_client_sessions(user.id, client_id));
             }
             if let Some(file) = catalog::files_for_item(&state.db, row.id).await?.into_iter().next() {
-                let session = state.sessions.insert(Session::new(
+                let mut session = Session::new(
                     user.id,
                     user.username.clone(),
                     client.identifier.clone(),
@@ -272,10 +276,17 @@ async fn report(
                     None,
                     None,
                     time_ms,
-                ));
+                );
+                session.api = Api::Plex;
+                session.device = device.and_then(clean_name);
+                session.on_device(
+                    crate::api::remote::device_id_of(user, None),
+                    crate::api::remote::device_kind_of(None, user, None),
+                );
+                let session = state.sessions.insert(session);
                 session.update(time_ms, play_state);
                 remember(state, &session.id, client);
-                state.events.send(ServerEvent::SessionsChanged);
+                state.events.send(ServerEvent::SessionsChanged { user_id: session.user_id });
             }
         }
         // Its player has stopped as well: a play after this shows up again.
@@ -303,7 +314,7 @@ fn end_sessions(state: &AppState, sessions: Vec<Arc<Session>>) {
             }
         });
     }
-    state.events.send(ServerEvent::SessionsChanged);
+    state.events.sessions_changed(sessions.iter().map(|s| s.user_id));
 }
 
 fn play_state(params: &Params) -> &'static str {
@@ -478,7 +489,7 @@ pub async fn sessions(State(state): State<AppState>, PlexUser(user): PlexUser) -
             extras.get(&row.id),
             &files,
             &sections,
-            Detail { guids: true, full: true, media: true, markers: false },
+            Detail { guids: true, full: true, media: true, markers: false, labels: false },
         );
         let (key, client) = session_key(&state, &session.id);
         let play = session.play.lock().clone();
@@ -636,12 +647,22 @@ pub async fn universal_start(
         client_id,
         keep_previous: false,
         keyed_urls: false,
+        // Plex clients only ever hear of a stop.
+        controls: Controls::new(),
+        device_name: client.device_name.clone().or_else(|| client.product.clone()),
+        device_kind: None,
         hdr_transcodes: false,
         fmp4_segments: false,
         download: false,
+        copy_video_only: false,
+        stream_only: true,
+        device_id: None,
+        api: Api::Plex,
     };
     let Json(info) =
-        crate::api::playback::start(State(state.clone()), user, Json(request)).await.map_err(PlexError::from)?;
+        crate::api::playback::start(State(state.clone()), user, HeaderMap::new(), CurrentToken(None), Json(request))
+            .await
+            .map_err(PlexError::from)?;
     remember(&state, &info.session_id, &client);
 
     let audio_only = row.kind == "track";
@@ -714,7 +735,7 @@ pub async fn universal_decision(
         extras.get(&row.id),
         &files[..files.len().min(1)],
         &Sections::new(&libraries),
-        Detail { guids: false, full: true, media: true, markers: false },
+        Detail { guids: false, full: true, media: true, markers: false, labels: false },
     );
     mark_decision(&mut node, Method::Transcode);
     Ok(Node::container()

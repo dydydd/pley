@@ -1,6 +1,7 @@
 import Foundation
 import os
 import PleyCommon
+import PleyModel
 
 /// How much of an answer the app reads; past it the request is cancelled
 /// and fails with `.tooLarge`.
@@ -31,7 +32,8 @@ public struct HTTPResponse: Sendable {
 }
 
 /// The app's one way onto the network: ephemeral URLSessions without
-/// cookies or a cache, the app's User-Agent on every request, the
+/// cookies or a cache, the app's User-Agent and the language shown
+/// (`Accept-Language`) on every request, the
 /// system's certificate authorities only, the redirect policy, Pley's
 /// plain http rule (`ConnectionGate`) and a limit on every answer.
 ///
@@ -47,7 +49,14 @@ public final class HTTPTransport: Sendable {
     fileprivate let directSession: URLSession
 
     /// `userAgent` is `UserAgent.current`, read on the main actor.
-    public init(userAgent: String, gate: ConnectionGate = ConnectionGate()) {
+    public convenience init(userAgent: String, gate: ConnectionGate = ConnectionGate()) {
+        self.init(userAgent: userAgent, gate: gate, requestTimeout: 20)
+    }
+
+    /// `requestTimeout`: how long a request waits for more of its answer when
+    /// it doesn't say itself (`URLRequest.timeoutInterval`); the app's is 20
+    /// seconds, a test's shorter.
+    package init(userAgent: String, gate: ConnectionGate, requestTimeout: TimeInterval) {
         self.userAgent = userAgent
         self.gate = gate
         let configuration = URLSessionConfiguration.ephemeral
@@ -58,7 +67,7 @@ public final class HTTPTransport: Sendable {
         configuration.urlCredentialStorage = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.httpAdditionalHeaders = ["User-Agent": userAgent, "Accept": "application/json"]
-        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForRequest = requestTimeout
         configuration.waitsForConnectivity = false
         session = URLSession(configuration: configuration)
         // An empty proxy dictionary, unlike the default nil, means no proxy at all.
@@ -86,13 +95,15 @@ public final class HTTPTransport: Sendable {
                          onLeak: (@Sendable () async -> Void)? = nil) async throws -> HTTPResponse {
         guard let url = request.url, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = url.host(percentEncoded: false), !host.isEmpty
-        else { throw PleyError.unreachable("that isn't a server address") }
+        else { throw PleyError.unreachable(PleyError.notAnAddress) }
         let plainHTTP = scheme == "http"
         if gated && plainHTTP { try await gate.check(host: host) }
         try Task.checkCancellation()
 
         var request = request
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        // The server writes some words itself (Home's rows) in the language asked for.
+        request.setValue(ShownLanguage.language.code, forHTTPHeaderField: "Accept-Language")
         request.httpShouldHandleCookies = false
         let method = request.httpMethod ?? "GET"
         let path = Log.path(url.path(percentEncoded: true))
@@ -158,13 +169,15 @@ extension HTTPTransport {
                             read: @escaping @Sendable (Data) -> Bool) async throws -> StreamedResponse {
         guard let url = request.url, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = url.host(percentEncoded: false), !host.isEmpty
-        else { throw PleyError.unreachable("that isn't a server address") }
+        else { throw PleyError.unreachable(PleyError.notAnAddress) }
         let plainHTTP = scheme == "http"
         if plainHTTP { try await gate.check(host: host) }
         try Task.checkCancellation()
 
         var request = request
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        // The server writes some words itself (Home's rows) in the language asked for.
+        request.setValue(ShownLanguage.language.code, forHTTPHeaderField: "Accept-Language")
         request.httpShouldHandleCookies = false
         let path = Log.path(url.path(percentEncoded: true))
         let observer = StreamObserver(redirects: redirects, opened: opened, read: read)

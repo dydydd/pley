@@ -2,6 +2,7 @@ package app.pley.android.screens
 
 import app.pley.android.model.DiscoverList
 import app.pley.android.model.TitleKind
+import app.pley.android.screens.admin.AdminSection
 import kotlinx.serialization.descriptors.elementNames
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -21,6 +22,7 @@ class PleyKeyTest {
         PleyKey.Library(3, LibraryTab.Recommended),
         PleyKey.Collections(3),
         PleyKey.Collection(12),
+        PleyKey.MergedCollection(listOf(12, 34)),
         PleyKey.Item(4567),
         PleyKey.Person(89),
         PleyKey.Artist(700),
@@ -39,6 +41,10 @@ class PleyKeyTest {
         PleyKey.Downloads,
         PleyKey.Settings,
         PleyKey.Diagnostics,
+        PleyKey.ManageServer,
+        PleyKey.Manage(AdminSection.Dashboard),
+        PleyKey.Manage(AdminSection.Users, "7"),
+        PleyKey.Manage(AdminSection.Libraries, PleyKey.Manage.NEW),
         PleyKey.NowPlaying,
         PleyKey.Drive(),
         PleyKey.Drive("/storage/1A2B-3C4D/Films"),

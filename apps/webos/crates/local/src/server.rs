@@ -26,10 +26,10 @@ use pley_core::caps::{container_of, direct_range_shown, video_of};
 use pley_core::http::{Method, encode_component};
 use pley_core::model::{
     AddSubtitle, BitrateAnswer, ClientCaps, CollectionDetail, ItemDetail, ItemKind, ItemSummary, LiveChannel,
-    LiveChannelPage, LiveGroups, LiveGuide, LivePlan, LiveWatching, MediaFile, NetworkAnswer, NetworkReport,
-    PlaybackInfo, PlaybackMethod, PlaybackMode, PlaybackRequest, PlaylistDetail, ProgressReport, ServerInfo,
-    SessionStatus, SpeedSample, StreamChoice, StreamKind, SubtitleResult, SubtitleTrack, TrickplayInfo, UserState,
-    WatchRequest,
+    LiveChannelPage, LiveGroups, LiveGuide, LivePlan, LiveWatching, MediaFile, MergedCollection, NetworkAnswer,
+    NetworkReport, PlaybackInfo, PlaybackMethod, PlaybackMode, PlaybackRequest, PlaylistDetail, ProgressReport,
+    ServerInfo, SessionStatus, SpeedSample, StreamChoice, StreamKind, SubtitleResult, SubtitleTrack, TrickplayInfo,
+    UserState, WatchRequest,
 };
 use pley_core::{ApiError, CapsReport, Store};
 use pley_player::env::CapsProbe;
@@ -48,9 +48,10 @@ pub const EXTRACT_WAIT: Duration = Duration::from_secs(1);
 const SERVER: &str = "local";
 /// The address of a text track of the file's own: `embedded:3`.
 const EMBEDDED: &str = "embedded:";
-/// Why a conversion can't be had (409 `local_file`).
-pub const NOTHING_CONVERTS: &str =
-    "This TV can't play this file as it is, and a file on a drive has no server to convert it";
+/// Why a conversion can't be had (409 `local_file`), in the language shown: the player shows it.
+pub fn nothing_converts() -> &'static str {
+    pley_i18n::t!("player.errors.driveCantConvert")
+}
 
 /// What the file says of itself, read once.
 struct Described {
@@ -388,6 +389,10 @@ impl PlayerServer for LocalServer {
         Err(absent())
     }
 
+    fn merged_collection(&self, _ids: &[i64]) -> Result<MergedCollection, ApiError> {
+        Err(absent())
+    }
+
     /// The file as it is, from where it was asked: what a server answers for
     /// direct play. A conversion asked for (the TV refused the file) can't be had.
     fn play(&self, req: &PlaybackRequest) -> Result<PlaybackInfo, ApiError> {
@@ -395,7 +400,7 @@ impl PlayerServer for LocalServer {
             return Err(ApiError::Status {
                 status: 409,
                 code: "local_file".into(),
-                message: NOTHING_CONVERTS.into(),
+                message: nothing_converts().into(),
                 body: None,
             });
         }

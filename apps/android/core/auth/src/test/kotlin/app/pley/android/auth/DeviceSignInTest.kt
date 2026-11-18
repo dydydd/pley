@@ -1,5 +1,6 @@
 package app.pley.android.auth
 
+import app.pley.android.common.UiText
 import java.io.IOException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.toList
@@ -122,7 +123,8 @@ class DeviceSignInTest {
     @Test
     fun aCodeAsksForTheScopesOfRequestsWhereTheServerListsThem() = runTest {
         // Phones' and TVs' alike: both ask for movies and shows, and approve them on an administrator's account.
-        scopes = listOf("library", "play", "playlists", "profiles", "requests", "approvals", "admin")
+        // Never managing the server, which the server never allows with a code.
+        scopes = listOf("library", "play", "playlists", "profiles", "requests", "approvals", "admin", "server")
         grant().start(server.url("/").toString())
         assertEquals("library play playlists profiles requests approvals", codeRequests.single()["scope"])
     }
@@ -154,11 +156,11 @@ class DeviceSignInTest {
     @Test
     fun serversWithoutCodesSaySo() = runTest {
         deviceEndpoint = null
-        assertEquals(NO_CODES, runCatching { grant().start(server.url("/").toString()) }.exceptionOrNull()?.message)
+        assertEquals(NO_CODES, textOf(runCatching { grant().start(server.url("/").toString()) }.exceptionOrNull()))
         // The endpoint without the grant to collect the tokens isn't enough.
         deviceEndpoint = "/api/oauth/device"
         grantTypes = listOf("authorization_code", "refresh_token")
-        assertEquals(NO_CODES, runCatching { grant().start(server.url("/").toString()) }.exceptionOrNull()?.message)
+        assertEquals(NO_CODES, textOf(runCatching { grant().start(server.url("/").toString()) }.exceptionOrNull()))
         assertTrue(codeRequests.isEmpty())
     }
 
@@ -166,7 +168,7 @@ class DeviceSignInTest {
     fun theDeviceEndpointMustBeOnTheServer() = runTest {
         deviceEndpoint = "http://elsewhere.example.com/api/oauth/device"
         val error = runCatching { grant().start(server.url("/").toString()) }.exceptionOrNull()
-        assertEquals("this server sends apps to another address to sign in: Pley doesn't", error?.message)
+        assertEquals(UiText.res(R.string.auth_other_endpoint), textOf(error))
         assertTrue(codeRequests.isEmpty())
         val metadata = ServerMetadata.parse(
             """{"issuer":"http://nas:7539","authorization_endpoint":"http://nas:7539/oauth/authorize",
@@ -282,7 +284,7 @@ class DeviceSignInTest {
         val grant = grant()
         val code = grant.start(server.url("/").toString())
         pollAnswer = { MockResponse().setBody(tokenAnswer("pley_at_tv", "pley_rt_tv", scope = "library play playlists profiles admin")) }
-        assertEquals(DevicePoll.Failed(WIDER_SCOPE_MESSAGE), grant.poll(code).toList().last())
+        assertEquals(DevicePoll.Failed(WIDER_SCOPE), grant.poll(code).toList().last())
         // The new grant is ended; the sign-in before is left as it was.
         assertEquals(listOf(mapOf("token" to "pley_rt_tv", "client_id" to CLIENT_ID)), revokes)
         assertEquals("pley_rt_old", store.load(issuer)!!.refreshToken)
@@ -293,10 +295,10 @@ class DeviceSignInTest {
         val grant = grant()
         val code = grant.start(server.url("/").toString())
         pollAnswer = { error("invalid_grant") }
-        assertEquals(listOf(DevicePoll.Waiting, DevicePoll.Failed("this code doesn't work anymore: get a new one")), grant.poll(code).toList())
+        assertEquals(listOf(DevicePoll.Waiting, DevicePoll.Failed(UiText.res(R.string.auth_code_used))), grant.poll(code).toList())
         polls.clear()
         pollAnswer = { MockResponse().setResponseCode(400).setBody("""{"error":"invalid_client","error_description":"only Pley's own apps"}""") }
-        assertEquals(DevicePoll.Failed("only Pley's own apps"), grant.poll(code).toList().last())
+        assertEquals(DevicePoll.Failed(UiText.raw("only Pley's own apps")), grant.poll(code).toList().last())
         assertEquals(1, polls.size)
     }
 
@@ -305,7 +307,7 @@ class DeviceSignInTest {
         val error = assertThrows(AuthException::class.java) {
             kotlinx.coroutines.runBlocking { grant().start("http://pley.example.com:7539") }
         }
-        assertEquals(UNENCRYPTED, error.message)
+        assertEquals(UNENCRYPTED, error.text)
         assertEquals(0, server.requestCount)
     }
 }

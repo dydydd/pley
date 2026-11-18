@@ -12,8 +12,10 @@ Pick the guide for where Pley will run:
 | macOS | The release archive and a launch agent | [below](#macos-launchd) |
 
 Whichever you pick, Pley prints a link with a one-time setup code when it
-first starts. Open it, create the administrator account and add your
-libraries. Until then, anyone with the code can claim the server.
+first starts. Open it and create the administrator account; setup then asks
+about your server, and whether to bring over a Plex server or add your
+libraries ([First start](../docs/CONFIGURATION.md#first-start)). Until the
+account exists, anyone with the code can claim the server.
 
 ## What Pley needs
 
@@ -30,10 +32,10 @@ libraries. Until then, anyone with the code can claim the server.
   | Windows | `%LOCALAPPDATA%\pley` (`%ProgramData%\pley` for the service) |
   | Docker | `/config` in the container |
 
-- **FFmpeg and ffprobe.** The Docker image and the Windows installer bring
-  their own, and the Synology package uses SynoCommunity's; elsewhere Pley
-  takes them from `PATH`, or `--ffmpeg` and `--ffprobe`. The FFmpeg build
-  decides what Pley can do with a GPU.
+- **FFmpeg and ffprobe**, version 9 recommended. The Docker image and the
+  Windows installer bring FFmpeg 9, and the Synology package uses
+  SynoCommunity's; elsewhere Pley takes them from `PATH`, or `--ffmpeg` and
+  `--ffprobe`. The FFmpeg build decides what Pley can do with a GPU.
 
 Release archives (Linux, macOS, Windows; x86_64 and arm64) hold `pley` and
 `pley-transcoder`, which must stay in the same folder. `pley --help` and
@@ -44,8 +46,8 @@ whose glibc is too old for the other one, such as DSM.
 ## Docker
 
 The image is `ghcr.io/pley-media-server/pley` (amd64 and arm64; `:latest`, or a
-version such as `:0.0.1`). It holds Pley, its transcoder, Debian 13's
-FFmpeg 7.1 and the GPU drivers for Intel, AMD and NVIDIA.
+version such as `:0.0.1`). It holds Pley, its transcoder, FFmpeg 9 and the
+GPU drivers for Intel, AMD and NVIDIA.
 [docker/README.md](docker/README.md) sets it up with Docker Compose, locked
 down, behind a reverse proxy. Without Compose:
 
@@ -59,6 +61,11 @@ docker logs pley    # the setup link
 
 - **Intel or AMD GPU:** add `--device /dev/dri`. **NVIDIA:** add
   `--gpus all` (needs the NVIDIA Container Toolkit).
+- **Intel's Quick Sync** works in the image on 11th-generation Core
+  (Tiger Lake) and later, Arc and the N100 family: Debian 13 has only
+  Intel's current runtime (`libmfx-gen1.2`). Older Intel graphics transcode
+  with VAAPI instead, the same video engine through another driver
+  interface.
 - Pley runs as user and group 1000 (`-e PUID=… -e PGID=…` change them) and
   gives that user the config folder on its first start. Libraries are
   folders under `/media`.
@@ -78,18 +85,20 @@ journalctl -u pley    # the setup link, and the log
 
 Give the `pley` user read access to your media.
 
-**FFmpeg.** The distribution's works (Debian 13's has NVENC, VAAPI, Quick
-Sync and libplacebo). Elsewhere, [jellyfin-ffmpeg](https://repo.jellyfin.org)
-is a good choice: it isn't on `PATH`, so set `Environment=PLEY_FFMPEG=…` and
-`PLEY_FFPROBE=…` in the unit.
+**FFmpeg.** FFmpeg 9 is recommended. 8 works too; 7.1 (Debian 13's)
+works without a few speed-ups. For one not on `PATH`, such as
+[jellyfin-ffmpeg](https://repo.jellyfin.org), set `Environment=PLEY_FFMPEG=…`
+and `PLEY_FFPROBE=…` in the unit.
 
 **Hardware transcoding:**
 
 - **Intel and AMD:** install the VAAPI driver (`intel-media-va-driver-non-free`
   or `mesa-va-drivers`) and `mesa-vulkan-drivers` (for HDR tone mapping),
   then uncomment `SupplementaryGroups=render video` in the unit. With several
-  GPUs Pley takes the first Intel or AMD one;
-  `Environment=PLEY_VAAPI_DEVICE=/dev/dri/renderD129` picks another.
+  GPUs Pley takes the first Intel or AMD one (Quick Sync the first Intel
+  one); `Environment=PLEY_VAAPI_DEVICE=/dev/dri/renderD129` picks another.
+  Quick Sync also needs Intel's runtime: `libmfx-gen1.2` for 11th-generation
+  Core and later, `libmfx1` (where the distribution still has it) for older.
 - **NVIDIA:** the proprietary driver is enough. If NVENC works by hand but
   not from the service, load `nvidia-uvm` at boot.
 
@@ -113,9 +122,10 @@ burn-in). Until releases are signed, downloaded binaries may need
 
 `pley-server-<version>-windows-<arch>-setup.exe` installs Pley with FFmpeg
 and a firewall rule, as a locked-down service or in the notification area:
-[windows/README.md](windows/README.md). Or extract the archive, install
-FFmpeg (`winget install Gyan.FFmpeg`, whose "full" build has NVENC, QSV, AMF
-and Vulkan tone mapping) and run `pley.exe`.
+[windows/README.md](windows/README.md); its FFmpeg is pley-ffmpeg's
+Windows build, with the Docker image's patches for Intel GPUs. Or extract
+the archive, install FFmpeg (`winget install Gyan.FFmpeg`, whose "full"
+build has NVENC, QSV, AMF and Vulkan tone mapping) and run `pley.exe`.
 
 ## Synology
 
@@ -142,13 +152,11 @@ containers and SSH sessions never show it; `--no-tray` turns it off.
 
 ## Firewall and remote access
 
-- **TCP 7539** is the only port that must be reachable. The Plex-compatible
-  API answers there too, unless you give it a port of its own (Plex's is
-  32400; `--plex-bind 0.0.0.0:32400`, or **Settings → Network**). The
-  Jellyfin-compatible API is off until you turn it on in **Settings →
-  Network**, where it answers on this port or one of its own (Jellyfin's is
-  8096; `--jellyfin-bind 0.0.0.0:8096` on the command line). A port of its
-  own needs letting in too: [Ports and firewalls](../docs/COMPATIBILITY.md#ports-and-firewalls)
+- **TCP 7539** is the only port that must be reachable. The Plex- and
+  Jellyfin-compatible APIs answer there too, unless you give one a port of
+  its own (Plex's is 32400, Jellyfin's 8096; `--plex-bind 0.0.0.0:32400`,
+  `--jellyfin-bind 0.0.0.0:8096`, or **Settings → Network**, which also
+  turns them off). A port of its own needs letting in too: [Ports and firewalls](../docs/COMPATIBILITY.md#ports-and-firewalls)
   says how for Docker, Unraid, Synology and the rest.
 - **UDP 7539** lets the apps find servers on the local network, and
   **UDP 5353** (mDNS) lets Apple's find them by Bonjour, once it's turned
@@ -156,6 +164,21 @@ containers and SSH sessions never show it; `--no-tray` turns it off.
   announces Pley on. Allow them, or type the server's address in the app.
   A container is found only on the host's network (`--network host`, or
   Unraid's `br0`).
+- **Google Cast devices** (Chromecasts, Google TVs), once casting to them
+  is turned on in **Settings → Network**, are found by mDNS too, and the
+  server connects to them on **TCP 8009**, and once to each on
+  **TCP 8008** to learn its model; they fetch the stream from the web
+  port, so Pley lists them, and looks for them, only while that port
+  listens on the local network, not on this computer alone behind a
+  reverse proxy. A container
+  sees them only on the host's network, as above, and not while discovery
+  is off.
+- **AirPlay devices** (Apple TVs, TVs with AirPlay 2) are found the same
+  way. The server connects to them on the port they announce (**TCP
+  7000** on an Apple TV) and on the port each names for its events, and the
+  device asks the server's clock over **UDP**, on a port the server
+  picks for each cast: a firewall on the server must let the local
+  network reach it.
 - **From outside your network**, put Pley behind a reverse proxy with TLS
   (Caddy, nginx, Traefik). Docker publishes ports around host firewalls:
   with a proxy on the same computer, publish Pley on `127.0.0.1` only.
@@ -177,6 +200,9 @@ an app used, the app refuses the server. So a reverse proxy must:
   proxy on the same computer, the local network or a Docker network;
 - not buffer responses (live updates are server-sent events, and video
   streams as it is read);
+- wait more than 3 minutes for an answer: a cast to a Google Cast or
+  AirPlay device answers once the device plays, which can take that long,
+  and nginx's default of 60 seconds answers `504` first;
 - accept uploads of up to 25 MB (artwork).
 
 **Caddy** does all of it by default:
@@ -211,6 +237,7 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_buffering off;
+        proxy_read_timeout 240s;
     }
 }
 ```

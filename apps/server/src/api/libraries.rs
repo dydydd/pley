@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,6 +14,7 @@ use crate::auth::{AdminUser, AuthUser};
 use crate::catalog::{self, ItemSummary, LibraryQuery, ME_CTE, SortKey, VISIBLE, VISIBLE_ITEMS};
 use crate::error::{ApiResult, AppError};
 use crate::events::ServerEvent;
+use crate::i18n;
 use crate::library::{LibraryKind, LibraryRow, get_library, set_order};
 use crate::state::AppState;
 use crate::util::now;
@@ -28,14 +29,23 @@ pub struct LibraryDto {
     created_at: i64,
     scanned_at: Option<i64>,
     scanning: bool,
+    /// A Plex import is bringing Plex's labels to it: profiles with labels
+    /// they never see don't see it until then.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    labels_pending: bool,
 }
 
 /// `lib` as `viewer` sees it: its count leaves out the titles their age
-/// limit hides (administrators and profiles without one see them all).
+/// limit and label rules hide (administrators and profiles without either
+/// see them all).
 async fn to_dto(state: &AppState, lib: &LibraryRow, viewer: Option<&AuthUser>) -> ApiResult<LibraryDto> {
     let kind = lib.kind().top_level_kind();
+    let limited = match viewer {
+        Some(user) => crate::access::limited(&state.db, user).await?,
+        None => false,
+    };
     let count: i64 = match viewer {
-        Some(user) if !user.is_admin && user.max_age.is_some() => {
+        Some(user) if limited => {
             let sql = format!(
                 "{ME_CTE} SELECT COUNT(*) FROM {VISIBLE_ITEMS} WHERE {VISIBLE} AND i.library_id = ? AND i.kind = ?"
             );
@@ -63,6 +73,7 @@ async fn to_dto(state: &AppState, lib: &LibraryRow, viewer: Option<&AuthUser>) -
         created_at: lib.created_at,
         scanned_at: lib.scanned_at,
         scanning: state.scanner.is_scanning(lib.id),
+        labels_pending: lib.labels_pending,
     })
 }
 
@@ -113,9 +124,10 @@ pub async fn get(State(state): State<AppState>, user: AuthUser, Path(id): Path<i
     Ok(Json(for_user(&user, to_dto(&state, &lib, Some(&user)).await?)))
 }
 
-/// Apps and non-administrators aren't told where the server keeps its media.
+/// Apps and non-administrators aren't told where the server keeps its media,
+/// except pley's own apps that manage the server, which change it.
 fn for_user(user: &AuthUser, mut dto: LibraryDto) -> LibraryDto {
-    if user.app.is_some() || !user.is_admin {
+    if !user.administers() {
         dto.paths.clear();
     }
     dto
@@ -128,7 +140,7 @@ pub struct CreateLibrary {
     paths: Vec<String>,
 }
 
-fn validate_paths(paths: &[String]) -> ApiResult<Vec<String>> {
+pub(crate) fn validate_paths(paths: &[String]) -> ApiResult<Vec<String>> {
     let mut out = Vec::new();
     for raw in paths {
         let p = raw.trim();
@@ -159,34 +171,85 @@ pub async fn create(
     _admin: AdminUser,
     Json(body): Json<CreateLibrary>,
 ) -> ApiResult<(StatusCode, Json<LibraryDto>)> {
-    let name = body.name.trim();
+    let id = add(&state, &body.name, body.kind, &body.paths).await?;
+    let lib = library_or_404(&state, id).await?;
+    Ok((StatusCode::CREATED, Json(to_dto(&state, &lib, None).await?)))
+}
+
+/// Adds a library and starts its first scan.
+pub(crate) async fn add(state: &AppState, name: &str, kind: LibraryKind, paths: &[String]) -> ApiResult<i64> {
+    let id = insert(state, name, kind, paths, false).await?;
+    state.scanner.enqueue_new(id);
+    announce(state).await;
+    Ok(id)
+}
+
+/// Adds a library whose first scan finds its files only: the Plex import
+/// asks for the metadata once Plex's matches are in. Plex's labels are on
+/// their way to it from the start.
+pub(crate) async fn add_files_first(
+    state: &AppState,
+    name: &str,
+    kind: LibraryKind,
+    paths: &[String],
+) -> ApiResult<i64> {
+    let id = insert(state, name, kind, paths, true).await?;
+    state.scanner.enqueue_files(id);
+    announce(state).await;
+    Ok(id)
+}
+
+async fn announce(state: &AppState) {
+    state.watcher.reload().await;
+    state.events.send(ServerEvent::LibrariesChanged);
+}
+
+async fn insert(
+    state: &AppState,
+    name: &str,
+    kind: LibraryKind,
+    paths: &[String],
+    labels_pending: bool,
+) -> ApiResult<i64> {
+    let name = name.trim();
     if name.is_empty() || name.chars().count() > 100 {
         return Err(AppError::bad_request("library name must be 1-100 characters"));
     }
-    let paths = validate_paths(&body.paths)?;
+    let paths = validate_paths(paths)?;
     // Listed last, with an id no library has had (migrations/0021).
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO libraries (id, name, kind, paths, created_at, position)
-         VALUES ((SELECT last + 1 FROM library_ids), ?, ?, ?, ?, (SELECT COALESCE(MAX(position) + 1, 0) FROM libraries))
+        "INSERT INTO libraries (id, name, kind, paths, created_at, position, labels_pending)
+         VALUES ((SELECT last + 1 FROM library_ids), ?, ?, ?, ?, (SELECT COALESCE(MAX(position) + 1, 0) FROM libraries), ?)
          RETURNING id",
     )
     .bind(name)
-    .bind(body.kind.as_str())
+    .bind(kind.as_str())
     .bind(serde_json::to_string(&paths).map_err(|e| AppError::Internal(e.into()))?)
     .bind(now())
+    .bind(labels_pending)
     .fetch_one(&state.db.write)
     .await?;
-    state.scanner.enqueue(id, false);
-    state.watcher.reload().await;
-    state.events.send(ServerEvent::LibrariesChanged);
-    let lib = library_or_404(&state, id).await?;
-    Ok((StatusCode::CREATED, Json(to_dto(&state, &lib, None).await?)))
+    // Its rows: a movie or TV library's collections Pley makes, or a music
+    // or audiobook library's Recently Added, last on Home.
+    if kind.is_audio() {
+        let mut conn = state.db.write.acquire().await?;
+        let position = crate::collections::next_home_position(&mut conn).await?;
+        sqlx::query("UPDATE libraries SET home_position = ? WHERE id = ?")
+            .bind(position)
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+    } else {
+        crate::collections::restore_defaults(&state.db, id).await?;
+    }
+    Ok(id)
 }
 
 #[derive(Deserialize)]
 pub struct UpdateLibrary {
     name: Option<String>,
     paths: Option<Vec<String>>,
+    labels_pending: Option<bool>,
 }
 
 pub async fn update(
@@ -215,6 +278,14 @@ pub async fn update(
             state.watcher.reload().await;
         }
     }
+    // Shown sooner than a Plex import would: the administrator's choice.
+    if let Some(pending) = body.labels_pending {
+        sqlx::query("UPDATE libraries SET labels_pending = ? WHERE id = ?")
+            .bind(pending)
+            .bind(id)
+            .execute(&state.db.write)
+            .await?;
+    }
     state.events.send(ServerEvent::LibrariesChanged);
     let lib = library_or_404(&state, id).await?;
     Ok(Json(to_dto(&state, &lib, None).await?))
@@ -237,14 +308,21 @@ impl LibraryOrder {
 }
 
 /// The order libraries are listed in, for everyone who hasn't chosen their
-/// own: `ids` lists every library once. Answers them in their new order.
+/// own: `ids` lists every library once, or every one the request gets (an
+/// app's leaves out audiobook libraries, which keep their places). Answers
+/// them in their new order.
 pub async fn reorder(
     State(state): State<AppState>,
     AdminUser(admin): AdminUser,
     Json(body): Json<LibraryOrder>,
 ) -> ApiResult<Json<Vec<LibraryDto>>> {
     body.check()?;
-    if !set_order(&state.db, &body.ids).await? {
+    // Checked again as it is written: a library may come or go meanwhile.
+    let set = match access::whole_shared_order(&state.db, &admin, &body.ids).await? {
+        Some(ids) => set_order(&state.db, &ids).await?,
+        None => false,
+    };
+    if !set {
         return Err(AppError::conflict("the libraries have changed: the order must list each of them once"));
     }
     state.events.send(ServerEvent::LibrariesChanged);
@@ -253,8 +331,8 @@ pub async fn reorder(
 }
 
 /// `PUT /api/me/libraries/order`: the order the user sees their libraries
-/// in, theirs alone: `ids` lists each library they may open once. Answers
-/// them in it.
+/// in, theirs alone: `ids` lists each library they may open once (an app
+/// those it gets). Answers them in it.
 pub async fn set_my_order(
     State(state): State<AppState>,
     user: AuthUser,
@@ -443,7 +521,23 @@ pub struct Hub {
     pub key: String,
     pub title: String,
     pub library_id: Option<i64>,
+    /// The collections a row of collections shows (several when it's
+    /// collections of one title from different libraries); empty for the
+    /// others.
+    pub collection_ids: Vec<i64>,
     pub items: Vec<ItemSummary>,
+}
+
+impl Hub {
+    pub fn of_row(row: crate::rows::Row, summaries: bool) -> Hub {
+        Hub {
+            key: row.key,
+            title: row.title,
+            library_id: row.library_id,
+            collection_ids: row.collection_ids,
+            items: row.items.iter().map(|r| r.to_summary_with(summaries)).collect(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -451,37 +545,55 @@ pub struct Hubs {
     pub hubs: Vec<Hub>,
 }
 
-pub async fn hubs(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>) -> ApiResult<Json<Hubs>> {
+pub async fn hubs(
+    State(state): State<AppState>,
+    user: AuthUser,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Hubs>> {
     let lib = visible_library(&state, &user, id).await?;
+    let language = i18n::for_user(&state.db, user.id, &state.settings.get().language, &headers).await?;
     let kind = lib.kind();
-    let video = kind != LibraryKind::Music;
-    let top = kind.top_level_kind();
     let db = &state.db;
-    // The hubs don't depend on each other: fetched at the same time.
-    let (continuing, added, released, rated) = tokio::try_join!(
-        // Video-only hubs are empty for music.
-        async { if video { catalog::continue_watching(db, user.id, Some(lib.id), 20).await } else { Ok(Vec::new()) } },
-        catalog::recently_added(db, user.id, lib.id, kind.as_str(), 30),
-        async { if video { catalog::recently_released(db, user.id, lib.id, top, 30).await } else { Ok(Vec::new()) } },
-        async { if video { catalog::top_rated(db, user.id, lib.id, top, 30).await } else { Ok(Vec::new()) } },
-    )?;
-    let added_title = match kind {
-        LibraryKind::Music => "Recently Added Albums",
-        LibraryKind::Shows => "Recently Added Shows",
-        LibraryKind::Movies => "Recently Added",
-    };
     let hub = |key: &str, title: &str, rows: Vec<catalog::ItemRow>| Hub {
         key: format!("{key}:{id}"),
-        title: title.into(),
+        title: i18n::t(language, title),
         library_id: Some(id),
+        collection_ids: Vec::new(),
         items: rows.iter().map(|r| r.to_summary()).collect(),
     };
-    let mut hubs = vec![
-        hub("continue_watching", "Continue Watching", continuing),
-        hub("recently_added", added_title, added),
-        hub("recently_released", "Recently Released", released),
-        hub("top_rated", "Top Rated", rated),
-    ];
+    let mut hubs = match kind {
+        // Music and audiobooks have no collections: their rows are
+        // built in.
+        LibraryKind::Music | LibraryKind::Audiobooks => {
+            let (continuing, added) = tokio::try_join!(
+                async {
+                    match kind {
+                        LibraryKind::Audiobooks => catalog::continue_listening(db, user.id, Some(lib.id), 20).await,
+                        _ => Ok(Vec::new()),
+                    }
+                },
+                catalog::recently_added(db, user.id, lib.id, kind.as_str(), crate::rows::ROW_SIZE as i64),
+            )?;
+            let added_title =
+                if kind == LibraryKind::Music { "hubs.recentlyAddedAlbums" } else { "hubs.recentlyAddedBooks" };
+            vec![
+                hub("continue_listening", "hubs.continueListening", continuing),
+                hub("recently_added", added_title, added),
+            ]
+        }
+        // Movies and TV: Continue Watching, then the collections that are
+        // rows here.
+        LibraryKind::Movies | LibraryKind::Shows => {
+            let (continuing, rows) = tokio::try_join!(
+                catalog::continue_watching(db, user.id, Some(lib.id), 20),
+                crate::rows::recommended(db, &user, &lib, language),
+            )?;
+            let mut hubs = vec![hub("continue_watching", "hubs.continueWatching", continuing)];
+            hubs.extend(rows.into_iter().map(|row| Hub::of_row(row, false)));
+            hubs
+        }
+    };
     hubs.retain(|h| !h.items.is_empty());
     Ok(Json(Hubs { hubs }))
 }

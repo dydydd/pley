@@ -89,10 +89,51 @@ fn png() -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn items_added_to_a_collection_or_playlist_are_taken_whole_or_refused() {
+    let w = world().await;
+    let collection = w.collection("Mine", &[w.alien]).await;
+    let made = w.send(Method::POST, &format!("/playlists?type=video&title=Tonight&uri={}", items(&[w.alien]))).await;
+    let playlist = key(&made.body["MediaContainer"]["Metadata"][0]);
+    let not_a_number =
+        encode(&format!("server://m/com.plexapp.plugins.library/library/metadata/{},x,{}", w.brazil, w.alien));
+    let too_many = items(&(1..=5001).collect::<Vec<i64>>());
+    for uri in [not_a_number, too_many] {
+        for (method, path) in [
+            (Method::POST, format!("/library/collections?type=1&title=New&smart=0&sectionId={}&uri={uri}", w.movies)),
+            (Method::PUT, format!("/library/collections/{collection}/items?uri={uri}")),
+            (Method::POST, format!("/playlists?type=video&title=New&uri={uri}")),
+            (Method::PUT, format!("/playlists/{playlist}/items?uri={uri}")),
+        ] {
+            let refused = w.send(method, &path).await;
+            assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.text());
+        }
+    }
+    // Nothing of them was added, nor made empty.
+    assert_eq!(w.titles(&format!("/library/metadata/{collection}/children")).await, ["Alien"]);
+    assert_eq!(w.titles(&format!("/playlists/{playlist}/items")).await, ["Alien"]);
+    let db = &w.app.state.db.read;
+    let lists: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM collections WHERE builtin IS NULL), (SELECT COUNT(*) FROM playlists)",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap();
+    assert_eq!(lists, (1, 1));
+    // As many as a playlist holds are taken (ids of no item add nothing).
+    let most = items(&[w.brazil].into_iter().chain(100_000..104_999).collect::<Vec<i64>>());
+    let added = w.send(Method::PUT, &format!("/library/collections/{collection}/items?uri={most}")).await;
+    assert_eq!(added.status, StatusCode::OK, "{}", added.text());
+    assert_eq!(w.titles(&format!("/library/metadata/{collection}/children")).await, ["Alien", "Brazil"]);
+}
+
+#[tokio::test]
 async fn collections_and_playlists_have_keys_of_their_own() {
     let w = world().await;
     let collection = w.collection("Two Films", &[w.alien, w.brazil]).await;
-    let id: i64 = sqlx::query_scalar("SELECT id FROM collections").fetch_one(&w.app.state.db.read).await.unwrap();
+    let id: i64 = sqlx::query_scalar("SELECT id FROM collections WHERE builtin IS NULL")
+        .fetch_one(&w.app.state.db.read)
+        .await
+        .unwrap();
     assert_eq!(collection, 1_000_000_000 + id);
     assert!(collection > w.alien.max(w.brazil), "not an item's id");
 
@@ -109,8 +150,10 @@ async fn collections_and_playlists_have_keys_of_their_own() {
     let uploaded =
         w.app.plex_upload(Method::POST, &format!("/library/metadata/{collection}/posters"), &w.admin, png()).await;
     assert_eq!(uploaded.status, StatusCode::OK, "{}", uploaded.text());
-    let own: Option<String> =
-        sqlx::query_scalar("SELECT poster FROM collections").fetch_one(&w.app.state.db.read).await.unwrap();
+    let own: Option<String> = sqlx::query_scalar("SELECT poster FROM collections WHERE builtin IS NULL")
+        .fetch_one(&w.app.state.db.read)
+        .await
+        .unwrap();
     assert!(own.is_some());
     let untouched: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM item_overrides").fetch_one(&w.app.state.db.read).await.unwrap();
@@ -249,25 +292,33 @@ async fn collection_items_move_and_what_pley_lacks_says_so() {
         assert_eq!(w.send(Method::PUT, &chosen).await.status, StatusCode::BAD_REQUEST);
     }
 
-    // Hubs: Kometa reads a collection's promotions, and Pley makes none.
+    // Hubs: Kometa reads a collection's promotions (none yet) and sets them.
     let manage = format!("/hubs/sections/{}/manage", w.movies);
     let hubs = w.app.plex_json(&format!("{manage}?metadataItemId={collection}"), &w.admin).await;
     assert_eq!(hubs["size"], json!(0));
-    assert!(hubs.get("Hub").is_none() && hubs.get("Directory").is_none());
     let nowhere = format!(
         "{manage}?metadataItemId={collection}&promotedToRecommended=0&promotedToOwnHome=0&promotedToSharedHome=0"
     );
     assert_eq!(w.send(Method::POST, &nowhere).await.status, StatusCode::OK);
+    assert_eq!(w.app.plex_json(&format!("{manage}?metadataItemId={collection}"), &w.admin).await["size"], json!(0));
     let promoted = format!("{manage}?metadataItemId={collection}&promotedToRecommended=1&promotedToOwnHome=0");
-    assert_eq!(w.send(Method::POST, &promoted).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(w.send(Method::POST, &promoted).await.status, StatusCode::OK);
+    let hubs = w.app.plex_json(&format!("{manage}?metadataItemId={collection}"), &w.admin).await;
+    let hub = &hubs["Hub"][0];
+    assert_eq!(hub["identifier"], json!(format!("custom.collection.{}.{collection}", w.movies)));
+    assert_eq!((&hub["promotedToRecommended"], &hub["promotedToOwnHome"]), (&json!("1"), &json!("0")));
+    // First on the section's Recommended.
     let moved = format!("{manage}/custom.collection.{}.{collection}/move", w.movies);
-    assert_eq!(w.send(Method::PUT, &moved).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(w.send(Method::PUT, &moved).await.status, StatusCode::OK);
+    let section = w.app.plex_json(&format!("/hubs/sections/{}", w.movies), &w.admin).await;
+    assert_eq!(section["Hub"][0]["hubIdentifier"], json!(format!("custom.collection.{}.{collection}", w.movies)));
 
     let play = w.app.compatibility_token(&w.admin, "play").await;
     for (method, uri) in [(Method::PUT, first), (Method::PUT, refresh), (Method::POST, nowhere), (Method::PUT, moved)] {
         assert_eq!(w.app.plex(method, &uri, &play, &[]).await.status, StatusCode::FORBIDDEN, "{uri}");
     }
-    assert_eq!(w.app.plex_json(&manage, &play).await["size"], json!(0), "reading is anyone's");
+    let read = w.app.plex(Method::GET, &manage, &play, &[]).await;
+    assert_eq!(read.status, StatusCode::FORBIDDEN, "it names collections the token may not see");
 }
 
 #[tokio::test]
@@ -359,4 +410,196 @@ async fn collection_order_through_preferences() {
     let play = w.app.compatibility_token(&w.admin, "play").await;
     let reply = w.app.plex(Method::PUT, &format!("{prefs}?collectionSort=0"), &play, &[]).await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN);
+}
+
+/// Kometa's `visible_library`, `visible_home` and `visible_shared`, and its
+/// group labels, as it sends them through python-plexapi.
+#[tokio::test]
+async fn kometa_places_collections_on_pleys_pages() {
+    let w = world().await;
+    let made = w.collection("Christmas", &[w.alien, w.brazil]).await;
+    let section = format!("/library/sections/{}/all", w.movies);
+    let manage = format!("/hubs/sections/{}/manage", w.movies);
+    let identifier = format!("custom.collection.{}.{made}", w.movies);
+
+    // Labelled Kometa and Seasonal: the Seasonal category.
+    let labelled = format!("{section}?type=18&id={made}&label[0].tag.tag=Kometa&label[1].tag.tag=Seasonal");
+    assert_eq!(w.send(Method::PUT, &labelled).await.status, StatusCode::OK);
+    let id = made - 1_000_000_000;
+    let pley = w.app.get(&format!("/api/collections/{id}"), &w.admin).await;
+    assert_eq!(pley.body["category"]["title"], json!("Seasonal"), "{:?}", pley.body);
+
+    // Pley's own collections are Plex's built-in hubs.
+    let hubs = w.app.plex_json(&manage, &w.admin).await;
+    let identifiers: Vec<&str> =
+        hubs["Hub"].as_array().unwrap().iter().map(|h| h["identifier"].as_str().unwrap()).collect();
+    assert_eq!(identifiers, ["movie.recentlyadded", "movie.recentlyreleased", "movie.toprated", "movie.topunwatched"]);
+
+    // On both Homes: on Pley's one Home, and listed so.
+    let home =
+        format!("{manage}?metadataItemId={made}&promotedToRecommended=1&promotedToOwnHome=1&promotedToSharedHome=1");
+    assert_eq!(w.send(Method::POST, &home).await.status, StatusCode::OK);
+    let hub = &w.app.plex_json(&format!("{manage}?metadataItemId={made}"), &w.admin).await["Hub"][0];
+    assert_eq!((&hub["promotedToOwnHome"], &hub["promotedToSharedHome"]), (&json!("1"), &json!("1")));
+    let pley = w.app.get(&format!("/api/collections/{id}"), &w.admin).await;
+    assert!(pley.body["home_position"].is_i64() && pley.body["recommended_position"].is_i64(), "{:?}", pley.body);
+    let plex_home = w.app.plex_json("/hubs", &w.admin).await;
+    assert!(plex_home["Hub"].as_array().unwrap().iter().any(|h| h["hubIdentifier"] == json!(identifier)));
+    let api_home = w.app.get("/api/hubs/home", &w.admin).await;
+    assert!(api_home.body["hubs"].as_array().unwrap().iter().any(|h| h["key"] == json!(format!("collection:{id}"))));
+
+    // The owner's Home is Pley's: clearing the friends' alone keeps it on
+    // Home, clearing the owner's takes it off.
+    let shared_off = format!("{manage}/{identifier}?promotedToOwnHome=1&promotedToSharedHome=0");
+    assert_eq!(w.send(Method::PUT, &shared_off).await.status, StatusCode::OK);
+    assert!(w.app.get(&format!("/api/collections/{id}"), &w.admin).await.body["home_position"].is_i64());
+    let own_off = format!("{manage}/{identifier}?promotedToOwnHome=0&promotedToSharedHome=1");
+    assert_eq!(w.send(Method::PUT, &own_off).await.status, StatusCode::OK);
+    assert!(w.app.get(&format!("/api/collections/{id}"), &w.admin).await.body["home_position"].is_null());
+
+    // A built-in hub is hidden, not deleted.
+    let hidden = format!("{manage}/movie.toprated?promotedToRecommended=0");
+    assert_eq!(w.send(Method::PUT, &hidden).await.status, StatusCode::OK);
+    let section_hubs = w.app.plex_json(&format!("/hubs/sections/{}", w.movies), &w.admin).await;
+    let shown: Vec<&str> =
+        section_hubs["Hub"].as_array().unwrap().iter().map(|h| h["hubIdentifier"].as_str().unwrap()).collect();
+    assert!(!shown.contains(&"movie.toprated"), "{shown:?}");
+    assert!(shown.contains(&identifier.as_str()), "{shown:?}");
+    assert_eq!(w.send(Method::DELETE, &format!("{manage}/movie.toprated")).await.status, StatusCode::BAD_REQUEST);
+    // Moving a hidden hub leaves it hidden.
+    assert_eq!(w.send(Method::PUT, &format!("{manage}/movie.toprated/move")).await.status, StatusCode::OK);
+    let section_hubs = w.app.plex_json(&format!("/hubs/sections/{}", w.movies), &w.admin).await;
+    assert!(!section_hubs["Hub"].as_array().unwrap().iter().any(|h| h["hubIdentifier"] == json!("movie.toprated")));
+    // After a hidden one: last.
+    let last = format!("{manage}/movie.recentlyadded/move?after=movie.toprated");
+    assert_eq!(w.send(Method::PUT, &last).await.status, StatusCode::OK);
+    let section_hubs = w.app.plex_json(&format!("/hubs/sections/{}", w.movies), &w.admin).await;
+    let shown = section_hubs["Hub"].as_array().unwrap();
+    assert_eq!(shown.last().unwrap()["hubIdentifier"], json!("movie.recentlyadded"));
+    // A collection's hub goes; the collection stays.
+    assert_eq!(w.send(Method::DELETE, &format!("{manage}/{identifier}")).await.status, StatusCode::OK);
+    assert_eq!(w.app.plex_json(&format!("{manage}?metadataItemId={made}"), &w.admin).await["size"], json!(0));
+    assert_eq!(w.app.get(&format!("/api/collections/{id}"), &w.admin).await.status, StatusCode::OK);
+}
+
+/// A hub's `(promotedToRecommended, promotedToOwnHome, promotedToSharedHome)`
+/// as the hub management listing gives them.
+async fn hub_flags(w: &World, identifier: &str) -> (bool, bool, bool) {
+    let hubs = w.app.plex_json(&format!("/hubs/sections/{}/manage", w.movies), &w.admin).await;
+    let hub = hubs["Hub"].as_array().unwrap().iter().find(|h| h["identifier"] == json!(identifier)).cloned();
+    let hub = hub.unwrap_or_else(|| panic!("{identifier} isn't listed: {hubs:?}"));
+    let flag = |name: &str| hub[name] == json!("1");
+    (flag("promotedToRecommended"), flag("promotedToOwnHome"), flag("promotedToSharedHome"))
+}
+
+/// python-plexapi's `ManagedHub.updateVisibility`: every flag sent, those it
+/// doesn't change as it last read them, then the hub read again.
+async fn update_visibility(
+    w: &World,
+    identifier: &str,
+    recommended: Option<bool>,
+    home: Option<bool>,
+    shared: Option<bool>,
+) -> (bool, bool, bool) {
+    let (r, h, s) = hub_flags(w, identifier).await;
+    let n = |v: Option<bool>, was: bool| u8::from(v.unwrap_or(was));
+    let uri = format!(
+        "/hubs/sections/{}/manage/{identifier}?promotedToRecommended={}&promotedToOwnHome={}&promotedToSharedHome={}",
+        w.movies,
+        n(recommended, r),
+        n(home, h),
+        n(shared, s)
+    );
+    assert_eq!(w.send(Method::PUT, &uri).await.status, StatusCode::OK, "{uri}");
+    hub_flags(w, identifier).await
+}
+
+/// Pley's one Home is the one its administrators see: Plex's own Home
+/// decides, as python-plexapi's `promoteHome()` and `demoteHome()` and
+/// Kometa's `visible_home` set it, each sending the friends' Home as it read
+/// it.
+#[tokio::test]
+async fn the_owners_home_puts_a_hub_on_home_and_takes_it_off() {
+    let w = world().await;
+    // python-plexapi's own test of hub management, on Pley's Recently Added.
+    let hub = "movie.recentlyadded";
+    assert_eq!(hub_flags(&w, hub).await, (true, true, true));
+    update_visibility(&w, hub, Some(false), None, None).await;
+    assert_eq!(update_visibility(&w, hub, None, Some(false), None).await, (false, false, false), "demoteHome()");
+    assert_eq!(update_visibility(&w, hub, None, None, Some(false)).await, (false, false, false), "demoteShared()");
+    update_visibility(&w, hub, Some(true), None, None).await;
+    assert_eq!(update_visibility(&w, hub, None, Some(true), None).await, (true, true, true), "promoteHome()");
+    // Only the friends' Home changes nothing: Pley's is the owner's too.
+    assert_eq!(update_visibility(&w, hub, None, None, Some(false)).await, (true, true, true), "demoteShared()");
+
+    // Kometa's `visible_home` alone, as it posts it: the other flags as read.
+    let made = w.collection("Christmas", &[w.alien, w.brazil]).await;
+    let manage = format!("/hubs/sections/{}/manage?metadataItemId={made}", w.movies);
+    let kometa = |home: u8, shared: u8| {
+        format!("{manage}&promotedToRecommended=0&promotedToOwnHome={home}&promotedToSharedHome={shared}")
+    };
+    assert_eq!(w.send(Method::POST, &kometa(1, 0)).await.status, StatusCode::OK);
+    let identifier = format!("custom.collection.{}.{made}", w.movies);
+    assert_eq!(hub_flags(&w, &identifier).await, (false, true, true));
+    // Out of season, `visible_home: false`.
+    assert_eq!(w.send(Method::POST, &kometa(0, 1)).await.status, StatusCode::OK);
+    assert_eq!(w.app.plex_json(&manage, &w.admin).await["size"], json!(0), "off Home, and so not listed");
+    let id = made - 1_000_000_000;
+    assert!(w.app.get(&format!("/api/collections/{id}"), &w.admin).await.body["home_position"].is_null());
+
+    // Plex's built-in hubs say they can't be removed, which python-plexapi
+    // reads before it tries; a collection's can.
+    let on_recommended = format!("{manage}&promotedToRecommended=1&promotedToOwnHome=0&promotedToSharedHome=0");
+    assert_eq!(w.send(Method::POST, &on_recommended).await.status, StatusCode::OK);
+    let hubs = w.app.plex_json(&format!("/hubs/sections/{}/manage", w.movies), &w.admin).await;
+    let deletable: Vec<(&str, &str)> = hubs["Hub"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| (h["identifier"].as_str().unwrap(), h["deletable"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        deletable,
+        // Recently Added came back last, when it was put back.
+        [
+            ("movie.recentlyreleased", "0"),
+            ("movie.toprated", "0"),
+            ("movie.recentlyadded", "0"),
+            (identifier.as_str(), "1"),
+            ("movie.topunwatched", "0")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_label_with_a_plus_in_its_name_fills_a_smart_collection() {
+    let w = world().await;
+    let section = format!("/library/sections/{}/all", w.movies);
+    // As Kometa labels the movies a streaming service has.
+    for (id, label) in [(w.alien, "Disney+ Movies"), (w.brazil, "Disney+ Movies"), (w.alien, "Space")] {
+        let labelled = format!("{section}?type=1&id={id}&label[].tag.tag={}", encode(label));
+        assert_eq!(w.send(Method::PUT, &labelled).await.status, StatusCode::OK);
+    }
+
+    // A name a query string would break has a key that passes through one;
+    // other names are their own keys.
+    let choices = w.app.plex_json(&format!("/library/sections/{}/label?type=1", w.movies), &w.admin).await;
+    assert_eq!(directory_titles(&choices), ["Disney+ Movies", "Space"]);
+    let key_of = |n: usize| choices["Directory"][n]["key"].as_str().unwrap().to_owned();
+    let disney = key_of(0);
+    assert!(disney.chars().all(|c| c.is_ascii_alphanumeric() || c == '~'), "{disney}");
+    assert_eq!(key_of(1), "Space");
+
+    // Kometa puts the key into the smart filter as it is.
+    let listing = format!("server://m/com.plexapp.plugins.library{section}?type=1&sort=titleSort&label={disney}");
+    let uri =
+        format!("/library/collections?type=1&title=Disney&smart=1&sectionId={}&uri={}", w.movies, encode(&listing));
+    let made = w.send(Method::POST, &uri).await;
+    assert_eq!(made.status, StatusCode::OK, "{}", made.text());
+    let smart = key(&made.body["MediaContainer"]["Metadata"][0]);
+    assert_eq!(w.titles(&format!("/library/collections/{smart}/children")).await, ["Alien", "Brazil"]);
+
+    // python-plexapi encodes it; the name itself is still taken.
+    assert_eq!(w.titles(&format!("{section}?type=1&label={}", encode(&disney))).await, ["Alien", "Brazil"]);
+    assert_eq!(w.titles(&format!("{section}?type=1&label!={}", encode("Disney+ Movies"))).await, ["Casablanca"]);
 }

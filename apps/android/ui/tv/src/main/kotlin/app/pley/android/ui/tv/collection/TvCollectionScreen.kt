@@ -23,6 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -33,6 +34,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import app.pley.android.common.UiText
+import app.pley.android.common.errorSentence
+import app.pley.android.common.resolve
 import app.pley.android.data.Loadable
 import app.pley.android.data.valueOrNull
 import app.pley.android.designsystem.PleyColors
@@ -42,6 +46,7 @@ import app.pley.android.designsystem.PleyType
 import app.pley.android.designsystem.icon.Icon
 import app.pley.android.designsystem.icon.PleyIcons
 import app.pley.android.designsystem.image.ArtworkImage
+import app.pley.android.designsystem.text.asString
 import app.pley.android.designsystem.tile.ArtworkTileModel
 import app.pley.android.designsystem.tile.QualityBadge
 import app.pley.android.designsystem.tile.TileKind
@@ -69,7 +74,6 @@ import app.pley.android.ui.tv.library.TvMessage
 import app.pley.android.ui.tv.library.TvPosterGrid
 import app.pley.android.ui.tv.library.TvTiles
 import app.pley.android.ui.tv.library.rememberTvGridState
-import app.pley.android.ui.tv.library.sentence
 import app.pley.android.ui.tv.library.tvCount
 import app.pley.android.ui.tv.library.tvGridHero
 import app.pley.android.ui.tv.shell.LocalTvNavigator
@@ -79,25 +83,24 @@ import kotlinx.coroutines.delay
 
 /**
  * A collection's page on TV (design spec §4.9): the item page's top, a
- * backdrop with the text column at x = 96 ("Collection" and its TMDB or
- * Smart badge, the title, what it holds in words, the summary, then Play
+ * backdrop with the text column at x = 96 ("Collection", its TMDB or Smart
+ * badge and its category, the title, what it holds in words, the summary, then Play
  * with focus and Shuffle), and its titles in a grid below, which scrolls
  * up over the backdrop as focus moves down, the backdrop dimming under it.
  */
 @Composable
 internal fun TvCollectionScreen(key: PleyKey.Collection) {
-    val resources = LocalResources.current
+    val context = LocalContext.current
     val vm: CollectionViewModel<ArtworkTileModel> = viewModel {
-        CollectionViewModel(key.collectionId, CollectionDeps.of(screensGraph()), TvTiles(resources))
+        CollectionViewModel(key.collectionId, CollectionDeps.of(screensGraph()), TvTiles(context))
     }
     val state by vm.state.collectAsStateWithLifecycle()
-    var message by remember { mutableStateOf<String?>(null) }
-    val nothing = stringResource(R.string.tv_collection_nothing_to_play)
+    var message by remember { mutableStateOf<UiText?>(null) }
     LaunchedEffect(vm) {
         vm.events.collect { event ->
             message = when (event) {
-                CollectionEvent.NothingToPlay -> nothing
-                is CollectionEvent.Failed -> sentence(event.error)
+                CollectionEvent.NothingToPlay -> UiText.res(R.string.tv_collection_nothing_to_play)
+                is CollectionEvent.Failed -> errorSentence(event.error)
             }
         }
     }
@@ -122,7 +125,7 @@ internal fun TvCollectionScreen(key: PleyKey.Collection) {
 }
 
 @Composable
-private fun CollectionContent(page: CollectionPage<ArtworkTileModel>, vm: CollectionViewModel<ArtworkTileModel>, message: String?) {
+private fun CollectionContent(page: CollectionPage<ArtworkTileModel>, vm: CollectionViewModel<ArtworkTileModel>, message: UiText?) {
     val navigator = LocalTvNavigator.current
     val actions = tileActions()
     val memory = rememberFocusMemory()
@@ -168,7 +171,7 @@ private fun CollectionContent(page: CollectionPage<ArtworkTileModel>, vm: Collec
 
 /** The text column of the page's top, and the heading of the titles under it. */
 @Composable
-private fun Hero(page: CollectionPage<ArtworkTileModel>, vm: CollectionViewModel<ArtworkTileModel>, message: String?, memory: FocusMemory) {
+private fun Hero(page: CollectionPage<ArtworkTileModel>, vm: CollectionViewModel<ArtworkTileModel>, message: UiText?, memory: FocusMemory) {
     val resources = LocalResources.current
     // Focus here takes the grid back to its start, gliding as a page of rows goes back to its hero.
     Column(Modifier.height(HeroHeight).tvGridHero().padding(top = 58.dp).widthIn(max = TextColumn)) {
@@ -177,6 +180,8 @@ private fun Hero(page: CollectionPage<ArtworkTileModel>, vm: CollectionViewModel
             BasicText(stringResource(R.string.tv_collection_label), style = PleyType.Tv.Label.copy(color = PleyColors.Muted))
             if (page.automatic) QualityBadge(stringResource(R.string.tv_collection_tmdb), TileStyle.Tv)
             if (page.smart) QualityBadge(stringResource(R.string.tv_collection_smart), TileStyle.Tv)
+            // Last, as on the web, and shortened to the room left: an administrator's category can be long.
+            page.category?.let { QualityBadge(it, TileStyle.Tv, Modifier.weight(1f, fill = false)) }
         }
         Spacer(Modifier.height(10.dp))
         BasicText(
@@ -189,7 +194,7 @@ private fun Hero(page: CollectionPage<ArtworkTileModel>, vm: CollectionViewModel
         Spacer(Modifier.height(12.dp))
         val noun = if (page.kind == LibraryKind.Shows) R.plurals.tv_library_count_shows else R.plurals.tv_library_count_movies
         BasicText(
-            (listOfNotNull(tvCount(resources, noun, page.count), page.libraryName) + page.notes).joinToString("  ·  "),
+            (listOfNotNull(tvCount(resources, noun, page.count), page.libraryName) + page.noteTexts.map { it.resolve(resources) }).joinToString("  ·  "),
             style = PleyType.Tv.Label.copy(color = PleyColors.Muted),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -221,7 +226,7 @@ private fun Hero(page: CollectionPage<ArtworkTileModel>, vm: CollectionViewModel
             )
             if (message != null) {
                 BasicText(
-                    message,
+                    message.asString(),
                     style = PleyType.Tv.Label.copy(color = PleyColors.DangerText),
                     modifier = Modifier.padding(start = 12.dp, top = 14.dp).semantics { liveRegion = LiveRegionMode.Polite },
                 )
@@ -235,7 +240,7 @@ private fun Hero(page: CollectionPage<ArtworkTileModel>, vm: CollectionViewModel
 }
 
 @Composable
-private fun Loading() {
+internal fun Loading() {
     val skeleton = rememberSkeleton(animated = false)
     Column(Modifier.fillMaxSize().padding(start = PleyTv.Gutter, top = 58.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Box(Modifier.size(120.dp, 18.dp).skeleton(skeleton, PleyShape.Badge))
@@ -254,4 +259,4 @@ private val HeroHeight = 452.dp - 16.dp
 /** Text stays in the backdrop's 85 % scrim: x 96 to 560. */
 private val TextColumn = PleyTv.TextColumnEnd - PleyTv.Gutter
 
-private const val MESSAGE_MS = 4_000L
+internal const val MESSAGE_MS = 4_000L

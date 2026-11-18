@@ -1,16 +1,18 @@
 import PleyScreens
 import SwiftUI
 
-/// The signed-in app on Apple TV: seven tabs at most across the top,
-/// Search, Home, Live TV when it shows, a tab per library while they fit
-/// (the first that fit, and a Libraries tab for the rest, otherwise),
-/// Playlists, Now Playing while music has a queue, and Settings (which
-/// holds the profile, the server, Switch profile, History, Servers and Sign
-/// out, and the device's settings). Each tab keeps its own navigation; Menu
-/// goes back through it, then to the tabs, then out of the app. The
-/// remote's Play/Pause plays and pauses music from any tab. Add to playlist
-/// and New playlist are a panel down the right. While the player is open
-/// VoiceOver reads only the player.
+/// The signed-in app on Apple TV: the tabs across the top, Search, Home,
+/// Discover (or Your requests, Requests for managers) where requests are
+/// open to the account, Live TV when it shows, a tab per library while
+/// they fit (the first that fit, and a Libraries tab for the rest,
+/// otherwise), Playlists, Now Playing while music has a queue, and
+/// Settings (which holds the profile, the server, Switch profile, History,
+/// Servers and Sign out, and the device's settings). Each tab keeps its
+/// own navigation; Menu goes back through it, then to the tabs, then out
+/// of the app. The remote's Play/Pause plays and pauses music from any
+/// tab. Add to playlist and New playlist are a panel down the right. News
+/// of requests ready to watch pops up at the bottom right once the remote
+/// rests. While the player is open VoiceOver reads only the player.
 struct ShellView: View {
     @ObservedObject var app: AppModel
     @ObservedObject private var shell: ShellModel
@@ -31,6 +33,7 @@ struct ShellView: View {
         // nothing, keeps Play/Pause from a video's tile.
         .onPlayPauseCommand(perform: shell.nowPlaying ? { app.music.toggle() } : nil)
         .overlay(alignment: .topTrailing) { ToastView(shell: shell) }
+        .overlay(alignment: .bottomTrailing) { RequestNoticeView(app: app) }
         // While the server can't be reached, the screens show what was saved, and say so.
         .overlay(alignment: .bottom) { OfflineBanner(app: app) }
         .fullScreenCover(item: Binding(get: { shell.sheet }, set: { shell.sheet = $0 })) { sheet in
@@ -83,12 +86,19 @@ struct ShellView: View {
         case .settings, .me: SettingsView(app: app)
         case .liveTv: LiveTvView(app: app)
         case .nowPlaying: NowPlayingScreen(app: app)
+        case .requests:
+            if shell.requestsEntry.discover {
+                DiscoverView(app: app)
+            } else {
+                RequestsView(app: app)
+            }
         }
     }
 
     /// A library's tab is its name.
     private func title(_ section: ShellSection) -> String {
         if case .library(let id) = section { return shell.libraryName(id) }
+        if section == .requests { return ShellModel.requestsTitle(shell.requestsEntry) }
         return Self.title(section)
     }
 
@@ -97,20 +107,23 @@ struct ShellView: View {
         if case .library(let id) = section, let library = shell.libraries.first(where: { $0.id == id }) {
             return LibraryEntry.symbol(library.kind)
         }
+        if section == .requests { return shell.requestsEntry.discover ? "safari" : "list.bullet.rectangle" }
         return Self.symbol(section)
     }
 
+    /// In the language shown.
     static func title(_ section: ShellSection) -> String {
         switch section {
-        case .home: "Home"
-        case .libraries: "Libraries"
-        case .search: "Search"
-        case .playlists: "Playlists"
-        case .me: "Me"
-        case .settings: "Settings"
-        case .liveTv: "Live TV"
-        case .nowPlaying: "Now Playing"
-        case .library: "Library"
+        case .home: localized("Home")
+        case .libraries: localized("Libraries")
+        case .search: localized("Search")
+        case .playlists: localized("Playlists")
+        case .me: localized("Me")
+        case .settings: localized("Settings")
+        case .liveTv: localized("Live TV")
+        case .nowPlaying: localized("Now Playing")
+        case .requests: localized("Requests")
+        case .library: localized("Library")
         }
     }
 
@@ -124,6 +137,7 @@ struct ShellView: View {
         case .settings: "gearshape"
         case .liveTv: "tv"
         case .nowPlaying: "music.note"
+        case .requests: "list.bullet.rectangle"
         case .library: "folder"
         }
     }
@@ -150,6 +164,8 @@ struct ScreenView: View {
             LibrariesView(app: app)
         case .collection(let id):
             CollectionView(app: app, collectionId: id)
+        case .mergedCollection(let ids):
+            MergedCollectionView(app: app, ids: ids)
         case .collections(let library):
             CollectionsPage(app: app, libraryId: library)
         case .playlist(let id):
@@ -163,29 +179,37 @@ struct ScreenView: View {
         // Apple TV has no downloads: their screens are never opened here.
         case .settings, .trackDefaults, .downloads, .downloadSettings:
             SettingsView(app: app)
+        case .discover:
+            DiscoverView(app: app)
+        case .discoverList(let list):
+            DiscoverGridView(app: app, source: .list(list))
+        case .discoverResults(let query):
+            DiscoverGridView(app: app, source: .words(query))
+        case .discoverTitle(let kind, let tmdbId, let pick):
+            DiscoverTitleView(app: app, kind: kind, tmdbId: tmdbId, pick: pick)
+        case .requests:
+            RequestsView(app: app)
         case .liveTv:
             LiveTvView(app: app)
         }
     }
 }
 
-/// "Showing what Pley had saved. Reconnecting…" (after "Another device
-/// answers there." when that is why), at the foot of the screen
-/// while the server can't be reached. It takes no focus: the app tries the
-/// server again by itself.
+/// "Pley is offline", at the foot of the screen while the server can't be
+/// reached. It takes no focus: the app tries the server again by itself.
 private struct OfflineBanner: View {
     @ObservedObject var app: AppModel
 
     var body: some View {
         if app.offline {
-            Label(app.offlineMessage, systemImage: "wifi.slash")
+            Label(DownloadWords.offline, systemImage: "wifi.slash")
                 .font(.callout)
                 .padding(.horizontal, 32)
                 .padding(.vertical, 16)
                 .background(.regularMaterial, in: Capsule())
                 .padding(.bottom, 40)
                 .accessibilityIdentifier("offline.banner")
-                .task(id: app.offlineMessage) { AccessibilityNotification.Announcement(app.offlineMessage).post() }
+                .task { AccessibilityNotification.Announcement(DownloadWords.offline).post() }
         }
     }
 }

@@ -8,8 +8,8 @@ APIs, so that apps and tools written for them work with Pley:
   library tools such as Kometa, activity monitors such as Tautulli, and
   direct-play clients. It is on by default, on Pley's own port.
 - the **Jellyfin-compatible API**, for Jellyfin's apps and others built on
-  its API (Findroid, JellyCon, Plezy, Infuse). It is off until an
-  administrator turns it on.
+  its API (Findroid, JellyCon, Plezy, Infuse), and activity monitors such
+  as Tracearr. It is on by default, on Pley's own port.
 
 Both use the same libraries, users, watch state and playback sessions as
 Pley's own API, so what is watched or changed in one shows up in the others.
@@ -27,8 +27,8 @@ tool at Pley, and for anyone extending the APIs.
 
 ## Turning them on
 
-**Settings → Network** sets each API: off, on Pley's port, or on a port of
-its own.
+Both APIs answer on Pley's port by default. **Settings → Network** sets
+each one: off, on Pley's port, or on a port of its own.
 
 - **On Pley's port**: the API answers on Pley's own address, behind a
   reverse proxy's HTTPS too. Apps and tools connect to the address the web
@@ -42,7 +42,7 @@ The same is set elsewhere as:
 
 | Where | Plex-compatible API | Jellyfin-compatible API |
 |---|---|---|
-| Command line | `--plex-bind web` (the default), `--plex-bind 0.0.0.0:32400` or `--plex-bind off` | `--jellyfin-bind off` (the default), `--jellyfin-bind web` or `--jellyfin-bind 0.0.0.0:8096` |
+| Command line | `--plex-bind web` (the default), `--plex-bind 0.0.0.0:32400` or `--plex-bind off` | `--jellyfin-bind web` (the default), `--jellyfin-bind 0.0.0.0:8096` or `--jellyfin-bind off` |
 | Environment | `PLEY_PLEX_BIND` | `PLEY_JELLYFIN_BIND` |
 | `pley.toml` | `plex_bind = "web"` | `jellyfin_bind = "web"` |
 
@@ -53,7 +53,8 @@ retried every 30 seconds, and Settings → Network shows why Pley isn't
 listening there.
 
 On Pley's port, a request that names itself the Plex-compatible API's (an
-`X-Plex-…` header, or such a parameter in the query) goes to that API; the
+`X-Plex-…` header, such a parameter in the query, or a path with Plex's `:`
+segments, such as a player's `/audio/:/transcode/…`) goes to that API; the
 rest is told apart as each API's section says. `/api/…` and
 `/.well-known/…` are always Pley's own.
 
@@ -61,7 +62,7 @@ rest is told apart as each API's section says. `/api/…` and
 
 | Port | What answers there |
 |---|---|
-| TCP 7539, Pley's port | The Plex-compatible API (its default), and the Jellyfin-compatible API when it is on Pley's port |
+| TCP 7539, Pley's port | The Plex- and Jellyfin-compatible APIs (their default) |
 | TCP 32400 | The Plex-compatible API, only when given a port of its own |
 | TCP 8096 | The Jellyfin-compatible API, only when given a port of its own |
 
@@ -117,7 +118,7 @@ may be used from, and where and with what it was last used, and revokes it.
 | Scope | In Pley | What it allows |
 |---|---|---|
 | `play` | Watch | Every token has it. Browsing what the account may open, playing, its own watch state, ratings, sessions, history, playlists and play queues, and notifications about its own sessions and the libraries it may open. |
-| `activity` | See everyone's activity | Every account's sessions, history and accounts, notifications about everyone's sessions, and where files are, as activity monitors such as Tautulli need. It changes nothing. |
+| `activity` | See everyone's activity | Every account's sessions, history and accounts, notifications about everyone's sessions, and where files are, as activity monitors such as Tautulli and Tracearr need. It changes nothing. |
 | `manage` | Manage libraries | Refreshing libraries and items, editing metadata, artwork and collections (those still empty listed too), stopping anyone's session and deleting anyone's history, as library tools such as Kometa need. It shows no one else's sessions or history, nor where files are: a tool that reads them, as Kometa does, needs `activity` too. |
 
 A token is never an administrator: each scope allows what it says, checked
@@ -134,8 +135,12 @@ and its tokens do what `play` allows. On the Plex-compatible API, a token
 without `manage` gets `403` for a change only administrators make, and one
 without `activity` sees what a viewer would: its account's own sessions and
 history, and files' names rather than where they are. The
-Jellyfin-compatible API takes every token for what `play` allows, and never
-acts as an administrator.
+Jellyfin-compatible API takes every token for what `play` allows, one
+with `manage` for changing collections and editing metadata too
+([Playlists and collections](#playlists-and-collections),
+[Editing metadata](#editing-metadata)), and one with `activity` for
+seeing what everyone is playing ([Activity monitors](#activity-monitors));
+it never acts as an administrator otherwise.
 
 ### Origins
 
@@ -237,8 +242,7 @@ What Pley doesn't do for it:
   or subtitle language, Plex's `hdr` and `dovi`, country or network: their
   searches answer `400` and Kometa reports that collection's error, rather
   than acting on the whole library;
-- collection modes and promoting collections to home pages, which Pley
-  doesn't have (changes answer `400`);
+- collection modes, which Pley doesn't have (changes answer `400`);
 - what Kometa does through plex.tv: playlists' `sync_to_users`,
   `plex_watchlist`, and what it asks a Plex Pass for.
 
@@ -302,9 +306,9 @@ them.
   `/library/metadata/{key}`, and `/library/collections/{id}` and
   `/playlists/{id}` take the plain ids too. Media and parts use the media
   file id. Stream ids are `file id × 10000 + stream index`.
-- **Order.** Sections, and the home hubs of each, come in the user's library
-  order in Pley (Settings → Libraries), else the administrators' order; new
-  ones come last.
+- **Order.** Sections come in the user's library order in Pley (Settings →
+  Libraries), else the administrators' order; new ones come last. Hubs
+  come in the order administrators give Home's and each library's rows.
 - **Types.** Movies and episodes are `Video` elements, shows, seasons,
   artists and albums are `Directory` elements, and tracks are `Track`
   elements, with the API's `type` values.
@@ -313,6 +317,11 @@ them.
   metadata found, in the API's usual form: `imdb://`, `tmdb://` (movies and
   shows), `tvdb://` (shows) and `mbid://` (artists and albums). The `guid`
   filter finds items by any of them.
+- **.strm files.** A `Part` of a `.strm` file
+  ([CONFIGURATION.md](CONFIGURATION.md#strm-files)) has the file's path as
+  its `file` and gives the media through Pley at its `key`; the address
+  the file names is never given. `container` and `size` are the media's
+  once it has been opened or played (`strm` and 0 before).
 - **Editions.** Movies whose versions are tagged with an edition
   (`{edition-Director's Cut}` in the file or folder name) carry the default
   version's `editionTitle`.
@@ -324,7 +333,8 @@ them.
 - **Sessions.** A client that reports `/:/timeline` while playing becomes a
   Pley playback session. It is listed in `/status/sessions` (with `User`,
   `Player` and `Session`, plus `TranscodeSession` for HLS) and in Pley's
-  dashboard.
+  dashboard. The user's Pley apps list it among their sessions, and can
+  only stop it: Plex clients get no other remote commands from Pley.
 - **Notifications.** `/:/websockets/notifications` (token as `X-Plex-Token`
   query parameter or header) streams JSON `NotificationContainer`s:
   - `playing`: a session starts, pauses, resumes or stops, and every 10 s
@@ -377,9 +387,9 @@ them.
 |---|---|
 | Server | `/`, `/identity`, `/servers`, `/accounts` (listed, never changed), `/myplex/account`, `/system`, `/prefs`, `/:/prefs` (`PUT` answers `403`: no token changes the server's settings), `/media/providers`, `/:/websockets/notifications`; `/clients`, `/devices`, `/activities`, `/butler` and `/updater/status` answer empty containers |
 | Sections | `/library`, `/library/sections` (`allowSync="1"` for a token with `manage`: Kometa takes a section without it for a read-only token), `/library/sections/{id}`, `…/all`, `…/albums`, `…/recentlyAdded`, `…/onDeck`, `…/search`, `…/firstCharacter`, `…/collections`, `…/{genre,year,decade,contentRating,studio,actor,director,writer,producer,label}` (filter choices), `…/prefs` (no settings; `PUT` answers `403`), `…/refresh` and `/library/sections/all/refresh` (`manage`); `…/emptyTrash` and `…/analyze` are accepted and change nothing |
-| Items | `/library/metadata/{id}` (comma-separated ids allowed; a collection's or playlist's key answers as `/library/collections/{key}` or `/playlists/{key}` does, and `…/children`, its pictures and `…/refresh` reach it too), `…/extras` (trailers and other bonus material as `clip`s with the API's `extraType` and `subtype`), `…/children`, `…/allLeaves`, `…/grandchildren`, `…/related` ("More Like This" hub), `…/similar` (the same items), `…/thumb[/{version}]`, `…/art[/{version}]`, `…/posters` and `…/arts` (the picture shown, a `Photo` named `upload://…` when it was set by hand and `metadata://…` when it is the metadata agent's), `…/file?url=` (the picture a `Photo` names), `…/themes`, `…/clearLogos` and `…/squareArts` (none), `…/refresh` (`manage`) |
-| Lists | `/library/all`, `/library/onDeck`, `/library/recentlyAdded`, `/hubs`, `/hubs/sections/{id}`, `/hubs/continueWatching/items`, `/hubs/sections/{id}/continueWatching/items`, `/hubs/sections/{id}/manage` (empty: Pley promotes collections to no hubs, so `POST` promoting one and `PUT …/manage/{identifier}[/move]` answer `400`), `/hubs/home/recentlyAdded`, `/hubs/search`, `/search`, `PUT /actions/removeFromContinueWatching?ratingKey=` (the movie, or the episode's show, leaves the user's Continue Watching until it is played again, as `DELETE /api/continue-watching/{id}`) |
-| Collections | `/library/sections/{id}/collections` (also `…/all?type=18`), `/library/collections/{id}` (`includePreferences=1`), `…/children`, `…/{thumb,art,composite}[/{version}]`, `PUT …/prefs`, `PUT …/items/{item}/move?after=`, `PUT …/refresh` (changes nothing: a collection has no metadata of its own to fetch); changes under [Editing](#editing) |
+| Items | `/library/metadata/{id}` (up to 5,000 comma-separated ids, more than 500 by pages with `X-Plex-Container-Start` and `-Size`; a collection's or playlist's key answers as `/library/collections/{key}` or `/playlists/{key}` does, and `…/children`, its pictures and `…/refresh` reach it too), `…/extras` (trailers and other bonus material as `clip`s with the API's `extraType` and `subtype`), `…/children`, `…/allLeaves`, `…/grandchildren`, `…/related` ("More Like This" hub), `…/similar` (the same items), `…/thumb[/{version}]`, `…/art[/{version}]`, `…/posters` and `…/arts` (the picture shown, a `Photo` named `upload://…` when it was set by hand and `metadata://…` when it is the metadata agent's), `…/file?url=` (the picture a `Photo` names), `…/themes`, `…/clearLogos` and `…/squareArts` (none), `…/refresh` (`manage`) |
+| Lists | `/library/all`, `/library/onDeck`, `/library/recentlyAdded`, `/hubs`, `/hubs/sections/{id}`, `/hubs/continueWatching/items`, `/hubs/sections/{id}/continueWatching/items`, `/hubs/sections/{id}/manage` (see [Hubs](#hubs)), `/hubs/home/recentlyAdded`, `/hubs/search`, `/search`, `PUT /actions/removeFromContinueWatching?ratingKey=` (the movie, or the episode's show, leaves the user's Continue Watching until it is played again, as `DELETE /api/continue-watching/{id}`) |
+| Collections | `/library/sections/{id}/collections` (also `…/all?type=18`), `/library/collections/{id}` (`includePreferences=1`), `…/children`, `…/{thumb,art,composite}[/{version}]`, `PUT …/prefs`, `PUT …/items/{item}/move?after=`, `PUT …/refresh` (changes nothing: a collection has no metadata of its own to fetch); changes under [Editing](#editing). Pley's own four collections in each library (Recently Added and the like) aren't listed: they stand for Plex's built-in rows |
 | Playlists | `GET`/`POST /playlists` (`?type=&title=&uri=…/library/metadata/1,2`, or `smart=1&uri=…/library/sections/{id}/all?…` for a smart playlist of that listing; `?smart=0\|1` filters the list), `GET`/`PUT` (`?title.value=` or `?title=`)/`DELETE /playlists/{id}`, `GET`/`PUT /playlists/{id}/items` (`?uri=`), `DELETE /playlists/{id}/items/{playlistItemID}`, `PUT …/{playlistItemID}/move?after=`, `/playlists/{id}/composite/{version}` |
 | Previews | `/library/parts/{id}/indexes/sd` (BIF), `/library/parts/{id}/indexes/sd/{offset}` (the frame at `offset` ms), `/library/media/{id}/chapterImages/{n}` |
 | Playback | `/library/parts/…`, `/library/streams/{id}` (subtitles), `/:/timeline`, `/:/progress`, `/:/scrobble`, `/:/unscrobble`, `/:/rate?key=&rating=` (the user's rating, 0-10; negative clears it), `/status/sessions`, `/status/sessions/terminate?sessionId=&reason=` (`manage`: stops the session whose `Session` `id` it is, `reason` as the message its player shows, as `DELETE /api/sessions/{id}`; that client's reports don't start it again), `/transcode/sessions`, `/{video,audio}/:/transcode/universal/{start.m3u8,start,decision,stop,ping,session/…}` |
@@ -399,11 +409,16 @@ does:
   (Pley's locked fields, listed in details as `Field` elements with
   `locked="1"`); `field.locked=1` alone keeps the current value,
   `field.locked=0` gives the field back to the metadata agent, and a value
-  sent with `field.locked=0` is written but not kept.
+  sent with `field.locked=0` is written but not kept. One request edits up
+  to 5,000 items; a longer list, or an id that isn't a number, is refused
+  and nothing of it is applied.
 - Tags: `genre[0].tag.tag=Horror` adds a genre, `genre[].tag.tag-=Horror,Drama`
   removes (each name percent-encoded once more, as `python-plexapi` sends
   them). The same for `label`, which details list as `Label` and the
-  `label` filter and `/library/sections/{id}/label` find, and for
+  `label` filter and `/library/sections/{id}/label` find (labels are listed
+  to tokens with `manage` only: profiles' label rules go by them; other
+  tokens' `label` filters, and Jellyfin's `Tags`, go as if titles had no
+  labels, while smart collections and playlists keep theirs), and for
   `collection`: the item joins or leaves the collection of that name in its
   library, which is made when missing. Details list it as `Collection`.
 - `userRating.value` (0-10; empty clears it) is the token's account's own
@@ -455,12 +470,16 @@ does:
   see it. Collections report `smart` and, for smart ones, the listing as
   `content`. `PUT /library/collections/{id}/items?uri=…` adds items (or
   gives a smart collection a new listing), `DELETE …/items/{item}` removes
-  one and `DELETE /library/collections/{id}` deletes the collection.
+  one and `DELETE /library/collections/{id}` deletes the collection. A
+  collection or a playlist takes up to 5,000 items from one `uri`; a longer
+  list, or an id that isn't a number, is refused and nothing of it is
+  added.
 
 ### Searching and filtering
 
 `/library/sections/{id}/all` accepts `type` (1 movie, 2 show, 3 season, 4
 episode, 8 artist, 9 album, 10 track), `sort` (`titleSort`, `addedAt`,
+`episode.addedAt` (shows by their newest episode, Last Episode Date Added),
 `originallyAvailableAt`, `year`, `rating`, `audienceRating`, `lastViewedAt`,
 `viewCount`, `duration`, `index`, `id`, `updatedAt`; with `:desc`, several
 comma-separated), `limit` and the API's filters with their operators:
@@ -487,6 +506,14 @@ or joined as the query string joins them: `or=1` between two filters
 matches either, `and=1` both, and `push=1` … `pop=1` group them, as in
 `push=1&genre=Comedy&or=1&genre=Horror&pop=1&year>>=1980`. `and` binds
 tighter than `or`, and groups nest eight deep at most.
+
+Genres, labels, content ratings and studios are filtered by name, or by
+the `key` their filter choices list (`/library/sections/{id}/label` and the
+like). A choice's key is its name, unless the name holds a character a query
+string would break (`+`, `&`, `=`, `#`, `%`, `,`) or `~`: then it is `~` and
+the name's UTF-8 bytes in hex (`Disney+ Movies` is `~4469736e65792b204d6f76696573`),
+which comes through whether a tool encodes it or, as Kometa does in a smart
+collection's filter, puts it in as it is.
 
 Filters on ancestors work (`artist.id=5` on albums, `show.title=…` on
 episodes). A filter Pley can't apply answers `400` (`Pley can't filter by
@@ -523,6 +550,48 @@ validates collection searches against. A section's `label` choices name
 its collections' labels too, and `/library/sections/{id}/label?type=18`
 names only those.
 
+A collection's group label puts it under a category in Pley
+([API.md](API.md#categories)): its one label besides `Kometa` (or `PMM`),
+such as Kometa's `Seasonal` or `Decade`, names the category, made when
+there is none of that name. The category follows the labels as they
+change, unless an administrator chose one in Pley. A category made from a
+label keeps taking that label's collections after it is renamed; deleted,
+it comes back the next time the label is set. This holds for the
+Jellyfin-compatible API's tags on collections too.
+
+### Hubs
+
+`/hubs` (Home) and `/hubs/sections/{id}` (a section's Recommended) show
+the rows administrators choose in Pley
+([API.md](API.md#rows)), after Continue Watching. Collections of one title
+in different sections are rows of their own here, side by side, as Plex
+has them; Plex's apps put them together. A hub holds up to 30 titles
+(`count`, 12 when it isn't given).
+
+`/hubs/sections/{id}/manage` is hub management, as Kometa's
+`visible_library`, `visible_home` and `visible_shared` use it. It lists the
+section's hubs: Pley's own four collections by Plex's identifiers for its
+built-in rows (`movie.recentlyadded`, `movie.recentlyreleased`,
+`movie.topunwatched`, `tv.recentlyadded`, `tv.recentlyaired`,
+`tv.toprated`) and `movie.toprated` and `tv.topunwatched` where Plex has
+none, then the other collections shown anywhere as
+`custom.collection.<section>.<key>`; with `metadataItemId`, that
+collection's alone. `promotedToRecommended` (or `recommendationsVisibility`)
+shows a collection on the section's Recommended. Pley has one Home for
+everyone, which administrators see too: `promotedToOwnHome` (or
+`homeVisibility`) puts a collection there or takes it off, and the listing
+gives `promotedToSharedHome` as the same. python-plexapi and Kometa send
+both Homes, the one they don't change as they read it, so
+`promotedToSharedHome` counts only without `promotedToOwnHome`: Kometa's
+`visible_home` places a collection on Home, and `visible_shared` alone
+doesn't. A Home only for Plex's owner, or only for friends, can't be had.
+`POST …/manage?metadataItemId=` and `PUT …/manage/{identifier}` set them,
+`PUT …/move?after=` orders Recommended (Home's order is set in Pley), and
+`DELETE …/manage/{identifier}` takes a collection off both (Pley's own,
+listed `deletable="0"`, are hidden, not deleted: `400`); moving one that
+isn't on Recommended leaves it off. It needs `manage`, to read it too: it
+names collections others may not see.
+
 ### Tested
 
 The server's tests (`apps/server/tests/plex*.rs`, `compatibility_tokens.rs`
@@ -534,10 +603,12 @@ playback and sessions, editing, collections, playlists and play queues.
 
 - The vendor's cloud service: its sign-in, server claiming, sharing and
   remote access, and the apps that depend on it to find servers.
+- Audiobook libraries: Plex has no such sections, and its apps would read
+  books as albums of tracks, so the API lists none, nor their books in
+  search or history.
 - Accounts: they are listed, never made, changed or deleted.
 - Collection modes (`collectionMode`): Pley has none.
-- Promoting collections to home pages and recommendations (hub
-  management), theme music, logos and square art: changes answer `400`.
+- Theme music, logos and square art: changes answer `400`.
 - Artwork from addresses on other hosts (upload the file instead), and
   per-item preferences (`/prefs`).
 - Filters on descendants (`episode.title` on shows) and on `hdr`, `dovi`,
@@ -564,7 +635,8 @@ Requests are told apart like this:
   request carries: players fetch streams and pictures without a header, and
   a path Pley doesn't answer gets Jellyfin's `404`, not a page. A request
   that names itself the Plex-compatible API's goes to that one while it is
-  on Pley's port too: their paths meet (`/library`, `/system`, `/devices`).
+  on Pley's port too: their paths meet (`/library`, `/system`, `/devices`,
+  `/audio`).
 - A path both have (`/Library`, `/Playlists`, `/Search`) goes to it only
   with a Jellyfin app's `Authorization: MediaBrowser …` header or token,
   which browsers asking for the web app never send. Those answers vary with
@@ -611,11 +683,16 @@ Apps send the token as Jellyfin's apps do:
 
 A token sees what Pley's [access rules](API.md#access-rules) let its
 account see, with the account's own watch state, and never acts as an
-administrator, whatever its scopes: `Policy.IsAdministrator` is `false` for
-everyone, and nothing administers through this API. `/Users` lists the
-caller alone and `/Users/Public` no one, so no names are shown before
-signing in; a user id in a path (`/Users/{id}/Items`) must be the caller's
-(`404` otherwise).
+administrator, whatever its scopes: nothing administers through this API.
+`Policy.IsAdministrator` is `true` only for a token with `activity`, because
+activity monitors such as Tracearr refuse a key that isn't an
+administrator's ([Activity monitors](#activity-monitors)). Apps' sign-ins
+never have `activity`, so apps don't offer a dashboard that would fail. A
+token with `manage` changes collections and edits metadata, as
+administrators do in Pley, and `Policy.EnableCollectionManagement` says
+so. `/Users` lists the caller alone and `/Users/Public` no one, so no
+names are shown before signing in; a user id in a path
+(`/Users/{id}/Items`) must be the caller's (`404` otherwise).
 
 ### Ids, streams and pictures
 
@@ -629,9 +706,10 @@ Many players open streams, subtitles and pictures without a token:
 
 - **Media sources.** A file's id as a media source (64 hexadecimal
   characters, `MediaSourceId`) stands for the sign-in it was listed to:
-  `/Videos/{id}/stream?MediaSourceId=…` and the subtitles' `DeliveryUrl`
-  open with it alone, while that sign-in works and from where its token may
-  be used, for what its user may see. Each sign-in is given its own.
+  `/Videos/{id}/stream?MediaSourceId=…`, the subtitles' `DeliveryUrl` and
+  the seek previews' sheets open with it alone, while that sign-in works and
+  from where its token may be used, for what its user may see. Each sign-in
+  is given its own.
 - **HLS.** A stream's playlists and segments are reached by its session's
   id (128 random bits), for streams started through this API, while the
   token that started them works and from where it may be used: not once the
@@ -652,13 +730,53 @@ where the server keeps them.
 read as the device's capabilities; an app that sends none (players built on
 mpv or ExoPlayer) plays the files as they are. What plays as it is gets
 `SupportsDirectPlay`; the rest gets a `TranscodingUrl`, an HLS stream from
-Pley's transcoder (`/Videos/{id}/master.m3u8`): the video copied when its
-codec is one the request names (`VideoCodec`, H.264 or HEVC), converted to
-H.264 otherwise, and the sound made AAC. `MaxStreamingBitrate`,
-`MaxHeight`/`MaxWidth`, `StartTimeTicks`, `AudioStreamIndex` and a picture
-subtitle (`SubtitleStreamIndex` with `SubtitleMethod=Encode`), burned in,
-apply. Opened again with the same settings, as players do to probe it, it is
-the same stream. `DELETE /Videos/ActiveEncodings?DeviceId=…` ends a device's
+Pley's transcoder (`/Videos/{id}/master.m3u8`).
+
+The stream is decided as a Pley app's is ([API.md](API.md#version-2)), for
+what its address asks. `PlaybackInfo` writes there what the device profile
+says, in the names Jellyfin's server uses. From its first HLS transcoding
+profile for video: the video codecs (`VideoCodec`), the sound's
+(`AudioCodec`) and its channels (`TranscodingMaxAudioChannels`, the fewest
+that profile and the `VideoAudio` codec profiles say), and the segments
+(`SegmentContainer`: `mp4` for fMP4, else MPEG-TS). From its video codec
+profiles, each codec's profiles, level, bit depth, size and dynamic ranges
+(`hevc-profile`, `hevc-level`, `hevc-videobitdepth`, `hevc-maxwidth`,
+`hevc-maxheight`, `hevc-rangetype`), those that apply to some videos only
+(`ApplyConditions`) as they apply to the file's. An app that writes its own
+address is read the same way: without codecs, H.264 and AAC; without
+dynamic ranges, HDR10, HDR10+ and HLG as they are, and no Dolby Vision
+without a base layer.
+
+- A `.strm` file ([CONFIGURATION.md](CONFIGURATION.md#strm-files)) is a
+  media source like a file's: `Protocol` is `File`, `IsRemote` is false and
+  `Path` is the `.strm` file's name, never the address it names, which
+  Jellyfin's own server gives its apps. `PlaybackInfo` finds what the
+  media is when it isn't known, as Jellyfin does, and
+  `/Videos/{id}/stream` and `/Items/{id}/Download` give it through Pley.
+- The video is copied when its codec is listed and within its limits:
+  H.264 and HEVC in either kind of segment, VP9 and AV1 in fMP4 only.
+  Otherwise it is converted, to HEVC Main 10 where HDR stays HDR (the app
+  lists HEVC Main 10 and shows the range, [API.md](API.md#hdr-transcodes)),
+  else to H.264, tone-mapped. `AllowVideoStreamCopy=false` converts it
+  whatever it is.
+- Dolby Vision is kept and named where the app shows `DOVI` (profiles 5
+  and 8, 7 too with `DOVIWithEL`, 10 for AV1), and otherwise plays as its
+  base layer, or is converted, as for Pley's apps
+  ([API.md](API.md#dolby-vision-remuxes)).
+- The sound is copied when its codec is listed (AAC, MP3, AC-3, E-AC-3),
+  else converted: to E-AC-3 or AC-3 5.1 where the app lists them and takes
+  six channels, else to AAC on as many channels as it takes, up to 5.1
+  (stereo when it doesn't say).
+- The answer is the stream's own multivariant playlist, which names what
+  it carries (`CODECS`, `SUPPLEMENTAL-CODECS` for Dolby Vision,
+  `VIDEO-RANGE`), in one size; `TranscodingContainer` says `mp4` for fMP4.
+  A transcoder too old to make fMP4 makes MPEG-TS.
+
+`MaxStreamingBitrate`, `MaxHeight`/`MaxWidth`, `MaxVideoBitDepth`,
+`StartTimeTicks`, `AudioStreamIndex` and a picture subtitle
+(`SubtitleStreamIndex` with `SubtitleMethod=Encode`), burned in, apply.
+Opened again with the same settings, as players do to probe it, it is the
+same stream. `DELETE /Videos/ActiveEncodings?DeviceId=…` ends a device's
 streams.
 
 Files play with ranges at `/Videos/{id}/stream`, `/Audio/{id}/stream` or
@@ -673,11 +791,52 @@ tells the device's socket (`Playstate` `Stop`), and its reports don't start
 it again until it stops. `/MediaSegments/{id}` gives the intro and credits
 Pley found as `Intro` and `Outro`, for Skip buttons.
 
+`POST /UserItems/{id}/UserData` sets what it is given that differs from
+the item's state: `Played`, `IsFavorite`, and `PlaybackPositionTicks`,
+which moves the resume point of a movie, episode, track or extra (to 90 %
+or more, the item is watched) and clears it at `0`. When the item is
+marked or its place moves, `LastPlayedDate` is kept as when it, or a
+show's or season's episodes, were played, today at the latest; a play it
+counts is dated so in the history. Its keys go in any case, and numbers as
+text, as Jellyfin reads them: sync tools such as WatchState copy a place
+in a video from another server this way, sending the ticks as text. Ticks
+that aren't a whole number, or a date that isn't one, are refused (`400`).
+
+Seek-bar previews are the sprite sheets Pley makes for its own players
+([API.md](API.md#playback)), at the one width it makes them. An item's
+`Trickplay` (in its details, and in lists with `Fields=Trickplay`) gives
+each media source's, and `/Videos/{id}/Trickplay/{width}/{n}.jpg` serves
+sheet `n` (`MediaSourceId` names another version than the first);
+`tiles.m3u8` there lists them as an HLS playlist of tiles. They are frames
+of the video, so they open as its stream does: with a token, or a media
+source's id alone, never by the item's id. Opening an item or its
+`PlaybackInfo` has them made when the file has none, as Pley's own item page
+does; until then `Trickplay` lists none and the sheets answer `404`.
+Jellyfin for Android TV shows none: it reads a media source's id as a GUID,
+and Pley's are longer.
+
+The user's Pley apps list a Jellyfin app's playback among their sessions,
+and control it as their own ([API.md](API.md#remote-control)) once the device
+has said it takes media control (`SupportsMediaControl` in the query of
+`POST /Sessions/Capabilities` or the body of `/Sessions/Capabilities/Full`)
+and while its socket is open. Pley remembers what it said, in memory, until
+it says otherwise or the server restarts. The commands reach the socket as
+`Playstate`: pause as `Pause`, play as `Unpause`, a seek as `Seek` with
+`SeekPositionTicks`, a skip as a `Seek` from where the player is by then,
+next and previous as `NextTrack` and `PreviousTrack`. A change of track is
+a `GeneralCommand`: `SetAudioStreamIndex` or `SetSubtitleStreamIndex`,
+with the stream's `Index` (as the device's media streams number them;
+`-1` turns subtitles off) in `Arguments`. The `AudioStreamIndex` and
+`SubtitleStreamIndex` of the device's reports are what the remotes show it
+plays. A device that never said so, or has no socket open, can only be
+stopped.
+
 The socket (`/socket`) asks to be kept alive every 60 seconds, and tells of
 changes to the libraries the user may open (`LibraryChanged`), to the
-user's watch state (`UserDataChanged`), and playback stopped from Pley. It
-checks the token again every 30 seconds, from where the socket was opened,
-and closes once it ends.
+user's watch state (`UserDataChanged`), playback stopped from Pley and the
+commands of the user's remotes (`Playstate`, `GeneralCommand`). It checks
+the token again every 30 seconds, from where the socket was opened, and
+closes once it ends.
 
 ### Jellyfin's names for Pley's things
 
@@ -689,11 +848,111 @@ and closes once it ends.
 | A title's versions | its `MediaSources`, named by their edition |
 | Trailers, bonus material | `LocalTrailers`, `SpecialFeatures` |
 | Collection | `BoxSet` |
-| Playlist | `Playlist` |
+| Playlist | `Playlist`, each entry with a `PlaylistItemId` of its own |
 | My List | Favorites: movies and shows (`400` for anything else) |
 | Rating | `Likes`: a like is 10 of Pley's 10 points, a dislike 2 |
 | Continue Watching | `Resume` (in progress) and `NextUp` (next episodes), with titles taken out of Continue Watching left out |
 | Cast and crew | `People`, and `Person` items |
+
+Jellyfin's grouping of libraries into views isn't offered: apps asking
+which libraries could be grouped (`/UserViews/GroupingOptions`) are given
+the user's movie and TV libraries, as Jellyfin gives them, and Pley's
+views stay as they are. `/Library/VirtualFolders`, the libraries' folders
+on disk, is Jellyfin's for administrators and answers `403` here, as
+Jellyfin answers everyone else. `/Plugins` and `/Packages`, where apps
+look for a plugin of their own (Infuse's library mode does), list none.
+
+### Playlists and collections
+
+Jellyfin's apps make and change playlists and collections as Pley's own
+apps do, by Pley's rules ([API.md](API.md#playlists)):
+
+- A playlist is its owner's alone: any token makes and changes its
+  account's own, and another account's answers `404`. Making one public or
+  sharing it (`IsPublic`, `Users`) answers `400`, so `GET /Playlists/{id}`
+  says `OpenAccess` `false` with no `Shares`, and `/Playlists/{id}/Users`
+  lists no one. A playlist is for video or for music, from its `MediaType`
+  or else its first title; what doesn't fit answers `400`.
+- Each entry has an id of its own, `PlaylistItemId`, in
+  `/Playlists/{id}/Items` and in `/Items?ParentId=` of a playlist: an item
+  may be there twice. Entries are removed and moved by it, or by the
+  item's own id, which names its first entry.
+  `POST /Playlists/{id}` with `Ids` puts those titles in place of the
+  entries the caller sees, in that order, as apps that save a playlist as a
+  whole send it; entries the caller can't see stay.
+- Smart playlists and smart collections are filled by their filter: their
+  entries aren't added, removed or moved (`400`).
+- Collections are a library's, for everyone who sees it: only a token with
+  `manage` makes and changes them (`403` otherwise), with movies and shows
+  of its library. Without a library (`parentId`), a new one is in its first
+  title's. Pley's own four in each library (Recently Added and the like)
+  aren't listed.
+- `DELETE /Items/{id}` deletes the caller's playlist, or with `manage` a
+  collection; `CanDelete` says which. A title is never deleted (`403`).
+
+### Editing metadata
+
+A token with `manage` (an administrator's, made in Account) edits titles'
+metadata and pictures as Pley's own editor does
+([API.md](API.md#items)); other tokens get `403`. Jellyfin's apps that
+have an editor show it only to administrators, which apps' sign-ins never
+are here, so this is for scripts and tools. A token with `activity` says it
+is an administrator, but edits nothing without `manage` too.
+
+- `POST /Items/{id}` takes a `BaseItemDto`, as apps send back the one they
+  were given with their changes. The fields Pley keeps that differ from
+  what it has are edited: `Name`, `ForcedSortName`, `OriginalTitle`,
+  `ProductionYear`, `PremiereDate`, `Overview`, `Taglines` (the first),
+  `Studios` (the first), `OfficialRating`, `Genres`, and `Tags` (Pley's
+  labels, which details list to tokens with `manage` only). Each edit is locked, as in Pley, so refreshes keep it.
+  Collections take `Name`, `Overview`, `ForcedSortName` and `Tags`.
+- `LockedFields` lists `Name`, `Overview`, `Genres`, `Studios` and
+  `OfficialRating` while Pley keeps them; sent without one of them, that
+  field goes back to the metadata source. `LockData` is `true` while every
+  field that holds something is kept, and sent `true` keeps them all.
+  Pley's labels are never refreshed, so `Tags` needs no lock.
+- A change to what Pley doesn't keep (`People`, `CommunityRating`,
+  `CriticRating`, `ProductionLocations`, or a lock of `Cast`, `Runtime` or
+  `ProductionLocations`) answers `400` naming it, and nothing of that
+  request is applied. Ids change by Fix Match. Other fields, read-only in
+  Jellyfin too, are left as they are.
+- Titles' pictures (`Primary`, `Backdrop`, `Thumb`; an episode's
+  `Primary` is its still; collections' are set through the
+  Plex-compatible API): `GET /Items/{id}/RemoteImages?type=` lists TMDB's
+  (none without a TMDB key), `POST /Items/{id}/RemoteImages/Download?type=&imageUrl=`
+  takes one of them, or a picture on another host Pley takes pictures from
+  ([Editing](#editing); others answer `400`), and
+  `POST /Items/{id}/Images/{type}` one uploaded in base64, as Jellyfin
+  takes it (25 MB at most, re-encoded). Each is kept through refreshes;
+  `DELETE /Items/{id}/Images/{type}` goes back to the automatic one.
+- Identify: `POST /Items/RemoteSearch/Movie` and `/Series` list TMDB's
+  candidates for `SearchInfo.Name` and `Year` (`400` without a TMDB key),
+  and `POST /Items/RemoteSearch/Apply/{id}` fixes the match to one, by its
+  `ProviderIds.Tmdb`.
+- `POST /Items/{id}/Refresh` fetches a title's metadata again, or scans a
+  library.
+
+### Activity monitors
+
+Tracearr, and other activity monitors that speak Jellyfin's API, connect
+to Pley as a Jellyfin server with a token that has `activity` (See
+everyone's activity), made by an administrator in Account. Give the
+monitor Pley's address and the token as its API key.
+
+- `GET /Sessions` lists what everyone is playing: who, on which device,
+  the title (with its show, season and episode), how far in it is, whether
+  it is paused, and whether it plays as it is (`DirectPlay`), remuxed
+  (`DirectStream`) or converted (`Transcode`). Other tokens get an empty
+  list.
+- `/Users/Me` says the token is an administrator
+  (`Policy.IsAdministrator`), because monitors take only an
+  administrator's key. That is all it does: the token still can't change
+  anything without `manage`, nor administer anything at all.
+- `/Users` lists the token's own account; monitors add other people when
+  they start playing.
+- Monitors don't get players' addresses, so they can't show where someone
+  watches from. They can't stop a session or send it a message, and see
+  no history from before they were connected.
 
 ### Jellyfin endpoints
 
@@ -702,10 +961,13 @@ and closes once it ends.
 | Server | `GET /System/Info/Public`, `/System/Info`, `/System/Ping`, `/System/Endpoint`, `/Branding/Configuration`, `/Branding/Css`, `/QuickConnect/Enabled` (`false`; `/QuickConnect/Initiate` and `/Connect` answer `401`), `/Playback/BitrateTest` (`size` random bytes for a speed test, at most 100 MB) |
 | Users | `POST /Users/AuthenticateByName`, `GET /Users/Me`, `/Users`, `/Users/Public`, `/Users/{id}`, `/Users/{id}/Images/Primary`, `/UserImage?userId=`, `POST /Sessions/Logout`, `/Sessions/Capabilities[/Full]`, `GET|POST /DisplayPreferences/{id}` |
 | Browsing | `GET /UserViews`, `/Items` (by `ParentId`, `Ids`, `SearchTerm`, `PersonIds`, `ArtistIds`; `IncludeItemTypes`, `Recursive`, `Filters`, `Genres`, `Years`, `OfficialRatings`, `Tags`, `Studios`, `NameStartsWith`, `SortBy`, `SortOrder`, `StartIndex`, `Limit`), `/Items/{id}`, `/Items/Latest`, `/Items/Suggestions`, `/UserItems/Resume`, `/Shows/NextUp`, `/Shows/Upcoming` (none), `/Shows/{id}/Seasons`, `/Shows/{id}/Episodes`, `/Items/{id}/Similar`, `/LocalTrailers`, `/SpecialFeatures`, `/Ancestors`, `/Items/Filters`, `/Items/Filters2`, `/Genres`, `/MusicGenres`, `/Artists`, `/Artists/AlbumArtists`, `/Studios`, `/Years`, `/Tags` (none), `/Persons?SearchTerm=`, `/Search/Hints`, `/Playlists/{id}/Items`, and the `/Users/{id}/…` forms of these |
+| Playlists | `POST /Playlists` (a `CreatePlaylistDto` body, or `Name`, `Ids`, `MediaType` in the query), `GET|POST /Playlists/{id}`, `POST|DELETE /Playlists/{id}/Items` (`ids`, `position`; `entryIds`), `POST /Playlists/{id}/Items/{entry}/Move/{index}`, `GET /Playlists/{id}/Users[/{user}]`, `DELETE /Items/{id}` |
+| Collections | `POST /Collections?name=&ids=&parentId=`, `POST|DELETE /Collections/{id}/Items?ids=`, `DELETE /Items/{id}` (`manage`) |
+| Editing | `POST /Items/{id}`, `GET /Items/{id}/MetadataEditor`, `/Items/{id}/ExternalIdInfos` (none), `POST /Items/{id}/Refresh`, `GET /Items/{id}/RemoteImages`, `/Items/{id}/RemoteImages/Providers`, `POST /Items/{id}/RemoteImages/Download`, `POST|DELETE /Items/{id}/Images/{type}[/0]`, `POST /Items/RemoteSearch/Movie`, `/Items/RemoteSearch/Series`, `/Items/RemoteSearch/Apply/{id}` (`manage`) |
 | Pictures | `GET|HEAD /Items/{id}/Images/{type}[/0]` (`Primary`, `Backdrop`, `Thumb`; `maxWidth`, `fillWidth`, `width`, `tag`) |
 | Watch state | `POST|DELETE /UserPlayedItems/{id}`, `/UserFavoriteItems/{id}`, `/UserItems/{id}/Rating`; `GET|POST /UserItems/{id}/UserData`, and the `/Users/{id}/…` forms |
-| Playback | `GET|POST /Items/{id}/PlaybackInfo`, `/Videos/{id}/stream[.{container}]`, `/Audio/{id}/stream`, `/Audio/{id}/universal`, `/Items/{id}/Download`, `/Videos/{id}/master.m3u8`, `/Audio/{id}/master.m3u8`, `/Videos/{id}/{source}/Subtitles/{index}[/{ticks}]/Stream.{vtt|srt}`, `DELETE /Videos/ActiveEncodings`, `/MediaSegments/{id}` |
-| Reports | `POST /Sessions/Playing`, `/Sessions/Playing/Progress`, `/Sessions/Playing/Stopped`, `/Sessions/Playing/Ping`; `GET /Sessions` (none listed) |
+| Playback | `GET|POST /Items/{id}/PlaybackInfo`, `/Videos/{id}/stream[.{container}]`, `/Audio/{id}/stream`, `/Audio/{id}/universal`, `/Items/{id}/Download`, `/Videos/{id}/master.m3u8`, `/Audio/{id}/master.m3u8`, `/Videos/{id}/{source}/Subtitles/{index}[/{ticks}]/Stream.{vtt|srt}`, `/Videos/{id}/Trickplay/{width}/{n}.jpg`, `/Videos/{id}/Trickplay/{width}/tiles.m3u8`, `DELETE /Videos/ActiveEncodings`, `/MediaSegments/{id}` |
+| Reports | `POST /Sessions/Playing`, `/Sessions/Playing/Progress`, `/Sessions/Playing/Stopped`, `/Sessions/Playing/Ping`; `GET /Sessions` (everyone's with `activity`, none otherwise) |
 | Socket | `GET /socket` |
 
 ### Jellyfin apps tested
@@ -723,13 +985,16 @@ Run against Pley with the API on Pley's port and on a port of its own:
 
 - Quick Connect, and so signing in from an app with an account that uses
   two-step sign-in.
+- Audiobook libraries: the API lists none, nor their books.
 - Administration: the dashboard, users, libraries, plugins, scheduled
-  tasks, logs and activity.
-- Live TV, SyncPlay, remote control of other sessions (`/Sessions` lists
-  none), and finding the server on the network (UDP 7359): apps are given
-  its address.
-- Making or changing playlists and collections, and editing metadata.
-- Lyrics, seek previews (trickplay), instant mixes, theme songs and
-  videos, and intros before a title.
+  tasks and logs. Activity monitors see what is playing
+  ([Activity monitors](#activity-monitors)).
+- Live TV, SyncPlay, remote control of other sessions, and finding the
+  server on the network (UDP 7359): apps are given its address.
+- Shared and public playlists: Pley's are their owner's alone.
+- Editing cast and crew, ratings and countries, which Pley takes from the
+  metadata source, and searching other sources than TMDB.
+- Lyrics, instant mixes, theme songs and videos, and intros before a
+  title.
 - Downloads converted for a device: `/Items/{id}/Download` hands over the
   file as it is.

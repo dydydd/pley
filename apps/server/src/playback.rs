@@ -20,9 +20,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::catalog::FileRow;
-use crate::events::{EventBus, ServerEvent};
+use crate::events::EventBus;
 use crate::transcoder::Transcoder;
-use crate::util::now;
+use crate::util::{now, now_ms};
 
 /// What a player plays as it is, sent with every play request.
 ///
@@ -186,8 +186,10 @@ fn listed(list: &[String], c: &str) -> bool {
 }
 
 impl Caps {
+    /// Whether the player opens container `c`. An `.m4b` audiobook is an
+    /// `.m4a` file by another name: a player of either opens it.
     fn container(&self, c: &str) -> bool {
-        listed(&self.containers, c)
+        listed(&self.containers, c) || (c.eq_ignore_ascii_case("m4b") && listed(&self.containers, "m4a"))
     }
     fn video(&self, c: &str) -> bool {
         listed(&self.video_codecs, c)
@@ -364,6 +366,23 @@ pub struct PlaybackRequest {
     /// of their own instead ([`Session::media_key`]).
     #[serde(default)]
     pub keyed_urls: bool,
+    /// The commands this player obeys from a remote (`player_command`):
+    /// none unless it says so, so a remote never shows a button the player
+    /// ignores. Values this server doesn't know are left out.
+    #[serde(default, deserialize_with = "known_controls")]
+    pub controls: Controls,
+    /// What the player calls the device it plays on ("Living room TV"),
+    /// shown to the user's remotes. Cleaned like an app's name
+    /// ([`crate::oauth::clients::clean_name`]); without one the server names
+    /// the device from its User-Agent.
+    #[serde(default)]
+    pub device_name: Option<String>,
+    /// What kind of device the player plays on (a TV, a phone), for remotes
+    /// that pick TVs out from phones and browsers. Without one the server
+    /// goes by the app ([`crate::api::remote::device_kind_of`]). A value
+    /// this server doesn't know is left out rather than refused.
+    #[serde(default, deserialize_with = "known_device_kind")]
+    pub device_kind: Option<DeviceKind>,
     /// The transcoder keeps HDR in transcodes (its `hdr_transcode`
     /// capability): set by the server, never read from the player.
     #[serde(skip)]
@@ -377,6 +396,103 @@ pub struct PlaybackRequest {
     /// player: set by the server, never read from the player.
     #[serde(skip)]
     pub download: bool,
+    /// The server converts no video (its `transcode_video` setting is off):
+    /// the video is copied or the play is refused, and a quality asked for
+    /// plays the original ([`decide`]). Set by the server, never read from
+    /// the player.
+    #[serde(skip)]
+    pub copy_video_only: bool,
+    /// Which device the session plays on, when the server starts it for a
+    /// device that has no sign-in of its own (a Cast device,
+    /// [`crate::cast`]). Set by the server, never read from the player.
+    #[serde(skip)]
+    pub device_id: Option<String>,
+    /// The player opened a stream's address (the compatibility APIs' HLS
+    /// routes), so the answer is a stream, never the file as it is. Set by
+    /// the server, never read from the player.
+    #[serde(skip)]
+    pub stream_only: bool,
+    /// Which API the play came through. Set by the server, never read from
+    /// the player.
+    #[serde(skip)]
+    pub api: Api,
+}
+
+/// Which API started a session: Pley's own, or one of those for other
+/// apps (docs/COMPATIBILITY.md). The dashboard says which kind of app plays.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Api {
+    #[default]
+    Pley,
+    Plex,
+    Jellyfin,
+}
+
+/// A command a remote sends a player (`POST /api/sessions/{id}/command`),
+/// and what a player says it obeys. Stopping isn't one: every player obeys
+/// `session_stopped`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Control {
+    Play,
+    Pause,
+    Seek,
+    Skip,
+    Next,
+    Previous,
+    /// Another of the file's audio tracks.
+    Audio,
+    /// Another of the file's subtitle tracks, or none.
+    Subtitles,
+    /// Another quality of the player's Quality menu (docs/QUALITY.md), by id.
+    Quality,
+    /// The device's own volume, 0 to 100: a Cast device's.
+    Volume,
+}
+
+/// The commands a player obeys, each once, in a fixed order.
+pub type Controls = std::collections::BTreeSet<Control>;
+
+/// A player's `controls`: those this server knows. Others (from a newer
+/// player, or not strings at all) are left out rather than refusing the
+/// play request, and so is `null`.
+pub(crate) fn known_controls<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Controls, D::Error> {
+    let listed = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(listed.into_iter().filter_map(|value| serde_json::from_value(value).ok()).collect())
+}
+
+/// What kind of device a player plays on, as remotes tell TVs from phones
+/// and browsers: what the player said (`device_kind`), else what the
+/// server makes of its app ([`crate::api::remote::device_kind_of`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeviceKind {
+    Tv,
+    Phone,
+    Tablet,
+    Computer,
+    /// The web app in a browser.
+    Browser,
+    /// Not known: the Android app until it says, an app by another
+    /// publisher, a Jellyfin or Plex app.
+    Other,
+}
+
+impl DeviceKind {
+    /// The kind named `name` (`"tv"`), if this server knows it.
+    pub fn from_name(name: &str) -> Option<DeviceKind> {
+        serde_json::from_value(serde_json::Value::String(name.to_owned())).ok()
+    }
+}
+
+/// A player's `device_kind`: the kind named, if this server knows it. One
+/// it doesn't (from a newer player), a number or `null` is left out rather
+/// than refusing the play request.
+pub(crate) fn known_device_kind<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<DeviceKind>, D::Error> {
+    let named = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(named.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -449,7 +565,17 @@ pub struct PlaybackInfo {
     /// this; its media time alone may be off by the stream's B-frame delay
     /// and more (docs/API.md, "Types": `pts_offset_ms`).
     pub pts_offset_ms: Option<i64>,
+    /// The server converts no video (its `transcode_video` setting is off):
+    /// the player's Quality menu offers the original alone, and its
+    /// Automatic stays there (docs/QUALITY.md, "A server that converts no
+    /// video"). Left out otherwise.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub original_only: bool,
 }
+
+/// The reason a play has when it asked for a quality or a transcode of a
+/// server that transcodes no video ([`PlaybackRequest::copy_video_only`]).
+pub const NOT_CONVERTED: &str = "Video transcoding is off on this server.";
 
 /// What FFmpeg's MPEG-TS muxer adds to every timestamp of the transcoder's
 /// HLS segments, which otherwise keep the file's times from whatever point
@@ -467,6 +593,91 @@ pub const QUALITIES: [(&str, u32, u32); 7] = [
     ("4m", 4_000, 720),
     ("2m", 2_000, 480),
 ];
+
+/// One entry of the Quality menu: id, label, and the kbps and lines it
+/// holds the video to (`None` for the original and Automatic).
+type MenuEntry = (&'static str, &'static str, Option<(u32, u32)>);
+
+/// The Quality menu every player offers, in its order (docs/QUALITY.md,
+/// "The menu").
+pub const MENU: [MenuEntry; 9] = [
+    ("original", "Original", None),
+    ("auto", "Automatic", None),
+    ("30m", "30 Mbps 4K", Some((30_000, 2160))),
+    ("15m", "15 Mbps 4K", Some((15_000, 2160))),
+    ("20m", "20 Mbps 1080p", Some((20_000, 1080))),
+    ("12m", "12 Mbps 1080p", Some((12_000, 1080))),
+    ("8m", "8 Mbps 1080p", Some((8_000, 1080))),
+    ("4m", "4 Mbps 720p", Some((4_000, 720))),
+    ("2m", "2 Mbps 480p", Some((2_000, 480))),
+];
+
+/// `id` as one of the menu's, when it is one.
+pub fn menu_id(id: &str) -> Option<&'static str> {
+    MENU.iter().map(|q| q.0).find(|known| *known == id)
+}
+
+/// One quality of the menu as players offer it for a file: what a remote
+/// shows, and the id it sends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QualityOption {
+    pub id: &'static str,
+    pub label: String,
+}
+
+/// The qualities a player's menu offers for a `width`×`height` file of
+/// `bitrate` (bits per second), as every app works them out
+/// (apps/web/src/player/quality.ts, `qualitiesFor`): the original and
+/// Automatic, then each copy with fewer lines than the file or at most 80 %
+/// of its bitrate (every one when neither is known), named by the file's
+/// own lines when taller, once for each bitrate and lines, tallest first.
+pub fn offered_qualities(width: Option<i64>, height: Option<i64>, bitrate: Option<i64>) -> Vec<QualityOption> {
+    let (w, h) = (width.unwrap_or(0), height.unwrap_or(0));
+    let lines = (w > 0 || h > 0).then_some(if w >= 3800 || h >= 2100 {
+        2160
+    } else if w >= 1800 || h >= 1000 {
+        1080
+    } else if w >= 1200 || h >= 700 {
+        720
+    } else {
+        480
+    });
+    let kbps = bitrate.filter(|b| *b > 0).map(|b| b as f64 / 1000.0);
+    let height = height.filter(|h| *h > 0);
+    let known = kbps.is_some() || height.is_some();
+    let mut out = Vec::new();
+    let mut copies: Vec<(QualityOption, u32, u32)> = Vec::new();
+    for (id, label, cap) in MENU {
+        let Some((cap_kbps, cap_lines)) = cap else {
+            out.push(QualityOption { id, label: label.to_owned() });
+            continue;
+        };
+        if !known {
+            out.push(QualityOption { id, label: label.to_owned() });
+            continue;
+        }
+        let fewer_lines = height.is_some_and(|h| i64::from(cap_lines) < h);
+        let lighter = kbps.is_some_and(|k| f64::from(cap_kbps) <= k * 0.8);
+        if !fewer_lines && !lighter {
+            continue;
+        }
+        let shown = lines.map_or(cap_lines, |l| cap_lines.min(l));
+        if copies.iter().any(|c| (c.1, c.2) == (cap_kbps, shown)) {
+            continue;
+        }
+        let label = match lines {
+            Some(l) if cap_lines > l => {
+                let named = if l >= 2160 { "4K".to_owned() } else { format!("{l}p") };
+                format!("{} Mbps {named}", cap_kbps / 1000)
+            }
+            _ => label.to_owned(),
+        };
+        copies.push((QualityOption { id, label }, cap_kbps, shown));
+    }
+    copies.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)));
+    out.extend(copies.into_iter().map(|c| c.0));
+    out
+}
 
 /// What a transcode of the original aims for, instead of the file's own
 /// size and bitrate (heavy to make and to send, for no better picture): the
@@ -559,6 +770,13 @@ pub struct Decision {
 /// tall as it fits).
 const LADDER_LINES: [i64; 4] = [1080, 720, 540, 360];
 
+/// The width of a 16:9 picture `lines` tall, even: a quality fits a video
+/// into that box, so a film wider than 16:9 comes no wider than the screen
+/// it was picked for (1080p is at most 1920×1080, a 2.40:1 film 1920×800).
+fn box_width(lines: i64) -> i64 {
+    (lines * 16 / 9 + 1) / 2 * 2
+}
+
 /// The lower renditions of a transcode of a `width`×`height` video as
 /// `top` asks, for a player that moves between them by itself as its
 /// connection allows: its own size at the bitrate that size gets
@@ -590,7 +808,7 @@ pub fn ladder(width: Option<i64>, height: Option<i64>, top: &VideoRequest) -> Ve
         above = own;
     }
     for rung in LADDER_LINES.into_iter().filter(|l| *l < lines * 9 / 10) {
-        let width = (rung * 16 / 9 + 1) / 2 * 2;
+        let width = box_width(rung);
         let kbps = default_video_kbps(width, rung).min(cap);
         if u64::from(kbps) * 3 > u64::from(above) * 2 {
             continue;
@@ -1210,13 +1428,32 @@ fn hls_copyable(codec: &str, format: SegmentFormat, h264_only: bool) -> bool {
 
 /// Containers the browser can play natively (used when a file was never probed).
 fn web_container(container: &str) -> bool {
-    matches!(container, "mp4" | "m4v" | "webm" | "mp3" | "m4a" | "flac" | "ogg" | "wav" | "aac")
+    matches!(container, "mp4" | "m4v" | "webm" | "mp3" | "m4a" | "m4b" | "flac" | "ogg" | "wav" | "aac")
 }
 
 pub fn decide(file: &FileRow, info: Option<&MediaInfo>, streams: &[MediaStream], req: &PlaybackRequest) -> Decision {
     let caps = &req.caps;
     let container = file.container.as_deref().unwrap_or_default();
     let mut reasons = Vec::new();
+    // A server that converts no video has no lower quality of a video to
+    // give: one asked for plays the original, as it plays best (a player
+    // that kept a quality gets the file as it is where it plays so, not a
+    // stream with its sound converted). Asked to convert with no quality
+    // (a decoder that gave up on the file), it copies the video into a
+    // stream rather than play the file as it is, which that player would
+    // only ask for again. Music is converted as ever.
+    let copy_only = req.copy_video_only && info.is_none_or(|i| i.video().is_some());
+    let quality_asked = req.max_bitrate.or(req.max_height).is_some();
+    let unconverted = copy_only && (req.mode == PlaybackMode::Transcode || quality_asked);
+    let (mode, max_bitrate, max_height) = match req.mode {
+        PlaybackMode::Transcode if copy_only && quality_asked && !req.stream_only => (PlaybackMode::Auto, None, None),
+        PlaybackMode::Transcode if copy_only => (PlaybackMode::Remux, None, None),
+        mode if copy_only => (mode, None, None),
+        mode => (mode, req.max_bitrate, req.max_height),
+    };
+    if unconverted {
+        reasons.push(NOT_CONVERTED.into());
+    }
     // A download is one file, whatever the player streams.
     let segment_format = if req.download { SegmentFormat::Ts } else { caps.segment_format(req.fmp4_segments) };
     // A player that takes only H.264 from MPEG-TS (one that lists fMP4
@@ -1227,7 +1464,7 @@ pub fn decide(file: &FileRow, info: Option<&MediaInfo>, streams: &[MediaStream],
 
     let Some(info) = info else {
         // Never probed (transcoder was unavailable during the scan).
-        let direct = match req.mode {
+        let direct = match mode {
             PlaybackMode::Direct => true,
             PlaybackMode::Auto => caps.container(container) || web_container(container),
             PlaybackMode::Remux | PlaybackMode::Transcode => false,
@@ -1355,15 +1592,18 @@ pub fn decide(file: &FileRow, info: Option<&MediaInfo>, streams: &[MediaStream],
     if !audio_is_default {
         reasons.push("Audio track switching not supported.".into());
     }
-    let bitrate_ok = req.max_bitrate.is_none_or(|max| file.bitrate.unwrap_or(0) <= max as i64 * 1000);
-    let size_ok = req.max_height.is_none_or(|max| video.and_then(|v| v.height).unwrap_or(0) <= max as i64);
+    let bitrate_ok = max_bitrate.is_none_or(|max| file.bitrate.unwrap_or(0) <= max as i64 * 1000);
+    let size_ok = max_height.is_none_or(|max| {
+        let (w, h) = video.map_or((None, None), |v| (v.width, v.height));
+        h.unwrap_or(0) <= i64::from(max) && w.unwrap_or(0) <= box_width(i64::from(max))
+    });
     if !bitrate_ok || !size_ok {
         reasons.push("Lower quality picked.".into());
     }
 
     let audio_index = audio.map(|a| a.index);
     let direct_ok = container_ok && video_ok && audio_ok && audio_is_default && bitrate_ok && size_ok && burn.is_none();
-    let direct = match req.mode {
+    let direct = match mode {
         PlaybackMode::Auto => direct_ok,
         // The user knows better (e.g. a browser that plays more than it
         // admits); image subtitles and alternate audio are lost.
@@ -1393,21 +1633,21 @@ pub fn decide(file: &FileRow, info: Option<&MediaInfo>, streams: &[MediaStream],
         };
     }
 
-    match req.mode {
-        PlaybackMode::Remux if direct_ok => reasons.push("Remux requested.".into()),
+    match mode {
+        // Not what was asked for, when a conversion was.
+        PlaybackMode::Remux if direct_ok && !unconverted => reasons.push("Remux requested.".into()),
         PlaybackMode::Transcode => reasons.push("Transcode requested.".into()),
         _ => {}
     }
     // HEVC the player would take copied, in fMP4.
-    if ts_h264_only && req.mode != PlaybackMode::Transcode && video_copy_ok && video.is_some_and(|v| v.codec == "hevc")
-    {
+    if ts_h264_only && mode != PlaybackMode::Transcode && video_copy_ok && video.is_some_and(|v| v.codec == "hevc") {
         reasons.push("HEVC not supported in MPEG-TS.".into());
     }
     let mut quality = None;
     let video_req = video.map(|v| {
         // Whatever the client plays as it is goes through untouched, like
         // Plex's Direct Stream: only the audio or the container changes.
-        let copy = req.mode != PlaybackMode::Transcode
+        let copy = mode != PlaybackMode::Transcode
             && video_copy_ok
             && hls_copyable(&v.codec, segment_format, ts_h264_only)
             && v.interlaced != Some(true)
@@ -1429,13 +1669,13 @@ pub fn decide(file: &FileRow, info: Option<&MediaInfo>, streams: &[MediaStream],
             (Some(most), Some(screen)) => Some(most.min(screen)),
             (most, screen) => most.or(screen),
         };
-        let (max_height, max_bitrate) = if copy || req.max_bitrate.is_some() || req.max_height.is_some() {
-            let max_height = match (req.max_height, most_lines) {
+        let (max_height, max_bitrate) = if copy || max_bitrate.is_some() || max_height.is_some() {
+            let max_height = match (max_height, most_lines) {
                 (Some(asked), Some(most)) => Some(asked.min(most)),
                 (None, Some(most)) if v.height.is_some_and(|h| h > i64::from(most)) => Some(most),
                 (asked, _) => asked,
             };
-            (max_height, req.max_bitrate)
+            (max_height, max_bitrate)
         } else {
             let (id, kbps, lines) = closest_quality_within(v.width, v.height, file.bitrate, most_lines);
             quality = Some(id);
@@ -1464,7 +1704,7 @@ pub fn decide(file: &FileRow, info: Option<&MediaInfo>, streams: &[MediaStream],
             stream_index: Some(v.index),
             mode: if copy { VideoMode::Copy } else { VideoMode::Transcode },
             codec: if hdr == OutputRange::Sdr { VideoCodec::H264 } else { VideoCodec::Hevc },
-            max_width: None,
+            max_width: max_height.and_then(|h| u32::try_from(box_width(i64::from(h))).ok()),
             max_height,
             max_bitrate_kbps: max_bitrate.map(|b| b.saturating_sub(192).max(500)),
             dolby_vision: if copy { copy_dolby_vision } else { DolbyVisionMode::Copy },
@@ -1610,13 +1850,85 @@ pub fn subtitle_tracks(file_id: i64, streams: &[MediaStream]) -> Vec<SubtitleTra
         .collect()
 }
 
+/// One of a file's audio or subtitle tracks, as remotes offer it
+/// (`PlayingSession.tracks`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TrackOption {
+    pub index: i64,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub codec: Option<String>,
+    /// An audio track's channels; `None` for subtitles.
+    pub channels: Option<i64>,
+    pub default: bool,
+    pub forced: bool,
+}
+
+/// The tracks a remote picks from for a session's file.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TrackOptions {
+    pub audio: Vec<TrackOption>,
+    pub subtitles: Vec<TrackOption>,
+}
+
+/// The audio and subtitle tracks of a file's streams (sidecar and added
+/// subtitles included), in their order.
+pub fn track_options(streams: &[MediaStream]) -> TrackOptions {
+    let option = |s: &MediaStream| TrackOption {
+        index: s.index,
+        language: s.language.clone(),
+        title: s.title.clone(),
+        codec: Some(s.codec.clone()).filter(|c| !c.is_empty()),
+        channels: if s.kind == StreamKind::Audio { s.channels } else { None },
+        default: s.default,
+        forced: s.forced,
+    };
+    let of = |kind: StreamKind| streams.iter().filter(|s| s.kind == kind).map(option).collect();
+    TrackOptions { audio: of(StreamKind::Audio), subtitles: of(StreamKind::Subtitle) }
+}
+
 // ------------------------------------------------------------------ sessions
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlayState {
     pub position_ms: i64,
     pub state: String,
+    /// Its player was last heard from: a report, or a request for media.
     pub updated_at: i64,
+    /// Its player's last progress report (unix ms), which `position_ms` is
+    /// as of; none before the first. Requests for media move `updated_at`
+    /// but not the place, so where the player is by now counts from this.
+    /// In milliseconds: remotes move the place on from it, and whole
+    /// seconds would put them up to a second out.
+    #[serde(skip)]
+    pub reported_at_ms: Option<i64>,
+    /// The audio track it plays, a stream index of the session's file: what
+    /// its player last said, else what its play request picked; `None` when
+    /// not known.
+    #[serde(skip)]
+    pub audio_index: Option<i64>,
+    /// The subtitles it shows, the same way; `-1`: none.
+    #[serde(skip)]
+    pub subtitle_index: Option<i64>,
+    /// The quality its Quality menu has picked (one of [`MENU`]'s ids), as
+    /// its player last said; `None` until it does.
+    #[serde(skip)]
+    pub quality: Option<&'static str>,
+    /// The device's volume, 0 to 100, for a player that takes `volume`, as
+    /// it last said; `None` until it does.
+    #[serde(skip)]
+    pub volume: Option<u8>,
+}
+
+impl PlayState {
+    /// Where its player is by now: the last report's place, moved on since
+    /// at normal speed while it plays (`now_ms`: unix ms).
+    pub fn position_now(&self, now_ms: i64) -> i64 {
+        match self.reported_at_ms {
+            Some(at) if self.state == "playing" => self.position_ms.saturating_add((now_ms - at).max(0)),
+            _ => self.position_ms,
+        }
+    }
 }
 
 /// What a transcode session asked the transcoder for, kept to re-create the
@@ -1659,6 +1971,21 @@ pub struct Session {
     /// The video bitrate its player asked for since it started (kbps),
     /// which a recreated job goes on at too.
     pub bitrate: Mutex<Option<u32>>,
+    /// The commands its player obeys from a remote
+    /// ([`PlaybackRequest::controls`]); none for players that never said.
+    pub controls: Controls,
+    /// The device it plays on, as the user's remotes show it: what the
+    /// player called it, or a name from its User-Agent.
+    pub device: Option<String>,
+    /// Which device that is, the same for everything the device plays
+    /// ([`crate::api::remote::device_id_of`]); `session-<id>` until known.
+    pub device_id: String,
+    /// What kind of device it is ([`DeviceKind`]).
+    pub device_kind: DeviceKind,
+    /// Which API started it.
+    pub api: Api,
+    /// Commands sent to it lately, which [`Session::take_command`] counts.
+    commands: Mutex<CommandWindow>,
     last_transcoder_touch: AtomicI64,
     /// Not heard from for [`ACTIVE_WINDOW_SECS`] (no report, heartbeat or
     /// request for media): out of "Now playing", its transcode stopped. The
@@ -1682,8 +2009,10 @@ impl Session {
         start_ms: i64,
     ) -> Self {
         let now = now();
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let device_id = format!("session-{id}");
         Self {
-            id: uuid::Uuid::new_v4().simple().to_string(),
+            id,
             user_id,
             username,
             client_id,
@@ -1694,12 +2023,27 @@ impl Session {
             transcode,
             job_id: Mutex::new(job_id),
             started_at: now,
-            play: Mutex::new(PlayState { position_ms: start_ms, state: "playing".into(), updated_at: now }),
+            play: Mutex::new(PlayState {
+                position_ms: start_ms,
+                state: "playing".into(),
+                updated_at: now,
+                reported_at_ms: None,
+                audio_index: None,
+                subtitle_index: None,
+                quality: None,
+                volume: None,
+            }),
             app_grant: None,
             compatibility_token: None,
             media_key: None,
             recreate: tokio::sync::Mutex::new(()),
             bitrate: Mutex::new(None),
+            controls: Controls::new(),
+            device: None,
+            device_id,
+            device_kind: DeviceKind::Other,
+            api: Api::Pley,
+            commands: Mutex::new(CommandWindow::default()),
             last_transcoder_touch: AtomicI64::new(now),
             quiet: AtomicBool::new(false),
         }
@@ -1707,6 +2051,15 @@ impl Session {
 
     pub fn job_id(&self) -> Option<String> {
         self.job_id.lock().clone()
+    }
+
+    /// Says which device it plays on ([`Session::device_id`]), when that is
+    /// known, and what kind of device it is.
+    pub fn on_device(&mut self, id: Option<String>, kind: DeviceKind) {
+        if let Some(id) = id {
+            self.device_id = id;
+        }
+        self.device_kind = kind;
     }
 
     pub fn position_ms(&self) -> i64 {
@@ -1721,19 +2074,73 @@ impl Session {
     }
 
     /// Records a progress report; whether the play state (playing, paused,
-    /// stopped) changed or the session woke, which the dashboard hears about
-    /// at once.
+    /// stopped) changed, the place jumped (a seek, a skip) or the session
+    /// woke, which the dashboard and the user's remotes hear about at once.
     pub fn update(&self, position_ms: i64, state: &str) -> bool {
+        let now_ms = now_ms();
         let mut play = self.play.lock();
         let changed = play.state != state;
+        let jumped = play.reported_at_ms.is_some_and(|at| jumped(&play, at, now_ms, position_ms));
         play.position_ms = position_ms;
         if changed {
             play.state = state.to_owned();
         }
-        play.updated_at = now();
+        play.updated_at = now_ms / 1000;
+        play.reported_at_ms = Some(now_ms);
         drop(play);
         let woke = self.quiet.swap(false, Ordering::SeqCst);
-        changed || woke
+        changed || jumped || woke
+    }
+
+    /// The tracks its play request picked, which remotes show until its
+    /// player says which it plays.
+    pub fn picked_tracks(&mut self, audio_index: Option<i64>, subtitle_index: Option<i64>) {
+        let play = self.play.get_mut();
+        (play.audio_index, play.subtitle_index) = (audio_index, subtitle_index);
+    }
+
+    /// Records the tracks its player says it plays (a report's audio index,
+    /// and its subtitle index, `-1` for none); one it doesn't say, or one
+    /// out of range, leaves what was known. Whether either changed, which
+    /// the user's remotes hear about at once.
+    pub fn report_tracks(&self, audio_index: Option<i64>, subtitle_index: Option<i64>) -> bool {
+        let mut play = self.play.lock();
+        let before = (play.audio_index, play.subtitle_index);
+        if let Some(index) = audio_index.filter(|i| (0..=MAX_STREAM_INDEX).contains(i)) {
+            play.audio_index = Some(index);
+        }
+        if let Some(index) = subtitle_index.filter(|i| (-1..=MAX_STREAM_INDEX).contains(i)) {
+            play.subtitle_index = Some(index);
+        }
+        (play.audio_index, play.subtitle_index) != before
+    }
+
+    /// Records the quality its player says its menu has picked (one of
+    /// [`MENU`]'s ids; another, or none, leaves what was known). Whether it
+    /// changed, which the user's remotes hear about at once.
+    pub fn report_quality(&self, quality: Option<&str>) -> bool {
+        let Some(id) = quality.and_then(menu_id) else { return false };
+        let mut play = self.play.lock();
+        let changed = play.quality != Some(id);
+        play.quality = Some(id);
+        changed
+    }
+
+    /// Records the device's volume its player says it has, 0 to 100 (more
+    /// is taken as 100). Whether it changed, which the user's remotes hear
+    /// about at once.
+    pub fn report_volume(&self, percent: u8) -> bool {
+        let mut play = self.play.lock();
+        let changed = play.volume != Some(percent.min(100));
+        play.volume = Some(percent.min(100));
+        changed
+    }
+
+    /// Counts a command sent to it: whether it may go to its player, at
+    /// most [`COMMANDS_PER_SECOND`] each second. A remote held down, or a
+    /// script, mustn't flood the user's event streams.
+    pub fn take_command(&self) -> bool {
+        self.commands.lock().take()
     }
 
     /// Playing or paused, with a player that was heard from lately: what
@@ -1756,12 +2163,70 @@ impl Session {
     }
 }
 
+/// How far a report's place may be from where the session would be by now
+/// before it counts as a jump: more than reports drift between themselves.
+const JUMP_MS: i64 = 5_000;
+/// The slowest and fastest speeds players offer, as fractions: playing, a
+/// report may be anywhere between them from the last without a jump.
+const SLOWEST_SPEED: (i64, i64) = (1, 2);
+const FASTEST_SPEED: (i64, i64) = (2, 1);
+
+/// Whether a report at `position_ms` jumped from the last one, made at
+/// `reported_at_ms` (a seek, a skip). Playing, the place may have moved on at
+/// any speed a player offers since; otherwise it stays where it was. There
+/// is no expected place before a session's first report: until then its
+/// transcode starts and its player buffers, which takes a while.
+fn jumped(play: &PlayState, reported_at_ms: i64, now_ms: i64, position_ms: i64) -> bool {
+    let (low, high) = if play.state == "playing" {
+        let elapsed_ms = (now_ms - reported_at_ms).max(0);
+        let at = |(num, den): (i64, i64)| play.position_ms.saturating_add(elapsed_ms.saturating_mul(num) / den);
+        (at(SLOWEST_SPEED), at(FASTEST_SPEED))
+    } else {
+        (play.position_ms, play.position_ms)
+    };
+    position_ms < low.saturating_sub(JUMP_MS) || position_ms > high.saturating_add(JUMP_MS)
+}
+
+/// The highest stream index a player's report may name: embedded streams
+/// are below 1000, subtitle files and added subtitles below 10000
+/// ([`crate::subtitles`]).
+const MAX_STREAM_INDEX: i64 = 9999;
+
+/// Commands a session takes each second at most ([`Session::take_command`]).
+pub const COMMANDS_PER_SECOND: u32 = 10;
+
+/// The commands of the current second sent to one session (an item's or
+/// a Live TV viewer's), counted by [`CommandWindow::take`].
+#[derive(Debug, Clone, Default)]
+pub struct CommandWindow {
+    started: Option<std::time::Instant>,
+    count: u32,
+}
+
+impl CommandWindow {
+    /// Counts a command: whether it may go, at most [`COMMANDS_PER_SECOND`]
+    /// each second.
+    pub fn take(&mut self) -> bool {
+        let at = std::time::Instant::now();
+        match self.started {
+            Some(started) if at.duration_since(started) < Duration::from_secs(1) => {
+                if self.count >= COMMANDS_PER_SECOND {
+                    return false;
+                }
+                self.count += 1;
+            }
+            _ => *self = CommandWindow { started: Some(at), count: 1 },
+        }
+        true
+    }
+}
+
 #[derive(Default)]
 pub struct Sessions {
     map: Mutex<HashMap<String, Arc<Session>>>,
-    /// Transcode slots of play requests still creating their job (see
+    /// Slots of play requests still creating their job, by [`Pool`] (see
     /// [`Sessions::reserve_transcode`]). Only raised while `map` is locked.
-    reserved: AtomicUsize,
+    reserved: [AtomicUsize; 2],
     /// Sessions started so far (see [`Sessions::started_since`]), and play
     /// requests begun.
     starts: AtomicU64,
@@ -1817,17 +2282,52 @@ const STOPPED_KEPT_SECS: i64 = 30 * 60;
 /// How many stopped sessions are remembered at most (the oldest go first).
 const STOPPED_KEPT: usize = 1_000;
 
-/// A transcode slot, held while the job is created. It counts against the
-/// limit until the session takes it over ([`Sessions::insert_transcode`]) or
-/// it is dropped: the request failed, or the client went away.
+/// What a stream the transcoder makes costs: transcoding video takes many
+/// times what copying it does, so those streams have a limit of their own
+/// within the limit of every kind (`max_video_transcodes` and
+/// `max_transcodes` in Settings → Transcoder), which leaves room for people
+/// whose players only need the sound transcoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pool {
+    /// The video is transcoded.
+    Video,
+    /// The video is copied, or there is none: a remux, with the sound
+    /// transcoded or not, and music.
+    Light,
+}
+
+impl Pool {
+    /// The pool of a stream with this video.
+    pub fn of(video: Option<&VideoRequest>) -> Pool {
+        match video {
+            Some(v) if v.mode == VideoMode::Transcode => Pool::Video,
+            _ => Pool::Light,
+        }
+    }
+}
+
+/// A slot for a stream of a [`Pool`], held while the job is created. It
+/// counts against the limits until the session takes it over
+/// ([`Sessions::insert_transcode`]) or it is dropped: the request failed, or
+/// the client went away.
 pub struct TranscodeSlot<'a> {
     sessions: &'a Sessions,
+    pool: Pool,
 }
 
 impl Drop for TranscodeSlot<'_> {
     fn drop(&mut self) {
-        self.sessions.reserved.fetch_sub(1, Ordering::SeqCst);
+        self.sessions.reserved[self.pool as usize].fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// The limit that kept a stream from starting ([`Sessions::reserve_transcode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Full {
+    /// Streams of every kind.
+    Total,
+    /// Streams that transcode video.
+    Video,
 }
 
 /// A play request on its way to a session (see [`Sessions::begin_start`]).
@@ -1916,18 +2416,76 @@ impl Sessions {
         session
     }
 
-    /// Take one of `max` transcode slots, or `None` when live transcodes and
-    /// the play requests still creating their job use them all. Creating a
-    /// job takes seconds: checking and taking happen under one lock, so play
-    /// requests arriving together can't all pass the check before any of
-    /// them has a session.
-    pub fn reserve_transcode(&self, max: usize) -> Option<TranscodeSlot<'_>> {
+    /// Take a slot for a stream of `pool`: one of the `total` of every
+    /// kind, and for one that transcodes video one of the `video` among
+    /// them too. `Err` names the limit that live streams and the play
+    /// requests still creating their job have used up. Creating a job takes
+    /// seconds: checking and taking happen under one lock, so play requests
+    /// arriving together can't all pass the check before any of them has a
+    /// session. A session counts as the stream the transcoder really makes:
+    /// a copy it had to transcode takes a video transcode's slot before it
+    /// starts ([`Sessions::transcodes_video`]).
+    pub fn reserve_transcode(&self, pool: Pool, total: usize, video: usize) -> Result<TranscodeSlot<'_>, Full> {
         let map = self.map.lock();
-        if live_transcodes(&map) + self.reserved.load(Ordering::SeqCst) >= max {
-            return None;
+        if let Some(full) = self.full_in(&map, pool, total, video, &[]) {
+            return Err(full);
         }
-        self.reserved.fetch_add(1, Ordering::SeqCst);
-        Some(TranscodeSlot { sessions: self })
+        self.reserved[pool as usize].fetch_add(1, Ordering::SeqCst);
+        Ok(TranscodeSlot { sessions: self, pool })
+    }
+
+    /// The limit a stream of `pool` is past now, as
+    /// [`Sessions::reserve_transcode`] would answer, without taking a slot.
+    pub fn full(&self, pool: Pool, total: usize, video: usize) -> Option<Full> {
+        self.full_in(&self.map.lock(), pool, total, video, &[])
+    }
+
+    /// The limit a stream of `pool` would be past with the sessions of
+    /// `gone` ended, counted as [`Sessions::full`] counts: only the live
+    /// streams among theirs free a slot, and the play requests still
+    /// creating their job keep theirs. `None`: ending them makes room.
+    pub fn full_without(&self, pool: Pool, total: usize, video: usize, gone: &[&str]) -> Option<Full> {
+        self.full_in(&self.map.lock(), pool, total, video, gone)
+    }
+
+    /// The limit a stream of `pool` is past, the sessions of `gone` left out.
+    fn full_in(
+        &self,
+        map: &HashMap<String, Arc<Session>>,
+        pool: Pool,
+        total: usize,
+        video: usize,
+        gone: &[&str],
+    ) -> Option<Full> {
+        let reserved = |pool: Pool| self.reserved[pool as usize].load(Ordering::SeqCst);
+        let live = |pool| live_transcodes(map.values().filter(|s| !gone.contains(&s.id.as_str())), pool);
+        if live(None) + reserved(Pool::Video) + reserved(Pool::Light) >= total {
+            return Some(Full::Total);
+        }
+        if pool == Pool::Video && live(Some(Pool::Video)) + reserved(Pool::Video) >= video {
+            return Some(Full::Video);
+        }
+        None
+    }
+
+    /// The stream `slot` was taken for transcodes its video after all (a
+    /// copy the transcoder could only make by transcoding): it takes one of
+    /// the `video` too, or `Err` when live streams and the requests still
+    /// creating their job have them all, and the stream doesn't start.
+    pub fn transcodes_video(&self, slot: &mut TranscodeSlot<'_>, video: usize) -> Result<(), Full> {
+        if slot.pool == Pool::Video {
+            return Ok(());
+        }
+        let map = self.map.lock();
+        let reserved = &self.reserved[Pool::Video as usize];
+        if live_transcodes(map.values(), Some(Pool::Video)) + reserved.load(Ordering::SeqCst) >= video {
+            return Err(Full::Video);
+        }
+        // Under the lock, as a slot is taken: one count for the other.
+        reserved.fetch_add(1, Ordering::SeqCst);
+        self.reserved[Pool::Light as usize].fetch_sub(1, Ordering::SeqCst);
+        slot.pool = Pool::Video;
+        Ok(())
     }
 
     /// Add a transcode session, which takes over the slot reserved for it.
@@ -2142,11 +2700,12 @@ impl Sessions {
         sweep
     }
 
-    /// Transcode sessions with recent activity (segment requests or progress
-    /// reports). Abandoned sessions (closed tabs) stop counting quickly even
-    /// though they are only reaped later.
+    /// Sessions the transcoder makes a stream for (conversions and remuxes)
+    /// with recent activity (segment requests or progress reports).
+    /// Abandoned sessions (closed tabs) stop counting quickly even though
+    /// they are only reaped later.
     pub fn active_transcodes(&self) -> usize {
-        live_transcodes(&self.map.lock())
+        live_transcodes(self.map.lock().values(), None)
     }
 
     /// Every [`REAP_EVERY`]: sessions whose player went quiet leave "Now
@@ -2166,9 +2725,7 @@ impl Sessions {
                 for job in stop.filter_map(|s| s.job_id()).collect::<Vec<_>>() {
                     let _ = transcoder.delete_job(&job).await;
                 }
-                if !sweep.quieted.is_empty() || !sweep.forgotten.is_empty() {
-                    events.send(ServerEvent::SessionsChanged);
-                }
+                events.sessions_changed(sweep.quieted.iter().chain(&sweep.forgotten).map(|s| s.user_id));
             }
         });
     }
@@ -2181,10 +2738,15 @@ pub struct Sweep {
     pub quieted: Vec<Arc<Session>>,
 }
 
-/// See [`Sessions::active_transcodes`].
-fn live_transcodes(map: &HashMap<String, Arc<Session>>) -> usize {
+/// See [`Sessions::active_transcodes`]: those of `pool` among `sessions`, or
+/// of both.
+fn live_transcodes<'a>(sessions: impl Iterator<Item = &'a Arc<Session>>, pool: Option<Pool>) -> usize {
     let now = now();
-    map.values().filter(|s| s.transcode.is_some() && s.is_active(now)).count()
+    let counts = |s: &Session| match (&s.transcode, pool) {
+        (Some(spec), Some(pool)) => Pool::of(spec.request.video.as_ref()) == pool,
+        (spec, _) => spec.is_some(),
+    };
+    sessions.filter(|s| counts(s) && s.is_active(now)).count()
 }
 
 // ------------------------------------------------------------------ status mapping
@@ -2335,7 +2897,9 @@ pub fn transcode_info(job: &JobStatus) -> TranscodeInfo {
         // (HLG to HDR10), which keeps the video HDR.
         tonemap: video
             .filter(|v| !v.dynamic_range_out.is_some_and(|r| r.is_hdr()))
-            .and_then(|v| v.tonemap)
+            .and_then(
+                |v| if v.tonemap_quick_sync { Some(pley_transcoder_api::Tonemapper::QuickSync) } else { v.tonemap },
+            )
             .map(|t| t.as_str().to_owned()),
         dolby_vision: video.and_then(|v| v.dolby_vision).and_then(|m| match m {
             DolbyVisionMode::Copy => None,
@@ -2533,9 +3097,16 @@ mod tests {
             client_id: None,
             keep_previous: false,
             keyed_urls: false,
+            controls: Controls::new(),
+            device_name: None,
+            device_kind: None,
             hdr_transcodes: false,
             fmp4_segments: false,
             download: false,
+            copy_video_only: false,
+            stream_only: false,
+            api: Api::Pley,
+            device_id: None,
         }
     }
 
@@ -2545,6 +3116,69 @@ mod tests {
         let d = decide(&file("mp4", 5_000_000), Some(&i), &i.streams, &request());
         assert_eq!(d.method, Method::Direct);
         assert!(d.reasons.is_empty());
+    }
+
+    #[test]
+    fn a_server_that_converts_no_video_copies_it_whatever_is_asked() {
+        let off = || PlaybackRequest { copy_video_only: true, ..request() };
+        let i = info("h264", &["aac"], DynamicRange::Sdr);
+        let f = file("mp4", 20_000_000);
+        // A quality asked for: the original, as it plays best. Here the
+        // file as it is, as when the original is asked for.
+        let mut req = off();
+        (req.mode, req.max_bitrate, req.max_height) = (PlaybackMode::Transcode, Some(2_000), Some(480));
+        assert_eq!(decide(&f, Some(&i), &i.streams, &req).method, Method::Direct);
+        // In a container the player doesn't open: copied into a stream.
+        let d = decide(&file("mkv", 20_000_000), Some(&i), &i.streams, &req);
+        let video = d.video.unwrap();
+        assert_eq!((d.method, video.mode), (Method::Remux, VideoMode::Copy));
+        assert_eq!((video.max_height, video.max_bitrate_kbps, d.quality), (None, None, None));
+        assert!(d.reasons.iter().any(|r| r == NOT_CONVERTED), "{:?}", d.reasons);
+        // Asked to convert with no quality (a decoder that gave up on the
+        // file), or through a stream's address: a stream, never the file
+        // that was just refused.
+        let fallback = PlaybackRequest { mode: PlaybackMode::Transcode, ..off() };
+        let d = decide(&f, Some(&i), &i.streams, &fallback);
+        assert_eq!((d.method, d.video.unwrap().mode), (Method::Remux, VideoMode::Copy));
+        assert_eq!(d.reasons, [NOT_CONVERTED]);
+        let through_hls = PlaybackRequest { stream_only: true, ..req.clone() };
+        let d = decide(&f, Some(&i), &i.streams, &through_hls);
+        assert_eq!((d.method, d.video.unwrap().mode), (Method::Remux, VideoMode::Copy));
+        // A file never analysed is decided as when its original is asked
+        // for: as it is where the player opens it, and else not copied.
+        assert_eq!(decide(&f, None, &[], &req).method, Method::Direct);
+        let d = decide(&file("mkv", 20_000_000), None, &[], &req);
+        assert_eq!((d.method, d.video.unwrap().mode), (Method::Transcode, VideoMode::Transcode));
+        // A limit alone leaves the file as it is.
+        req.mode = PlaybackMode::Auto;
+        assert_eq!(decide(&f, Some(&i), &i.streams, &req).method, Method::Direct);
+        // The same request of a server that converts video.
+        req.copy_video_only = false;
+        assert_eq!(decide(&f, Some(&i), &i.streams, &req).video.unwrap().mode, VideoMode::Transcode);
+
+        // Only the sound is converted, as ever.
+        let dts = info("h264", &["dts"], DynamicRange::Sdr);
+        let d = decide(&file("mkv", 20_000_000), Some(&dts), &dts.streams, &off());
+        assert_eq!((d.method, d.video.unwrap().mode), (Method::Remux, VideoMode::Copy));
+        assert_eq!(d.audio.unwrap().mode, AudioMode::Transcode);
+        assert!(!d.reasons.iter().any(|r| r == NOT_CONVERTED), "nothing was asked for that it doesn't do");
+
+        // Video the player can't play still comes out as a conversion,
+        // which the play request then refuses.
+        let hevc = info("hevc", &["aac"], DynamicRange::Sdr);
+        let d = decide(&file("mkv", 20_000_000), Some(&hevc), &hevc.streams, &off());
+        assert_eq!(d.video.unwrap().mode, VideoMode::Transcode);
+
+        // Music has no video: a lower bitrate asked for is still made.
+        let mp3 = track("mp3");
+        let mut req = off();
+        req.caps.containers.push("mp3".into());
+        let f = file("mp3", 320_000);
+        assert_eq!(decide(&f, Some(&mp3), &mp3.streams, &req).method, Method::Direct);
+        req.max_bitrate = Some(128);
+        let d = decide(&f, Some(&mp3), &mp3.streams, &req);
+        assert_ne!(d.method, Method::Direct, "the limit still counts");
+        assert!(!d.reasons.iter().any(|r| r == NOT_CONVERTED));
     }
 
     #[test]
@@ -2590,6 +3224,42 @@ mod tests {
         let d = decide(&file("mp4", 20_000_000), Some(&i), &i.streams, &request());
         assert_eq!(d.method, Method::Transcode);
         assert!(d.reasons.iter().any(|r| r.contains("Dolby Vision")));
+    }
+
+    /// The same cases as the web app's `qualitiesFor` (player/quality.test.ts).
+    #[test]
+    fn offered_qualities_are_the_players_menu() {
+        let mbps = |m: i64| Some(m * 1_000_000);
+        let ids = |w: Option<i64>, h: Option<i64>, b: Option<i64>| {
+            offered_qualities(w, h, b).into_iter().map(|q| q.id).collect::<Vec<_>>()
+        };
+        let labels = |w: i64, h: i64, m: i64| {
+            offered_qualities(Some(w), Some(h), mbps(m)).into_iter().map(|q| q.label).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(Some(1920), Some(1080), mbps(9)), ["original", "auto", "4m", "2m"]);
+        assert_eq!(ids(Some(1920), Some(1080), mbps(10)), ["original", "auto", "8m", "4m", "2m"]);
+        assert_eq!(ids(Some(1280), Some(720), mbps(3)), ["original", "auto", "2m"]);
+        assert_eq!(ids(Some(3840), Some(2160), mbps(6)), ["original", "auto", "20m", "12m", "8m", "4m", "2m"]);
+        assert_eq!(
+            ids(Some(3840), Some(2160), mbps(60)),
+            ["original", "auto", "30m", "15m", "20m", "12m", "8m", "4m", "2m"]
+        );
+        assert_eq!(ids(Some(3840), Some(2160), mbps(20)), ["original", "auto", "15m", "20m", "12m", "8m", "4m", "2m"]);
+        assert_eq!(ids(None, None, None).len(), MENU.len(), "every one, when nothing is known");
+        assert_eq!(labels(1280, 720, 12), ["Original", "Automatic", "8 Mbps 720p", "4 Mbps 720p", "2 Mbps 480p"]);
+        assert_eq!(
+            labels(1920, 800, 25),
+            [
+                "Original",
+                "Automatic",
+                "20 Mbps 1080p",
+                "15 Mbps 1080p",
+                "12 Mbps 1080p",
+                "8 Mbps 1080p",
+                "4 Mbps 720p",
+                "2 Mbps 480p"
+            ]
+        );
     }
 
     #[test]
@@ -2891,6 +3561,32 @@ mod tests {
     }
 
     #[test]
+    fn a_quality_fits_a_wide_film_into_its_box() {
+        let mut i = info("h264", &["aac"], DynamicRange::Sdr);
+        (i.streams[0].width, i.streams[0].height) = (Some(2560), Some(1080));
+        let mut req = request();
+        req.max_height = Some(1080);
+        // Wider than 1920: converted, so no wider than the screen 1080p is for.
+        let d = decide(&file("mp4", 5_000_000), Some(&i), &i.streams, &req);
+        assert_eq!(d.method, Method::Transcode);
+        let v = d.video.as_ref().unwrap();
+        assert_eq!((v.max_width, v.max_height), (Some(1920), Some(1080)));
+        req.max_height = Some(720);
+        let v = decide(&file("mp4", 5_000_000), Some(&i), &i.streams, &req).video.unwrap();
+        assert_eq!((v.max_width, v.max_height), (Some(1280), Some(720)));
+        // The quality picked by itself fits the same way (4K into 3840×2160).
+        let mut i = info("hevc", &["aac"], DynamicRange::Sdr);
+        (i.streams[0].width, i.streams[0].height) = (Some(4096), Some(1716));
+        let v = decide(&file("mkv", 80_000_000), Some(&i), &i.streams, &request()).video.unwrap();
+        assert_eq!((v.max_width, v.max_height), (Some(3840), Some(2160)));
+        // A 2.40:1 film's 1080p ladder starts at 1920×800, with no second
+        // 1080p below it.
+        let top = VideoRequest { max_width: Some(1920), max_height: Some(1080), ..Default::default() };
+        let lines = ladder(Some(3840), Some(1600), &top).iter().map(|v| v.max_height.unwrap()).collect::<Vec<_>>();
+        assert!(!lines.contains(&1080), "{lines:?}");
+    }
+
+    #[test]
     fn hdr10_plays_directly_on_hdr_displays() {
         let i = info("hevc", &["aac"], DynamicRange::Hdr10);
         let mut req = request();
@@ -2930,6 +3626,18 @@ mod tests {
         let d = decide(&file("mka", 320_000), Some(&mp3), &mp3.streams, &request());
         assert_eq!(d.method, Method::Remux, "the audio is copied into HLS");
         assert_eq!(d.audio.unwrap().mode, AudioMode::Copy);
+    }
+
+    /// An audiobook's `.m4b` plays as the `.m4a` it is, where `.m4a` does.
+    #[test]
+    fn m4b_audiobooks_play_where_m4a_does() {
+        let aac = track("aac");
+        let mut req = request();
+        req.caps.containers = vec!["m4a".into()];
+        req.caps.audio_codecs = vec!["aac".into()];
+        assert_eq!(decide(&file("m4b", 64_000), Some(&aac), &aac.streams, &req).method, Method::Direct);
+        req.caps.containers = vec!["mp3".into()];
+        assert_ne!(decide(&file("m4b", 64_000), Some(&aac), &aac.streams, &req).method, Method::Direct);
     }
 
     #[test]
@@ -3318,6 +4026,8 @@ mod tests {
         let p7 = with(plan.clone());
         assert_eq!(p7.video_in.as_deref(), Some("HEVC 3840×2160 Dolby Vision P7 FEL + HDR10+"));
         assert_eq!(p7.tonemap.as_deref(), Some("libplacebo"));
+        let quick_sync = VideoPlan { tonemap: None, tonemap_quick_sync: true, ..plan.clone() };
+        assert_eq!(with(quick_sync).tonemap.as_deref(), Some("vpp_qsv"));
         plan.dynamic_range_out = Some(DynamicRange::Hdr10);
         assert_eq!(with(plan).tonemap, None);
         assert_eq!(transcode_info(&JobStatus { video: None, audio: None, ..job }).video, "none");
@@ -3326,9 +4036,18 @@ mod tests {
     }
 
     fn session(user_id: i64, client: Option<&str>, transcode: bool) -> Session {
-        let spec =
-            transcode.then(|| TranscodeSpec { request: JobRequest::default(), segment_count: 1, duration_ms: 1 });
+        let spec = transcode.then(|| stream_of(VideoMode::Transcode));
         Session::new(user_id, "u".into(), client.map(str::to_owned), 1, 1, Method::Transcode, 1, spec, None, 0)
+    }
+
+    fn stream_of(mode: VideoMode) -> TranscodeSpec {
+        let video = Some(VideoRequest { mode, ..Default::default() });
+        TranscodeSpec { request: JobRequest { video, ..Default::default() }, segment_count: 1, duration_ms: 1 }
+    }
+
+    /// A session whose video is copied.
+    fn remux_session() -> Session {
+        Session::new(1, "u".into(), None, 1, 1, Method::Remux, 1, Some(stream_of(VideoMode::Copy)), None, 0)
     }
 
     #[test]
@@ -3403,6 +4122,142 @@ mod tests {
     }
 
     #[test]
+    fn a_report_somewhere_else_than_expected_is_a_change() {
+        let s = session(1, None, false);
+        let reported = |ago: i64| s.play.lock().reported_at_ms = Some(now_ms() - ago * 1000);
+        assert!(!s.update(0, "playing"), "where it started");
+        // Twenty seconds on, playing: twenty seconds further is no jump.
+        reported(20);
+        assert!(!s.update(20_000, "playing"));
+        reported(20);
+        assert!(s.update(60_000 + JUMP_MS + 2_000, "playing"), "a seek forward");
+        assert!(s.update(5_000, "playing"), "a seek back");
+        assert!(s.update(5_000, "paused"));
+        // Paused, it stays where it was however long it has been.
+        reported(60);
+        assert!(!s.update(5_000, "paused"));
+        assert!(s.update(5_000 + JUMP_MS + 1, "paused"), "a seek while paused");
+    }
+
+    #[test]
+    fn a_report_at_another_speed_is_no_jump() {
+        let s = session(1, None, false);
+        assert!(!s.update(0, "playing"));
+        let reported = |ago: i64| s.play.lock().reported_at_ms = Some(now_ms() - ago * 1000);
+        reported(10);
+        assert!(!s.update(20_000, "playing"), "ten seconds at twice the speed");
+        reported(10);
+        assert!(!s.update(25_000, "playing"), "ten seconds at half the speed");
+        reported(10);
+        assert!(s.update(10_000, "playing"), "ten seconds back after ten seconds");
+    }
+
+    #[test]
+    fn requests_for_media_between_reports_are_no_jump() {
+        let s = session(1, None, false);
+        assert!(!s.update(0, "playing"));
+        s.play.lock().reported_at_ms = Some(now_ms() - 10_000);
+        // A segment fetched just now says it is alive, not where it is.
+        s.touch();
+        assert!(!s.update(10_000, "playing"));
+    }
+
+    #[test]
+    fn the_first_report_is_no_jump_however_long_it_took_to_start() {
+        let s = session(1, None, false);
+        s.play.lock().updated_at = now() - 30;
+        assert!(!s.update(0, "playing"), "it started where it began, thirty seconds later");
+        assert!(s.play.lock().reported_at_ms.is_some());
+    }
+
+    #[test]
+    fn commands_are_limited_each_second() {
+        let s = session(1, None, false);
+        assert!((0..COMMANDS_PER_SECOND).all(|_| s.take_command()));
+        assert!(!s.take_command());
+        s.commands.lock().started = Some(std::time::Instant::now() - Duration::from_secs(1));
+        assert!(s.take_command(), "the next second");
+    }
+
+    #[test]
+    fn a_report_says_which_tracks_play() {
+        let mut s = session(1, None, false);
+        s.picked_tracks(Some(1), Some(-1));
+        let tracks = |s: &Session| {
+            let play = s.play.lock();
+            (play.audio_index, play.subtitle_index)
+        };
+        assert!(!s.report_tracks(None, None), "a report that doesn't say");
+        assert!(!s.report_tracks(Some(1), Some(-1)), "the same tracks");
+        assert!(s.report_tracks(Some(2), None));
+        assert_eq!(tracks(&s), (Some(2), Some(-1)), "the subtitles it didn't say stay");
+        assert!(s.report_tracks(None, Some(1003)));
+        assert!(!s.report_tracks(Some(-1), Some(-2)), "no audio is -1, and nothing is -2");
+        assert!(!s.report_tracks(Some(MAX_STREAM_INDEX + 1), Some(i64::MAX)));
+        assert_eq!(tracks(&s), (Some(2), Some(1003)));
+        assert!(s.report_tracks(None, Some(-1)), "subtitles off");
+    }
+
+    #[test]
+    fn track_options_are_the_files_audio_and_subtitles() {
+        let stream = |index, kind, codec: &str| MediaStream { index, kind, codec: codec.into(), ..Default::default() };
+        let mut audio = stream(1, StreamKind::Audio, "eac3");
+        (audio.language, audio.channels, audio.default) = (Some("eng".into()), Some(6), true);
+        let mut forced = stream(1000, StreamKind::Subtitle, "subrip");
+        (forced.title, forced.forced, forced.channels, forced.external) = (Some("Signs".into()), true, Some(2), true);
+        let streams = [stream(0, StreamKind::Video, "hevc"), audio, stream(2, StreamKind::Audio, ""), forced];
+        let options = track_options(&streams);
+        let indexes = |list: &[TrackOption]| list.iter().map(|t| t.index).collect::<Vec<_>>();
+        assert_eq!((indexes(&options.audio), indexes(&options.subtitles)), (vec![1, 2], vec![1000]));
+        let expected = TrackOption {
+            index: 1,
+            language: Some("eng".into()),
+            title: None,
+            codec: Some("eac3".into()),
+            channels: Some(6),
+            default: true,
+            forced: false,
+        };
+        assert_eq!(options.audio[0], expected);
+        assert_eq!(options.audio[1].codec, None, "a codec not known");
+        let signs = &options.subtitles[0];
+        assert_eq!((signs.title.as_deref(), signs.forced, signs.channels), (Some("Signs"), true, None));
+        assert_eq!(
+            serde_json::to_value(TrackOptions::default()).unwrap(),
+            serde_json::json!({"audio": [], "subtitles": []})
+        );
+    }
+
+    #[test]
+    fn controls_are_only_those_known() {
+        let listed = serde_json::json!({"item_id": 1, "controls": ["skip", "fly", 3, "play", "skip"]});
+        let req: PlaybackRequest = serde_json::from_value(listed).unwrap();
+        assert_eq!(req.controls.into_iter().collect::<Vec<_>>(), [Control::Play, Control::Skip]);
+        let req: PlaybackRequest = serde_json::from_value(serde_json::json!({"item_id": 1, "controls": null})).unwrap();
+        assert!(req.controls.is_empty());
+    }
+
+    #[test]
+    fn a_device_kind_is_one_known_or_none() {
+        let kind = |value: serde_json::Value| {
+            let req: PlaybackRequest = serde_json::from_value(serde_json::json!({"item_id": 1, "device_kind": value}))
+                .unwrap_or_else(|e| panic!("{value}: {e}"));
+            req.device_kind
+        };
+        assert_eq!(kind(serde_json::json!("tv")), Some(DeviceKind::Tv));
+        assert_eq!(kind(serde_json::json!("browser")), Some(DeviceKind::Browser));
+        assert_eq!(kind(serde_json::json!("fridge")), None, "a kind this server doesn't know");
+        assert_eq!(kind(serde_json::json!("TV")), None, "names are lower case");
+        assert_eq!(kind(serde_json::json!(3)), None);
+        assert_eq!(kind(serde_json::Value::Null), None);
+        let req: PlaybackRequest = serde_json::from_value(serde_json::json!({"item_id": 1})).unwrap();
+        assert_eq!(req.device_kind, None);
+        assert_eq!(DeviceKind::from_name("tablet"), Some(DeviceKind::Tablet));
+        assert_eq!(DeviceKind::from_name("Tablet"), None);
+        assert_eq!(serde_json::to_string(&DeviceKind::Computer).unwrap(), "\"computer\"");
+    }
+
+    #[test]
     fn background_work_waits_for_quiet() {
         let sessions = Sessions::default();
         assert_eq!(sessions.quiet_for(), i64::MAX, "nothing played since the start");
@@ -3419,17 +4274,79 @@ mod tests {
     #[test]
     fn transcode_slots_are_taken_before_the_job_exists() {
         let sessions = Sessions::default();
-        let first = sessions.reserve_transcode(2).expect("a free slot");
-        let second = sessions.reserve_transcode(2).expect("another one");
-        assert!(sessions.reserve_transcode(2).is_none(), "both are taken while their jobs are created");
+        let reserve = |max| sessions.reserve_transcode(Pool::Video, max, max);
+        let first = reserve(2).expect("a free slot");
+        let second = reserve(2).expect("another one");
+        assert_eq!(reserve(2).err(), Some(Full::Total), "both are taken while their jobs are created");
         drop(second);
-        let third = sessions.reserve_transcode(2).expect("a failed request gives its slot back");
+        let third = reserve(2).expect("a failed request gives its slot back");
         sessions.insert_transcode(session(1, None, true), first);
         assert_eq!(sessions.active_transcodes(), 1);
-        assert!(sessions.reserve_transcode(2).is_none(), "the session keeps the slot it took over");
+        assert!(reserve(2).is_err(), "the session keeps the slot it took over");
         drop(third);
-        assert!(sessions.reserve_transcode(2).is_some());
-        assert!(sessions.reserve_transcode(1).is_none(), "a lower limit counts the live session");
+        assert!(reserve(2).is_ok());
+        assert!(reserve(1).is_err(), "a lower limit counts the live session");
+    }
+
+    #[test]
+    fn video_transcodes_have_a_limit_within_the_total() {
+        let sessions = Sessions::default();
+        // Three streams at once, one of them transcoding video.
+        let reserve = |pool| sessions.reserve_transcode(pool, 3, 1);
+        let video = reserve(Pool::Video).expect("a free slot");
+        assert_eq!(reserve(Pool::Video).err(), Some(Full::Video), "its job still being created counts");
+        let copy = reserve(Pool::Light).expect("a copy takes none of the video transcodes'");
+        sessions.insert_transcode(session(1, None, true), video);
+        sessions.insert_transcode(remux_session(), copy);
+        assert_eq!(sessions.active_transcodes(), 2, "both are the transcoder's");
+        assert_eq!(reserve(Pool::Video).err(), Some(Full::Video));
+        let third = reserve(Pool::Light).expect("room for a third");
+        // The total counts every kind, and is what a full server says first.
+        assert_eq!(reserve(Pool::Light).err(), Some(Full::Total));
+        assert_eq!(reserve(Pool::Video).err(), Some(Full::Total));
+        // A copy the transcoder had to transcode is a video transcode: it
+        // doesn't start past their limit...
+        let mut third = third;
+        assert_eq!(sessions.transcodes_video(&mut third, 1).err(), Some(Full::Video));
+        assert_eq!(reserve(Pool::Light).err(), Some(Full::Total), "refused, it is still a copy's slot");
+        // ...and within it takes one of them, as its session then counts.
+        assert_eq!(sessions.transcodes_video(&mut third, 2), Ok(()));
+        assert_eq!(sessions.reserve_transcode(Pool::Video, 4, 2).err(), Some(Full::Video), "its job being created");
+        assert_eq!(sessions.transcodes_video(&mut third, 2), Ok(()), "asked again, it has its slot");
+        sessions.insert_transcode(session(1, None, true), third);
+        assert_eq!(sessions.reserve_transcode(Pool::Video, 4, 2).err(), Some(Full::Video));
+        assert!(sessions.reserve_transcode(Pool::Light, 4, 2).is_ok());
+        // Music has no video.
+        assert_eq!(Pool::of(None), Pool::Light);
+    }
+
+    #[test]
+    fn ending_sessions_makes_room_only_with_the_live_streams_they_hold() {
+        let sessions = Sessions::default();
+        // A phone transcodes video and a TV copies: of two streams, one of
+        // which may transcode video, both are taken.
+        let phone = sessions.insert(session(1, None, true));
+        let tv = sessions.insert(remux_session());
+        assert_eq!(sessions.full(Pool::Light, 2, 1), Some(Full::Total));
+        // With the TV's copy ended a copy fits, but not a video transcode:
+        // the phone holds the one there is.
+        let without_tv = [tv.id.as_str()];
+        assert_eq!(sessions.full_without(Pool::Light, 2, 1, &without_tv), None);
+        assert_eq!(sessions.full_without(Pool::Video, 2, 1, &without_tv), Some(Full::Video));
+        assert_eq!(sessions.full_without(Pool::Video, 2, 1, &[phone.id.as_str()]), None);
+        assert_eq!(sessions.full(Pool::Light, 2, 1), Some(Full::Total), "nothing ended");
+        // A limit lowered under the streams playing is still reached with
+        // one of them ended.
+        assert_eq!(sessions.full_without(Pool::Light, 1, 1, &without_tv), Some(Full::Total));
+        // A play request still creating its job keeps its slot.
+        let starting = sessions.reserve_transcode(Pool::Light, 3, 1).expect("a third stream");
+        assert_eq!(sessions.full_without(Pool::Light, 2, 1, &without_tv), Some(Full::Total));
+        drop(starting);
+        // A quiet session's stream doesn't count: ending it frees nothing.
+        tv.play.lock().updated_at = now() - ACTIVE_WINDOW_SECS - 1;
+        assert_eq!(sessions.full(Pool::Light, 1, 1), Some(Full::Total), "the phone's");
+        assert_eq!(sessions.full_without(Pool::Light, 1, 1, &without_tv), Some(Full::Total));
+        assert_eq!(sessions.full_without(Pool::Light, 1, 1, &[phone.id.as_str()]), None);
     }
 
     #[test]

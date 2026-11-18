@@ -88,6 +88,14 @@ impl TestApp {
         self.advance(0.15);
     }
 
+    /// Holds `key` down for `secs`, then lets it go.
+    pub fn hold(&mut self, key: Key, secs: f64) {
+        self.frame(vec![InputEvent::Key(KeyEvent { key, pressed: true, repeat: false, code: 0 })]);
+        self.advance(secs);
+        self.frame(vec![InputEvent::Key(KeyEvent { key, pressed: false, repeat: false, code: 0 })]);
+        self.advance(0.15);
+    }
+
     /// Lets `secs` pass on the app's clock, drawing frames as it goes.
     pub fn advance(&mut self, secs: f64) {
         let end = self.time + secs;
@@ -112,12 +120,8 @@ impl TestApp {
         false
     }
 
-    /// Opens `route` over the page on top, the app's clock first brought up to the real one: a
-    /// page waits only so long for what is kept on the TV (a library's view), timed by the app's
-    /// clock, and one left behind by a slow start would leap past that wait at the next `until`
-    /// before the read had a chance.
+    /// Opens `route` over the page on top.
     pub fn open(&mut self, route: Route) {
-        self.time = self.time.max(pley_base::time::now());
         self.shell.navigate(NavCommand::Push(route), &mut self.state, &mut self.ui);
         self.frame(Vec::new());
     }
@@ -154,7 +158,9 @@ impl TestApp {
     }
 }
 
-/// Keeps a sign-in of `profile` on `server` in `store`, and makes it the server in use.
+/// Keeps a sign-in of `profile` on `server` in `store`, and makes it the server in use, `profile`
+/// its last: the profile is known from the start, as on every launch after the first, so what
+/// the pages keep per profile is kept from their first answers.
 fn sign_in(server: &FixtureServer, profile: i64, store: &Store, http: &Http) {
     let t = server.sign_in(profile);
     let parsed = TokenAnswerParsed {
@@ -170,4 +176,5 @@ fn sign_in(server: &FixtureServer, profile: i64, store: &Store, http: &Http) {
         StoredTokens::new(&parsed, url, &format!("{url}/api/oauth/token"), &format!("{url}/api/oauth/revoke"), now_ms);
     Tokens::shared(url, store, http).install(stored, &parsed.scope).unwrap();
     store.set_active_server(Some(url)).unwrap();
+    store.set_last_profile(url, profile).unwrap();
 }

@@ -8,6 +8,85 @@ describes how they are made.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-18
+
+### Added
+
+- A library's collections are grouped by category, with a Category
+  filter; a collection's page says its category; a Home row of collections
+  of one title from several libraries opens them together, and a row's See
+  all opens its collection.
+
+## [0.1.8] - 2026-11-12
+
+### Added
+
+- When the server has video transcoding turned off, Automatic plays the
+  Original and the remote offers only Original.
+
+## [0.1.7] - 2026-11-06
+
+### Added
+
+- The add-on is in French and Spanish too: in your profile's language,
+  else the one chosen in the add-on's settings (Screens → Language), else
+  Kodi's, else the server's. Profile language, in the profile's menu and
+  the add-on's settings, sets it for your profile on all your devices; on
+  a server from before languages it is kept on this device. Dates,
+  numbers and counts are written in the language shown, and what the
+  server writes itself, such as Home's rows, comes in it.
+- Sent from a device on another profile of your household, Kodi switches
+  to that profile first, and plays it as that profile. Needs a server from
+  the same release.
+
+### Changed
+
+- Pley's window opens straight on Home as the profile Kodi was left on
+  when it has no PIN, where a household of several profiles was asked
+  "Who's watching?" each time Kodi started. A profile with a PIN still
+  asks first, and Switch profile still shows every profile.
+- What your phone, the web or another device does to a film or episode
+  playing on Kodi shows for a moment as a quiet Kodi notification:
+  "Paused", "Playing", "+30 s", "Jumped to 12:34", or the audio,
+  subtitles or quality picked.
+
+## [0.1.6] - 2026-11-05
+
+### Added
+
+- Your phone, the web and your other devices control what Kodi plays:
+  play, pause, seek and skip, the next title in Kodi's queue or the next
+  episode, the next or previous track, and channel up and down on Live TV.
+  Remotes list Kodi with your TVs, by the device name it was given in
+  Kodi's settings. Needs a server from the same release.
+- Your phone, the web and your other devices change the audio and subtitles
+  of what Kodi plays, and see which ones play. A pick is saved for the show
+  or movie, as one made in Kodi's player is.
+- Your phone, the web and your other devices play things on Kodi: a film,
+  an episode, a show's next episode, music, a playlist or a Live TV
+  channel, in place of what plays. Kodi says which device sent it.
+- Your phone, the web and your other devices change the quality of a film
+  or episode playing on Kodi: the Quality setting changes, as picking it
+  there does, and the title plays again where it was. They see which
+  quality is picked. A film or episode they send plays with the audio and
+  subtitles picked on its page.
+- Live TV stopped from another device, or by the server's administrator,
+  says so, with their message.
+- Stopping a Live TV channel, or Kodi, frees its connection at once, so
+  another channel or device can use it straight away.
+
+### Changed
+
+- Requests: a sign-in from before the app could ask says "Sign in again to ask for movies
+  and shows" without a second line, and its button reads Sign in.
+
+## [0.1.5] - 2026-11-04
+
+### Changed
+
+- The add-on's fanart shows Pley's mark and name centred, the name closer
+  to the mark.
+
 ## [0.1.4] - 2026-11-03
 
 ### Added
@@ -183,7 +262,12 @@ describes how they are made.
 - First release with a version of its own (builds before it carried 0.2.0,
   the version every app shared).
 
-[Unreleased]: https://github.com/pley-media-server/pley/compare/release-2026-11-03...HEAD
+[Unreleased]: https://github.com/pley-media-server/pley/compare/release-2026-11-18...HEAD
+[0.1.9]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-18
+[0.1.8]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-12
+[0.1.7]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-06
+[0.1.6]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-05
+[0.1.5]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-04
 [0.1.4]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-03
 [0.1.3]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-02.2
 [0.1.2]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-02

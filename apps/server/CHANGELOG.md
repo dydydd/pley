@@ -11,10 +11,554 @@ describes how they are made.
 
 ### Added
 
+- `.strm` files in movie and TV libraries, as Kodi, Jellyfin and Emby read
+  them: a text file that names the `http` or `https` address a video is at
+  is listed, played, converted and downloaded like a video on disk, on
+  every app and through both compatibility APIs. The address, and any
+  password in it, never leaves the server: players read the video through
+  Pley. A scan doesn't ask the address; what the video is (tracks, length,
+  size, 4K and HDR) is found when its page is first opened or it is
+  played, and kept. Kodi's `|User-Agent=…` headers are sent, an address on
+  the internet can't lead to one of your network, and seek previews and
+  intro detection aren't made for it
+  ([docs/CONFIGURATION.md](../../docs/CONFIGURATION.md#strm-files)).
 - A player can say the highest audio sample rate it decodes
   (`audio_max_sample_rate`): a track above it is converted, at 48 kHz, and
   playback details say why ("AAC at 96 kHz is above this device's 48
   kHz."). Samsung's TVs garble AAC at 96 kHz played as it is.
+
+## [0.1.13] - 2026-11-18
+
+### Added
+
+- Collections have categories: Highlights, Franchises, Other (for those
+  without one) and administrators' own, in an order administrators choose.
+  Administrators choose which collections are rows on Home and on a
+  library's Recommended tab, and in what order; Recently Added, Recently
+  Released, Top Rated and a new Top Unwatched are collections in each
+  movie and TV library (Top Unwatched isn't a row until an administrator
+  adds it), and collections of the same title are one row on Home.
+- Kometa's group labels, such as Seasonal, put collections under
+  categories, and its `visible_library` and `visible_home` place
+  collections on Recommended and Home.
+- A library's Collections tab groups collections by category and filters
+  them by category (and, for administrators, by how they were made), and
+  administrators arrange the rows on Home
+  and the Recommended tab and restore Pley's own collections. The
+  Recommended tab no longer ends with a row of every collection.
+- The Plex import brings smart collections whose filters Pley can apply,
+  puts collections under categories by their group labels, and keeps
+  which rows Plex showed on Home and Recommended, in Plex's order.
+- Audiobook libraries, in the web and desktop apps: books from `.m4b`
+  files or folders of audio files, found as Audiobookshelf finds them
+  (`Author/Series/Book`, with `CD 1` folders inside a book, and a book in
+  several `.m4b` files kept as one). Their authors, narrators, series,
+  summary and cover come from the files' tags, including the series tags
+  Libation, tone and Audiobookshelf write, else from their folders. `.m4b`
+  files' chapters are read, and they play directly where `.m4a` does.
+- Play on an audiobook goes on in the part heard last, where it was left,
+  and books part way through are in a new Continue Listening row on Home
+  and in their library. A part is finished only in its last 30 seconds,
+  not at 90 % as a film is.
+- In the web app, audiobook libraries can be added, and a book's page
+  says how much is listened and lists its parts or chapters. Its player
+  follows the chapter playing, skips back 15 seconds and on 30, plays from
+  0.75× to 3×, and has a sleep timer.
+- Live TV channels play on Google Cast and AirPlay devices from Watch on…,
+  and the remote changes channel there.
+
+### Changed
+
+- Home's rows keep the order administrators give them, whatever order
+  the libraries are listed in, shared or a profile's own.
+- The Jellyfin-compatible API is on by default, on Pley's port as the
+  Plex-compatible one is, on servers that update too. It stays off where it
+  is set off, as on a server whose Settings → Network was saved before,
+  which saved it off. Settings → Network turns it on or off.
+- The Windows installer's Network page has a Jellyfin-compatible API box
+  beside the Plex one (`/JELLYFIN=` for a silent install), ticked unless
+  Pley has the API off. An update keeps what Settings → Network set for
+  either API, a port of its own included.
+- Casting to Google Cast and AirPlay devices has a switch in Settings →
+  Network, off by default and on updated servers too: Play on… lists
+  those devices once an administrator turns it on.
+
+### Fixed
+
+- Plex apps play music they transcode with the Jellyfin-compatible API on
+  Pley's port too.
+- Kometa's smart collections for labels with `+`, `&` or `,` in their
+  name, such as Disney+ Movies, list their movies instead of nothing.
+- Stop in Pley stops a Google Cast device every time. The connection
+  closed so abruptly that the device could lose the stop, most often
+  with Pley on Windows.
+- On a phone, the home banner's buttons keep to one line: Resume leaves
+  out the time left, which Continue Watching shows just below, and More
+  info reads Más info in Spanish.
+- The Live TV guide's times no longer show through the top bar's Your
+  devices menu.
+- Play on… lists Google Cast and AirPlay devices only where Pley listens
+  on an address of their network. Behind a reverse proxy, with Pley
+  listening on its own computer alone, it listed them all and every cast
+  failed; the log now says why none is listed.
+- A cast from a Play on… list opened more than 5 minutes earlier looks
+  for the device again, where it answered that the device wasn't on any
+  more.
+- An AirPlay cast of an MP4 played as it is shows the subtitles picked,
+  where it dropped them. It plays without them, as before, when the server
+  can't make the stream that shows them.
+- When the server's limit on streams is reached, a cast ends what its
+  device plays only if that makes room for the new stream, where it could
+  stop the device for nothing.
+
+## [0.1.12] - 2026-11-16
+
+### Added
+
+- A new app permission, "Manage the server", lets Pley's own apps manage
+  libraries, accounts and invitations and show the dashboard. It is never
+  given with a TV's code. Settings, network, transcoder, backups, Live TV,
+  other administrators' accounts and one's own role stay in the web app.
+- An app manages the server only when an administrator ticks Manage the
+  server as it signs in. An account that isn't an administrator's never
+  gives an app that, nor approving requests, so becoming one later wakes
+  neither in its apps.
+- An administrator's rights in an app hold only in an app that
+  administrator allowed, on their profile picked at the device, not one a
+  cast switched to.
+- Home members can cast movies and episodes to Chromecasts, Google TVs,
+  TVs with Cast built in, Apple TVs and most TVs with AirPlay 2 on the
+  server's network, and control them from the remote as Pley's own
+  players. They show subtitles, and Cast devices take their volume from
+  the remote. Chromecast Ultra, Chromecast with Google TV, Google TV
+  Streamer, TVs with Google TV and Apple TV 4K get HEVC, and 4K and HDR
+  where they play them. An AirPlay device that asks for a code is paired
+  once, with the code it shows, and administrators can forget pairings in
+  Settings → Network. A TV running a Pley app is listed once, as the app.
+  Macs are listed as computers, and the server's own Mac isn't listed.
+  They're listed while discovery is on in Settings → Network.
+- The dashboard says what plays each session: a Pley app, an app through
+  the Plex or Jellyfin API, Google Cast or AirPlay. Stopping one offers a
+  message only for Pley apps, the only ones that show it.
+- Live TV goes into the browser's picture in picture, as videos do; next
+  and previous, in its small window or on the keyboard, change channel.
+
+### Changed
+
+- The page where an app signs in is shorter: what the app needs, a line
+  each; managing the server as a box to tick; and one line on what it
+  can't change.
+- HDR made SDR keeps the master's brightness up to SDR's white, with the
+  standard BT.2390 curve, instead of darkening the mid-tones; black and
+  letterbox bars stay black.
+- Dolby Vision profile 7 with a full enhancement layer is transcoded from
+  its HDR10 base layer, where it was tone mapped by its Dolby Vision
+  brightness before.
+- The Docker image and the Windows installer carry Pley's own FFmpeg, with
+  jellyfin-ffmpeg's improvements for Intel graphics.
+
+On Intel graphics:
+
+- 4K HDR made SDR transcodes about twice as fast, on less of the CPU, and
+  two at once each keep up better. Transcodes run up to a quarter faster
+  again where the GPU has a low-power encoder, and Linux and Docker get the
+  same faster transcodes as Windows.
+- HDR kept as HDR and burned-in picture subtitles stay on the GPU, and Dolby
+  Vision and HDR10+ do where the CPU would decode them.
+- 4K Dolby Vision at 60 frames a second, or several at once, keeps up with
+  its Dolby Vision picture on Windows, profile 5 too, with Pley's own
+  FFmpeg.
+
+### Fixed
+
+- Settings → Live TV → Channels lists a source's channels when one is
+  picked, where the server answered with an error.
+- Clean up counts the old cache files and subtitles it removes, where it
+  could say there was nothing to clean up.
+- In a short window, Play on… and the web app's other menus scroll within
+  it rather than running past its top or bottom.
+- HDR transcodes no longer pick a picture quality too slow to keep up, or
+  a lower one than the GPU has time for, after the server starts.
+- HDR10 that doesn't say how bright it is no longer comes out far too dark
+  with Pley's own FFmpeg, in transcodes (OpenCL's too), seek previews and
+  thumbnails.
+- Dolby Vision profile 5 plays on a server without a graphics card instead
+  of failing to start.
+- With the experimental Dolby Vision full enhancement layer turned on, a
+  profile 7 file that keeps the layer's metadata but not the layer plays
+  from its base layer instead of never starting.
+- Seek previews and frame grabs of Dolby Vision profile 7 with a full
+  enhancement layer look like the video, made from the base layer.
+- In Plex and Jellyfin apps, a show that just got a new episode comes
+  first in Recently Added rows that mix libraries, and in Kometa's Last
+  Episode Date Added and Jellyfin's Date Episode Added sorts.
+- Plex-compatible edits and requests of more than 500 titles at once, as
+  Kometa sends them, reach all of them. An edit of more than 5,000 titles,
+  or more than 5,000 added to a collection or playlist at once, is refused,
+  so nothing changes.
+- Play on… with a title that has several versions starts the other device
+  with the audio and subtitles picked, in whichever version it plays.
+
+On Intel graphics:
+
+- Quick Sync works on Linux when an NVIDIA or AMD card comes first.
+- Transcodes no longer fail when every Quick Sync session is busy.
+- 4:2:2 and 4:4:4 H.264, from some cameras and screen recordings, plays.
+- Once HDR transcodes have moved to Quick Sync or OpenCL tone mapping,
+  another one started beside them gets the best picture the GPU keeps up
+  with, and one of them goes back when there is room.
+- 720p and 4K HDR transcodes in fMP4 keep playing when another stream
+  makes the GPU busy, instead of stopping.
+- A video Quick Sync can't decode plays, decoded another way, instead of
+  stopping.
+- Burned-in picture subtitles on films cropped to wide screen show at the
+  bottom.
+- A file that couldn't be read no longer keeps Dolby Vision off OpenCL
+  until the server restarts, nor one GPU decoding error keeps Dolby Vision
+  and HDR10+ from being decoded by the GPU.
+
+## [0.1.11] - 2026-11-14
+
+### Added
+
+- Activity monitors such as Tracearr can connect through the
+  Jellyfin-compatible API with a token that sees everyone's activity, and
+  show what everyone is playing.
+- Setup asks for the server's name, languages, country, TMDB key and
+  whether Apple devices find it by Bonjour, then whether to bring over a
+  Plex server or start fresh with Movies, TV Shows and Music libraries.
+- Moving from Plex: setup and Settings → Libraries can import a Plex
+  server's libraries, its Home users as profiles with their restrictions
+  and the PINs typed for them, and each person's watch history, ratings,
+  labels, collections, playlists and matches (docs/MOVING_FROM_PLEX.md).
+- Home and Settings → Libraries show a Plex import step by step while it
+  runs, and its report once it ends.
+- Home shows administrators how far new libraries' first scans are.
+- Settings → Server has a Country, for age ratings, age limits and Coming
+  to cinemas.
+- Settings → Network says when Pley is on Docker's own network, where
+  devices can't find it, and how to fix that.
+- In a container with no media folder mounted, adding a library says how
+  to mount one.
+
+### Changed
+
+- Settings → Server calls its languages Pley's language and Titles and
+  summaries, and names them instead of showing codes.
+- Seek previews, intro detection and fingerprinting wait until first
+  scans and Plex imports are done.
+- A video that has to be remuxed or converted starts sooner while a
+  library is being scanned.
+- Home and a library's page show a new library's titles as its files are
+  read.
+- The dashboard's Now playing shows whether each stream is playing or
+  paused, and its time moves on while it plays.
+
+### Fixed
+
+- Infuse opens a Pley server through the Jellyfin-compatible API instead
+  of saying "An error occurred" after signing in.
+- Live TV channels with AC-3 audio, such as US broadcast channels, and
+  channels whose stream breaks off as they start, play in the browser and
+  the desktop app instead of tuning forever.
+
+## [0.1.10] - 2026-11-12
+
+### Added
+
+- Settings → Transcoder can turn video transcoding off. Videos then play
+  as they are or with only their sound transcoded, and one a device can't
+  play says why. The Plex- and Jellyfin-compatible APIs follow it too.
+- "Max simultaneous video transcodes" limits how many streams transcode
+  video at once, within the total limit.
+
+### Changed
+
+- The note under "Transcode in memory" is shorter.
+- Dropdowns' carets sit in from the edge, and a dropdown that can't be
+  changed is greyed out.
+- Number fields in Settings and a title's Edit are only as wide as their
+  numbers need.
+
+### Fixed
+
+- A movie titled with a number takes its year from its file name, like
+  other movies. A full rescan merges any that showed twice.
+- Sync tools such as WatchState copy resume points to Pley through the
+  Jellyfin-compatible API.
+
+## [0.1.9] - 2026-11-08
+
+### Added
+
+- In Settings → Users and Invitations, the age limit is set "By rating"
+  (one of 29 countries' ratings, the metadata region's first) or "By
+  age", each showing only its own fields, and lists show it that way
+  ("Up to PG-13"). A limit the old list didn't offer shows as its age, no
+  longer as "No limit". `GET /api/ratings/systems` gives the ratings, and
+  users and invitations keep the system in `max_age_system`.
+- An account's age limit can follow its age: "By birthday" asks for the
+  month and year of a birthday, and the limit goes up on the first of that
+  month each year, until it ends at 21. Only administrators see the
+  birthday, never the account itself or its apps.
+- Exceptions by label: in Settings → Users and Invitations, a profile
+  can always see titles with some labels, even above its age limit, and
+  never see titles with others, whatever their rating (a label on a show
+  or album counts for its episodes and tracks). Discover leaves the hidden
+  ones out, and they can't be asked for. Labels are set in a title's Edit
+  details, and only administrators see them; `GET /api/labels` lists them.
+- Setting an age limit without a TMDB key says that unrated movies are
+  hidden, with a link to add a key.
+- The web and desktop apps' home screen opens on a banner: the newest
+  films and shows you haven't watched, full width under the top bar, each
+  with its plot, Play, More info and My List, taking turns every few
+  seconds (holding still under the pointer, and for those who ask their
+  system for less motion). Swipe between them on a phone.
+
+### Changed
+
+- The Docker image comes with FFmpeg 9, as the Windows installer does,
+  in place of Debian's 7.1.
+- Age limits read a rating with its country's ratings, so that one of the
+  same name in another country isn't misread: "A" is for all ages in
+  Denmark, Spain and Mexico and for adults in India, and the UK's PG is
+  8. Ratings from TMDB, TheTVDB and NFO files keep their country; NFO
+  files with several countries' give the metadata region's. Changing the
+  region in Settings works every age out again.
+- Edit details says which country's ratings a title's rating is read
+  with: the country written before it ("GB:15"), the one it came with, or
+  the metadata region's, or where the region has none here, the US's and
+  others in common use.
+- A user's settings are in three tabs, Profile, Access and Devices, and
+  label exceptions fold into one line, such as "Never show 2 labels",
+  until they're opened.
+- Labels are picked in one field of chips: the arrow keys move through the
+  labels titles carry, Enter or a click adds one, and a label no title has
+  yet can still be added.
+- Plex and Jellyfin apps no longer show titles' labels, which label
+  exceptions go by, except to tokens that may manage libraries (Kometa's).
+  Their other apps filter by label as if titles had none, so a label
+  guessed tells them nothing; smart collections made by a label still
+  find their titles.
+
+### Fixed
+
+- An NFO file's rating with a slash in it, such as India's "U/A 13+" or
+  Portugal's "M/18", is read whole, no longer as "U" or "M", which allowed
+  younger viewers. A file that gives a bare `<mpaa>` and a
+  `<certification>` naming countries gives the latter's.
+- A Live TV channel given a guide channel by hand, or a channel without
+  one renamed as the guide names it, shows its programmes once the
+  source's guide is read again for it, no longer after the next guide
+  refresh.
+- Refreshing a Live TV source, or changing it, while it is being read
+  reads it again after that read, no longer nothing.
+- HDR video that libplacebo tone maps plays again in the Docker image and
+  with other FFmpeg 7 installs: the transcoder no longer asks it for a
+  shader cache that FFmpeg before 8.0 doesn't have.
+- A Live TV channel whose playlist id isn't in the guide shows the
+  programmes of the guide channel found for it, rather than "No guide".
+  That guide channel is now also found when the guide writes the same id
+  in another case or with other dots and dashes (`Kika.de` and `KIKA.de`).
+- A quality fits a film wider than 16:9 into its box: 1080p of a 2.40:1
+  film is 1920×800, no longer 2592×1080, so it isn't wider than the
+  screen and plays on players that decode H.264 up to level 4.1.
+- Live TV channels served as HLS with their sound in an audio track of
+  its own, as many broadcasters serve theirs, play with sound: the
+  default track is put into the picture's stream.
+
+## [0.1.8] - 2026-11-06
+
+### Added
+
+- Pley is in English, French and Spanish: each device's language by
+  default (the sign-in page has a globe to pick another), or the one an
+  account picks on its Account page, which follows it everywhere. The
+  server language, in Settings → General, is for the server's own words
+  (Home's rows, the tray's menu) and for devices in a language Pley
+  doesn't have.
+- Jellyfin apps that show seek-bar previews, such as Findroid and
+  Streamyfin, show Pley's as you scrub: the same previews Pley's own players
+  use. Jellyfin for Android TV doesn't show them.
+- The web and desktop apps' remote offers Skip Intro and Skip Credits while
+  what a device plays is in an intro or the credits, as its player would;
+  `GET /api/sessions` gives each session's intro and credits. Its back
+  button goes 30 seconds, as far as forward.
+- Your remote lists the TVs and other devices of everyone in your
+  household, not only those on your profile, each with the profile it is
+  on. Sending one something switches it to your profile first, so it plays
+  as you, after your PIN when your profile has one.
+- A device that gives itself a TV's name and id on the TV's profile is
+  listed beside the TV ("Living room TV (2)"), never in its place: the TV
+  is listed again the moment it is back from being off or reconnecting,
+  and what you send the TV reaches the TV alone.
+- The web app's Play on… lists your household's devices too, and asks for
+  your PIN in its menu's place when your profile has one. The desktop app
+  switches to the profile of the remote that sends it something, as a TV
+  does, and says so when it can't. An administrator's remote sends only to
+  Pley's apps, never to a browser or the desktop app, which would stay
+  signed in with the administrator's rights.
+- Jellyfin apps make, rename, fill, reorder and delete your playlists, and
+  with a token that may manage libraries, make and change collections. Each
+  playlist entry has an id of its own, so an app removes or moves the one
+  you picked when a title is there twice.
+- Pley reads the NFO files Kodi, Jellyfin, Emby, Radarr, Sonarr,
+  tinyMediaManager and MediaElch keep next to movies, shows, seasons and
+  episodes. Their ids decide what a title is matched to, and their titles,
+  summaries, dates, genres, content ratings and other fields win over
+  TMDB's, TheTVDB's and TVmaze's; your own edits still win over them, and
+  Fix Match to another title sets them aside. Without a TMDB key, movies
+  with NFO files get their metadata from them. Jellyfin's lockdata keeps an
+  item from being fetched online. Settings → Server has a switch for it, on
+  by default.
+- Scripts and tools edit metadata through the Jellyfin-compatible API with
+  a token that may manage libraries: titles' fields, locks, pictures and
+  Fix Match, as Pley's own editor does them.
+- In the web and desktop apps, an item's Edit details says which fields
+  come from its NFO file, and Fix match says when a title was matched by
+  hand, with Undo Fix Match to let its NFO file decide again.
+
+### Changed
+
+- The web and desktop apps' remote shows a command at once (the place a
+  seek goes, playing or paused), and keeps what plays while a next starts
+  the one after. Previous and Next sit at its edges, with the skips and
+  Play or Pause centred between them. A device that plays is chosen for
+  its controls, whose bar is the only one shown; one ready to play is only
+  listed.
+- Signing in on the web and in the desktop app goes straight in as the
+  profile the browser was last used as, when it has no PIN, where a
+  household of several profiles was asked "Who's watching?" each time. A
+  profile with a PIN, or another person signing in, still picks first.
+- The web and desktop apps' video player no longer brings up its controls
+  when a remote pauses it, seeks or changes its audio, subtitles or
+  quality: a brief notice says what changed ("Paused", "+30 s", "Jumped
+  to 12:34", "Subtitles off"), and the controls show as before once you
+  move the mouse, tap or press a key. On Live TV a remote's change of
+  channel shows only the channel's tuning screen.
+- With TMDB as the TV source, a show with an IMDb or TheTVDB id but no
+  TMDB id is found by that id before it is searched for by name.
+- The web and desktop apps' menus open above their button where the
+  window has no room for them below, as in a short window.
+- Jellyfin apps' streams go as far as Pley's own apps' do, by what their
+  device profile says: HEVC copied, or made in HEVC to stay HDR, in fMP4
+  segments where the app asks for them, VP9 and AV1 copied into fMP4, HDR
+  and Dolby Vision kept where the app shows them, and 5.1 sound (E-AC-3 or
+  AC-3) where it takes it. They were H.264 or copied HEVC, in SDR, with
+  stereo AAC.
+- Why a request couldn't be sent to Radarr or Sonarr ("Radarr isn't
+  answering", "Radarr refused: …") is in the language each administrator
+  sees Pley in, on Requests and in the notice that it failed, as is "Added
+  by hand". What Radarr and Sonarr say themselves stays as they said it.
+  A send that can't reach them says it isn't answering, as approving
+  does, where it gave the network's error.
+
+## [0.1.7] - 2026-11-05
+
+### Added
+
+- Pley for Home Assistant can sign in with a code, as Pley's TV apps do.
+  It shows as Home Assistant in your signed-in apps and on a TV it plays
+  something on.
+- A new permission, activity, lets an app see what's playing and stop it.
+  On an administrator's account, Pley's own apps allowed it see what
+  everyone plays and stop it, as the dashboard does; other apps, and
+  everyone else's, see and stop only the profile's own.
+- In the desktop app the web app takes casts, as a TV does: your other
+  devices' Play on… lists it by its system ("Pley for Windows"), and what
+  they send it plays there with the tracks picked, saying where it came
+  from. A browser tab is still a remote only.
+- The server lets a user's devices control what plays on their other
+  devices: it lists the user's own sessions with the device each plays
+  on, Live TV channels included, and passes play, pause, seek, skip, next
+  and previous to players that say they obey them (on Live TV, next and
+  previous change channel). Only the session's own user controls it;
+  administrators can still only stop other people's, a Live TV channel
+  now too. `/api/activity`'s sessions say which device they play on.
+- Jellyfin apps that say they take media control obey a user's remotes
+  through their socket: pause, play, seek, skip, next and previous. Plex
+  apps can still only be stopped.
+- The web and desktop apps have a remote in the header while something
+  plays on another of your devices: it shows what plays there and how far
+  along, and plays, pauses, seeks, skips, goes to the next or previous
+  title or channel and stops it. Their players obey the remote too, and
+  the dashboard says which device each session plays on.
+- Every session says which device plays it, the same for everything one
+  sign-in plays, and what kind of device that is (a TV, a phone, a
+  tablet, a computer, a browser): what the player says, else what the
+  server tells from the app. Remotes and dashboards can key players by
+  it, and pick TVs out.
+- A user's remotes can cast to their other devices: an app that keeps its
+  event stream open as a receiver is listed, and plays the title,
+  playlist or Live TV channel sent to it, as its own Play would, and says
+  which device sent it, by the name that device gave itself. Only the
+  user's own devices are listed and cast to, an administrator's too.
+- Remotes change the audio track and the subtitles of what plays on
+  another device: sessions list their file's tracks and which play, and
+  players that say they take a change of track switch to the one picked.
+  Jellyfin apps that take media control switch track too.
+- Remotes change the quality of what plays on another device, from the
+  qualities its Quality menu offers for the file, and show which it plays.
+  A cast plays with the audio track and subtitles picked on the remote's
+  page, and a Live TV channel on a remote shows how far along the
+  programme is and what's on next.
+- The web and desktop apps' remote has Audio, Subtitles and a new Quality
+  as icons beside Stop, and asks before it stops what plays. On a Live TV
+  channel it shows the programme's progress and what's next, with
+  channel buttons. Play on… from a title's page plays with the audio and
+  subtitles picked there, and the video player takes a remote's change of
+  quality as its own menu does.
+- The web and desktop apps' remote lists your other devices that are on,
+  those playing first, then those ready to play, and changes the audio
+  track and the subtitles of what plays on one. Play on… beside Play
+  (Shuffle on… beside Shuffle, Watch on… for a Live TV channel) plays a
+  title, music, a playlist or a channel on one of them, and opens the
+  remote on it. Their video player takes a remote's change of audio and
+  subtitles as its own menu does, and tells remotes which it plays.
+
+### Changed
+
+- Requests on the web: a sign-in from before the app could ask says "Sign in again to ask
+  for movies and shows" without a second line, and its button reads Sign in.
+- The setup page says more plainly where the setup code is: opening Pley
+  from its tray icon fills it in, and on a server without one it's in
+  Pley's log.
+- When the server can't be reached, the web app and the desktop app say
+  "Pley is offline", where they said "Can't reach the server.
+  Reconnecting…". The desktop app's Downloads stays beside it.
+- In the web and desktop apps, a movie or show in Discover or Search's
+  Discover results that a library has whole opens its library page, where
+  it plays, not a page with only Open on it. A show partly there still
+  opens its Discover page, to ask for more seasons.
+
+### Fixed
+
+- Someone who isn't an administrator no longer hears when other people's
+  playback starts or stops: the event for it goes only to that person's
+  own devices and to administrators.
+- Music paused in the web app stays on your other devices' remotes: it
+  says it is paused every 30 seconds, where it used to drop off after a
+  minute and a half.
+
+## [0.1.6] - 2026-11-04
+
+### Added
+
+- Search finds titles, people and Live TV channels typed with a slip ("the
+  matirx", "kaenu reeves"), with words run together or apart
+  ("spiderman"), or without an apostrophe ("the captains log"); when
+  nothing is found that way, titles and names alike enough to what was
+  typed are.
+- Live TV search finds a channel by the words of its name in any order
+  ("f1 sports"), and with a quality its name doesn't have ("news hd"), and
+  what's on by its title's words, punctuation and accents aside.
+
+### Fixed
+
+- The web app's search no longer keeps the Live TV channels of an earlier
+  query on the page, under results that don't match them.
+- A search for a title with its year ("alien 1979") finds that year's
+  title instead of nothing.
 
 ## [0.1.5] - 2026-11-03
 
@@ -603,7 +1147,15 @@ describes how they are made.
 - First release with a version of its own (builds before it carried 0.2.0,
   the version every app shared).
 
-[Unreleased]: https://github.com/pley-media-server/pley/compare/release-2026-11-03...HEAD
+[Unreleased]: https://github.com/pley-media-server/pley/compare/release-2026-11-18...HEAD
+[0.1.13]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-18
+[0.1.12]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-16
+[0.1.11]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-14
+[0.1.10]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-12
+[0.1.9]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-08
+[0.1.8]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-06
+[0.1.7]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-05
+[0.1.6]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-04
 [0.1.5]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-03
 [0.1.4]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-02.2
 [0.1.3]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-02

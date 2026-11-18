@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Navigate, useLocation, useNavigate, useSearchParams } from "react-router";
+import { useTranslation } from "react-i18next";
 import { errorMessage } from "@/api/client";
 import { useServer, useSetup } from "@/api/hooks";
 import { ErrorScreen, Splash } from "@/auth";
@@ -7,7 +8,8 @@ import { PasswordInput } from "@/components/PasswordInput";
 import { Button, Field, TextInput } from "@/components/ui";
 import { useDocumentTitle } from "@/lib/hooks";
 import { MIN_PASSWORD_LENGTH, passwordProblem } from "@/lib/passwords";
-import { AuthLayout } from "./AuthLayout";
+import { SETUP_PROGRESS } from "@/lib/setupFrame";
+import { SetupActions, SetupStep } from "./SetupLayout";
 
 /** The setup code in `#code=ABCD-EFGH`, as links had it before 0.2. */
 export function codeFromHash(hash: string): string | null {
@@ -15,7 +17,8 @@ export function codeFromHash(hash: string): string | null {
 }
 
 export function SetupPage() {
-  useDocumentTitle("Welcome");
+  const { t } = useTranslation("pages");
+  useDocumentTitle(t("setup.documentTitle"));
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const server = useServer();
@@ -31,7 +34,7 @@ export function SetupPage() {
 
   if (server.isPending) return <Splash />;
   if (server.isError) {
-    return <ErrorScreen title="Can't reach the Pley server" message={errorMessage(server.error)} onRetry={() => void server.refetch()} />;
+    return <ErrorScreen title={t("auth.cantReachServer")} message={errorMessage(server.error)} onRetry={() => void server.refetch()} />;
   }
   if (!server.data.setup_required && !setup.isSuccess) return <Navigate to="/login" replace />;
   const needsCode = server.data.setup_code_required !== false;
@@ -43,19 +46,16 @@ export function SetupPage() {
     if (problem) return;
     setup.mutate(
       { username: username.trim(), password, ...(needsCode ? { setup_code: code.trim() } : {}) },
-      { onSuccess: () => void navigate("/settings/libraries?add=1", { replace: true }) },
+      { onSuccess: () => void navigate("/setup/server", { replace: true }) },
     );
   };
 
   const error = localError ?? (setup.error ? errorMessage(setup.error) : null);
 
   return (
-    <AuthLayout
-      title="Welcome to Pley"
-      subtitle="Create the administrator account for this server. You'll add your media libraries next."
-    >
+    <SetupStep progress={SETUP_PROGRESS.account} title={t("setup.title")} subtitle={t("setup.subtitle")}>
       <form onSubmit={onSubmit} className="space-y-4">
-        <Field label="Username" htmlFor="setup-username">
+        <Field label={t("fields.username")} htmlFor="setup-username">
           <TextInput
             id="setup-username"
             autoComplete="username"
@@ -65,19 +65,11 @@ export function SetupPage() {
             required
           />
         </Field>
-        <Field
-          label="Password"
-          htmlFor="setup-password"
-          hint={`At least ${MIN_PASSWORD_LENGTH} characters. A few words that don't go together are easy to remember and hard to guess.`}
-        >
+        <Field label={t("fields.password")} htmlFor="setup-password" hint={t("setup.passwordHint", { min: MIN_PASSWORD_LENGTH })}>
           <PasswordInput id="setup-password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} required />
         </Field>
         {needsCode ? (
-          <Field
-            label="Setup code"
-            htmlFor="setup-code"
-            hint="Pley printed it in its log when it started (with Docker: docker logs pley). Opening Pley from its tray icon fills it in."
-          >
+          <Field label={t("setup.setupCode")} htmlFor="setup-code" hint={t("setup.setupCodeHint")}>
             <TextInput
               id="setup-code"
               autoComplete="one-time-code"
@@ -96,10 +88,12 @@ export function SetupPage() {
             {error}
           </p>
         ) : null}
-        <Button type="submit" variant="primary" size="lg" className="w-full" loading={setup.isPending}>
-          Create account
-        </Button>
+        <SetupActions>
+          <Button type="submit" variant="primary" loading={setup.isPending}>
+            {t("setup.createAccount")}
+          </Button>
+        </SetupActions>
       </form>
-    </AuthLayout>
+    </SetupStep>
   );
 }

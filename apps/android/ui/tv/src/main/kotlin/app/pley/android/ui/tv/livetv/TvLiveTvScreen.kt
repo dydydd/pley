@@ -59,6 +59,8 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import app.pley.android.screens.livetv.GroupSections
+import app.pley.android.ui.tv.kit.HeldEnds
+import app.pley.android.ui.tv.kit.heldKeyStaysIn
 import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -66,8 +68,6 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.layout.Layout
-import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
@@ -75,7 +75,6 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -83,7 +82,8 @@ import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Glow
 import androidx.tv.material3.LocalContentColor
 import androidx.tv.material3.Surface
-import app.pley.android.common.sentenceOf
+import app.pley.android.common.UiText
+import app.pley.android.common.errorSentence
 import app.pley.android.data.Loadable
 import app.pley.android.designsystem.PleyColors
 import app.pley.android.designsystem.PleyShape
@@ -95,6 +95,7 @@ import app.pley.android.designsystem.icon.PleyIcon
 import app.pley.android.designsystem.icon.PleyIcons
 import app.pley.android.designsystem.image.Artwork
 import app.pley.android.designsystem.image.ArtworkImage
+import app.pley.android.designsystem.text.asString
 import app.pley.android.designsystem.tile.TileCaption
 import app.pley.android.designsystem.tile.TileKind
 import app.pley.android.designsystem.tile.TileStyle
@@ -115,10 +116,10 @@ import app.pley.android.screens.livetv.LiveTvEvent
 import app.pley.android.screens.livetv.LiveTvViewModel
 import app.pley.android.screens.livetv.LiveView
 import app.pley.android.ui.tv.R
-import app.pley.android.ui.tv.kit.KeyRepeatGate
 import app.pley.android.ui.tv.kit.LocalKeyRepeatGate
 import app.pley.android.ui.tv.kit.LocalTvRailFocus
 import app.pley.android.ui.tv.kit.TvPillButton
+import app.pley.android.ui.tv.kit.TvRoundButton
 import app.pley.android.ui.tv.kit.TvSidePanel
 import app.pley.android.ui.tv.kit.TvTileFrame
 import app.pley.android.ui.tv.kit.initialFocus
@@ -151,9 +152,8 @@ internal fun TvLiveTvScreen(vm: LiveTvViewModel = viewModel(factory = LiveTvView
     val page by vm.state.collectAsStateWithLifecycle()
     val pages by vm.channels.collectAsStateWithLifecycle()
     val now by vm.now.collectAsStateWithLifecycle()
-    val resources = LocalResources.current
     var details by remember { mutableStateOf<Pair<LiveChannel, LiveProgram?>?>(null) }
-    var notice by remember { mutableStateOf<String?>(null) }
+    var notice by remember { mutableStateOf<UiText?>(null) }
     val categories = remember { FocusRequester() }
     val shownCategory = remember { FocusRequester() }
     val categoryList = rememberLazyListState()
@@ -187,7 +187,7 @@ internal fun TvLiveTvScreen(vm: LiveTvViewModel = viewModel(factory = LiveTvView
     LaunchedEffect(vm) {
         vm.events.collect { event ->
             when (event) {
-                is LiveTvEvent.Failed -> notice = resources.getString(R.string.tv_livetv_favorite_failed, sentenceOf(event.error))
+                is LiveTvEvent.Failed -> notice = UiText.res(R.string.tv_livetv_favorite_failed, errorSentence(event.error))
             }
         }
     }
@@ -326,7 +326,7 @@ internal fun TvLiveTvScreen(vm: LiveTvViewModel = viewModel(factory = LiveTvView
                 notice = null
             }
             BasicText(
-                text,
+                text.asString(),
                 style = PleyType.Tv.Body.copy(color = PleyColors.Fg),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -373,7 +373,6 @@ private fun Categories(
     onShownIndex: (Int) -> Unit,
 ) {
     val rail = LocalTvRailFocus.current
-    val gate = LocalKeyRepeatGate.current
     CategoryColumn(
         state = state,
         onShownIndex = onShownIndex,
@@ -381,7 +380,7 @@ private fun Categories(
         selected = page.category,
         selectedRequester = selectedRequester,
         onSelect = onSelect,
-        modifier = modifier.railOnLeftStopOnRight(rail, stopRight = false).heldUpStays(gate).testTag(TV_LIVE_CATEGORIES),
+        modifier = modifier.railOnLeftStopOnRight(rail, stopRight = false).heldKeyStaysIn(HeldEnds.UpDown).testTag(TV_LIVE_CATEGORIES),
         found = page.found,
         search = {
             TvSearchField(
@@ -514,18 +513,6 @@ private fun shownIndexOf(selected: LiveCategory, sections: GroupSections, open: 
     return if (at >= 0) i + 1 + at else 0
 }
 
-/**
- * Up from the top of the categories goes to the tabs on a press; a held Up
- * stops there, as a held Left stops at a row's start (Samsung's page).
- */
-private fun Modifier.heldUpStays(gate: KeyRepeatGate): Modifier = focusProperties {
-    val inner = onExit
-    onExit = {
-        inner()
-        if (requestedFocusDirection == FocusDirection.Up && gate.holding) cancelFocusChange()
-    }
-}
-
 /** The categories' kinds of row, for the column to reuse their layouts in kind. */
 private const val CATEGORY = "category"
 private const val HEADING = "heading"
@@ -583,7 +570,7 @@ private fun CategoryRow(icon: PleyIcon?, name: String, count: Int?, selected: Bo
                 Spacer(Modifier.width(10.dp))
             }
             BasicText(name, style = PleyType.Tv.Label.copy(color = content), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            if (count != null) BasicText("%,d".format(count), style = PleyType.Tv.Caption.copy(color = content.copy(alpha = 0.7f)))
+            if (count != null) BasicText(formatCount(count), style = PleyType.Tv.Caption.copy(color = content.copy(alpha = 0.7f)))
         }
     }
 }
@@ -625,6 +612,7 @@ private fun ChannelTiles(
         state = grid,
         modifier = modifier
             .fillMaxSize()
+            .heldKeyStaysIn(setOf(FocusDirection.Right, FocusDirection.Down))
             .focusProperties {
                 onExit = {
                     when (requestedFocusDirection) {
@@ -730,7 +718,10 @@ internal fun ChannelTileCard(
  *
  * As Samsung's panel, the buttons keep their room at the foot and the
  * text takes what is left above them: the title two lines at most, what
- * the guide says the lines that fit, one to six ([PanelButtons]).
+ * the guide says the lines that fit, one to six. Watch is a pill and the
+ * favourite a star beside it, filled for a favourite, as in the live
+ * player; its words are only heard. As a pill, Remove from favourites
+ * didn't fit beside Watch and went under it.
  */
 @Composable
 private fun ProgramPanel(
@@ -756,17 +747,19 @@ private fun ProgramPanel(
             if (program != null) ProgramText(program, origin, now, clock)
         }
         Spacer(Modifier.height(12.dp))
-        PanelButtons {
+        Row(Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(PleyTv.ButtonGap)) {
             TvPillButton(
                 stringResource(if (airing) R.string.tv_livetv_watch_now else R.string.tv_livetv_watch_channel),
                 onClick = onWatch,
                 icon = PleyIcons.Play,
                 modifier = Modifier.initialFocus(),
             )
-            TvPillButton(
+            TvRoundButton(
                 stringResource(if (channel.favorite) R.string.tv_livetv_favorite_remove else R.string.tv_livetv_favorite_add),
+                if (channel.favorite) PleyIcons.Star else PleyIcons.StarOutline,
                 onClick = onFavorite,
-                icon = if (channel.favorite) PleyIcons.Star else PleyIcons.StarOutline,
+                onArt = false,
+                showLabel = false,
             )
         }
     }
@@ -786,7 +779,7 @@ private fun ColumnScope.ProgramText(program: LiveProgram, origin: String, now: L
     }
     Spacer(Modifier.height(14.dp))
     BasicText(program.title, style = PleyType.Tv.Title.copy(color = PleyColors.Fg), maxLines = 2, overflow = TextOverflow.Ellipsis)
-    val episode = listOfNotNull(program.episodeLabel, program.subtitle).joinToString(" · ")
+    val episode = listOfNotNull(episodeOf(program), program.subtitle).joinToString(" · ")
     if (episode.isNotEmpty()) BasicText(episode, style = PleyType.Tv.Body.copy(color = PleyColors.Muted), maxLines = 1, modifier = Modifier.padding(top = 2.dp))
     Spacer(Modifier.height(8.dp))
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp), itemVerticalAlignment = Alignment.CenterVertically) {
@@ -823,28 +816,6 @@ private fun ColumnScope.ProgramText(program: LiveProgram, origin: String, now: L
     }
 }
 
-/**
- * Watch and the favourite at the panel's foot (Samsung's): side by side
- * where both fit with room for the favourite's longer label, which changes
- * as it is pressed ([FAVORITE_ROOM]); one under the other otherwise, as in
- * the 360 dp panel they mostly are. In a row, the second pill was squeezed
- * and its label wrapped.
- */
-@Composable
-private fun PanelButtons(content: @Composable () -> Unit) {
-    Layout(content, Modifier.fillMaxWidth().focusGroup()) { measurables, constraints ->
-        val loose = constraints.copy(minWidth = 0, minHeight = 0)
-        val (watch, favorite) = measurables.map { it.measure(loose) }
-        val gap = PleyTv.ButtonGap.roundToPx()
-        val side = watch.width + gap + maxOf(favorite.width, FAVORITE_ROOM.roundToPx()) <= constraints.maxWidth
-        val height = if (side) maxOf(watch.height, favorite.height) else watch.height + gap + favorite.height
-        layout(constraints.maxWidth, constraints.constrainHeight(height)) {
-            watch.place(0, 0)
-            if (side) favorite.place(watch.width + gap, 0) else favorite.place(0, watch.height + gap)
-        }
-    }
-}
-
 /** Three 184 dp tiles, 18 apart, beside the categories. */
 private const val COLUMNS = 3
 
@@ -854,9 +825,6 @@ private val CATEGORY_INSET = 12.dp
 
 /** A group's name starts where the categories' names do, after their icons. */
 private val GROUP_INSET = CATEGORY_INSET + 26.dp
-
-/** The room kept beside Watch for the favourite, whichever its label (Samsung's 210). */
-private val FAVORITE_ROOM = 210.dp
 
 private const val NOTICE_MS = 4_000L
 

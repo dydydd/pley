@@ -4,6 +4,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
+use super::remote;
 use crate::accounts::{self, UserDto};
 use crate::auth::grants::APP_TOKEN_PREFIX;
 use crate::auth::{
@@ -94,6 +95,8 @@ pub async fn server_status(
     let mut body = serde_json::json!({
         "id": state.identity.id,
         "name": settings.server_name,
+        // The server language, for devices in a language Pley doesn't have.
+        "language": crate::i18n::server_language(&settings.language),
         "version": crate::VERSION,
         "commit": crate::COMMIT,
         "source": crate::SOURCE,
@@ -368,11 +371,20 @@ pub struct Me {
     /// What the app was allowed, for an app's token (space-separated).
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
+    /// Whether the account is an administrator who allowed the app, for one
+    /// of pley's own apps (`is_admin` is the app's rights): such an app
+    /// allowed `server` manages the server, and one signed in before it
+    /// could is told to sign in again for it. An app someone else allowed,
+    /// switched to an administrator's profile since, is told no, and so is
+    /// any app a cast switched there ([`AuthUser::role_holds`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_admin: Option<bool>,
 }
 
 pub async fn me(State(state): State<AppState>, user: AuthUser) -> ApiResult<Json<Me>> {
     let mut dto = accounts::user(&state.db, user.id).await?.ok_or(AppError::Unauthorized)?;
     let scope = user.app.as_ref().map(|app| app.scopes.to_string());
+    let account_admin = (user.app.is_some() && user.first_party()).then_some(user.role_holds());
     if user.app.is_some() {
         // What the app may do, not what the account's role allows.
         dto.is_admin = user.is_admin;
@@ -381,8 +393,8 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> ApiResult<Json
     }
     // What asking from here does (an administrator's ask from other
     // publishers' apps).
-    dto.request_access = state.requests.caller(&user).await?.access;
-    Ok(Json(Me { user: dto, scope }))
+    dto.request_access = state.requests.caller(&user, None).await?.access;
+    Ok(Json(Me { user: dto, scope, account_admin }))
 }
 
 #[derive(Deserialize)]
@@ -465,6 +477,10 @@ pub struct Switch {
     /// sign-in (see [`second_step`]).
     #[serde(default)]
     setup_id: Option<String>,
+    /// A cast's switch ticket (`switch_ticket`), in place of the rest: the
+    /// desktop app, as a receiver, switches to the remote's profile.
+    #[serde(default)]
+    ticket: Option<String>,
 }
 
 /// What switching to a profile takes, from the profile one is on (see
@@ -511,6 +527,12 @@ pub(crate) struct SwitchTarget {
     pub max_age: Option<i64>,
     /// It sees a library the current profile can't.
     pub more_libraries: bool,
+    /// It lacks a label the current profile never sees (see
+    /// `catalog::VISIBLE`), so sees titles it can't.
+    pub fewer_hidden_labels: bool,
+    /// It always sees a label the current profile doesn't, which shows
+    /// titles above an age limit.
+    pub more_shown_labels: bool,
     /// It uses two-step sign-in.
     pub two_step: bool,
 }
@@ -528,6 +550,10 @@ const SWITCH_TARGETS: &str = "SELECT t.id, t.username, t.home AND me.home AS bot
         t.pin_hash, t.pin_failures, t.password_hash, t.all_libraries, t.max_age,
         EXISTS (SELECT library_id FROM user_libraries WHERE user_id = t.id
                 EXCEPT SELECT library_id FROM user_libraries WHERE user_id = me.id) AS more_libraries,
+        NOT t.is_admin AND EXISTS (SELECT label FROM user_label_rules WHERE user_id = me.id AND kind = 'hide'
+                EXCEPT SELECT label FROM user_label_rules WHERE user_id = t.id AND kind = 'hide') AS fewer_hidden_labels,
+        NOT t.is_admin AND EXISTS (SELECT label FROM user_label_rules WHERE user_id = t.id AND kind = 'show'
+                EXCEPT SELECT label FROM user_label_rules WHERE user_id = me.id AND kind = 'show') AS more_shown_labels,
         EXISTS (SELECT 1 FROM two_step w WHERE w.user_id = t.id) AS two_step
  FROM users t, users me WHERE me.id = ?";
 
@@ -547,7 +573,9 @@ pub(crate) async fn switch_targets(state: &AppState, from: i64) -> ApiResult<Vec
 }
 
 /// Whether `target` is freer than the profile `from` acts as: an
-/// administrator, a higher age limit, or libraries it can't see. From
+/// administrator, a higher age limit, libraries it can't see, or label
+/// rules that show it more (one of `from`'s labels it never sees missing,
+/// or, for a profile with an age limit, a label it always sees added). From
 /// `from`'s rights for this request: an administrator's own sign-in may go
 /// anywhere, but an app's token, even an administrator's, has no such
 /// exemption (its `is_admin` is false).
@@ -555,7 +583,9 @@ fn is_freer(from: &AuthUser, target: &SwitchTarget) -> bool {
     !from.is_admin
         && (target.is_admin
             || from.max_age.is_some_and(|mine| target.max_age.is_none_or(|theirs| theirs > mine))
-            || (!from.all_libraries && (target.all_libraries || target.more_libraries)))
+            || (!from.all_libraries && (target.all_libraries || target.more_libraries))
+            || target.fewer_hidden_labels
+            || (from.max_age.is_some() && target.more_shown_labels))
 }
 
 /// What switching from `from`'s profile to `target` takes, by the rules of
@@ -602,6 +632,9 @@ pub(crate) enum SwitchError {
     WrongPassword,
     /// Its second step (two-step sign-in) failed, or is being set up.
     TwoStep(AppError),
+    /// A cast's switch ticket that has expired, was spent, or isn't this
+    /// device's for this switch.
+    TicketSpent,
     Internal(AppError),
 }
 
@@ -634,6 +667,7 @@ impl From<SwitchError> for AppError {
             }
             SwitchError::SetUpFirst => AppError::forbidden(SET_UP_FIRST),
             SwitchError::WrongPassword => AppError::forbidden("wrong password"),
+            SwitchError::TicketSpent => AppError::ForbiddenAs("ticket_spent", TICKET_SPENT.to_owned()),
             SwitchError::Throttled(err) | SwitchError::TwoStep(err) | SwitchError::Internal(err) => err,
         }
     }
@@ -645,6 +679,11 @@ pub(crate) const PIN_LOCKED: &str =
     "this profile's PIN is locked after too many wrong tries. Its owner or an administrator can reset it";
 pub(crate) const NO_WAY_IN: &str =
     "this profile can see more than yours: an administrator can give it a PIN to switch to it";
+pub(crate) const TICKET_SPENT: &str = "this cast's switch has expired or was used: cast again";
+pub(crate) const CAST_NEEDS_PIN: &str =
+    "this device's profile can see less than yours: give your profile a PIN to cast to it";
+pub(crate) const CAST_ADMIN_TO_BROWSER: &str = "an administrator's profile isn't cast to a browser or the desktop app, \
+    which would stay signed in with its administrator rights: switch to it there";
 pub(crate) const SET_UP_FIRST: &str =
     "this profile has to set up two-step sign-in, which this server requires: switching to it takes its password";
 
@@ -715,6 +754,42 @@ pub(crate) async fn check_switch(
     Ok(None)
 }
 
+/// Checks a switch a cast asked for ([`crate::api::remote::cast`]):
+/// `ticket`, issued for device `device_id` on `from`'s profile to switch to
+/// `target`, is spent here; both are still home members, and the target
+/// is enabled. By [`switch_needs`] from `from`'s own rights, the target may
+/// take nothing more than the PIN the caster gave as the ticket was issued:
+/// never a password, and not a locked PIN. Only an app (`app`) switches to
+/// an administrator's profile so: its tokens never have administrator
+/// rights, nor, switched by a ticket, that role's rights over others, which
+/// hold only where the administrator allowed the app and picked their
+/// profile on its device ([`AuthUser::role_holds`]). A browser's or the
+/// desktop app's sign-in would keep them (casts there aren't sent; this
+/// holds whatever a ticket says).
+pub(crate) async fn check_ticket_switch(
+    state: &AppState,
+    from: &AuthUser,
+    device_id: Option<&str>,
+    target: i64,
+    ticket: &str,
+    app: bool,
+) -> Result<(), SwitchError> {
+    if !device_id.is_some_and(|device| state.receivers.redeem(ticket, device, from.id, target)) {
+        return Err(SwitchError::TicketSpent);
+    }
+    let Some(profile) = switch_target(state, from.id, target).await? else {
+        return Err(SwitchError::NotFound);
+    };
+    if !profile.both_home || profile.disabled || (profile.is_admin && !app) {
+        return Err(SwitchError::NotAllowed);
+    }
+    match switch_needs(from, &profile, state.auth.two_step_required()) {
+        Needs::None | Needs::Pin => Ok(()),
+        Needs::Locked if profile.pin_hash.is_some() => Err(SwitchError::PinLocked),
+        Needs::Password | Needs::Locked => Err(SwitchError::NoWayIn),
+    }
+}
+
 /// Whether `pin` is `profile`'s PIN (`pin_hash`), counting it in a row
 /// (`users.pin_failures`): throttled per profile by the caller, and capped
 /// in a row, so guessing a 4-digit PIN over weeks doesn't get through
@@ -756,7 +831,8 @@ pub(crate) async fn check_own_pin(state: &AppState, user: &AuthUser, pin: &str) 
 }
 
 /// Switch this device to another home profile, by the rules of
-/// [`check_switch`]: the session it came from ends, and a new one starts.
+/// [`check_switch`], or with a cast's ticket ([`check_ticket_switch`]): the
+/// session it came from ends, and a new one starts.
 pub async fn switch(
     State(state): State<AppState>,
     user: AuthUser,
@@ -765,16 +841,25 @@ pub async fn switch(
     CurrentToken(token): CurrentToken,
     Json(body): Json<Switch>,
 ) -> ApiResult<Response> {
-    let recovery_codes = check_switch(
-        &state,
-        &user,
-        body.user_id,
-        body.pin.as_deref(),
-        body.password.as_deref(),
-        body.code.as_deref(),
-        body.setup_id.as_deref(),
-    )
-    .await?;
+    let recovery_codes = match body.ticket.as_deref() {
+        Some(ticket) => {
+            let device = remote::device_id_of(&user, token.as_deref());
+            check_ticket_switch(&state, &user, device.as_deref(), body.user_id, ticket, false).await?;
+            None
+        }
+        None => {
+            check_switch(
+                &state,
+                &user,
+                body.user_id,
+                body.pin.as_deref(),
+                body.password.as_deref(),
+                body.code.as_deref(),
+                body.setup_id.as_deref(),
+            )
+            .await?
+        }
+    };
     if let Some(token) = token {
         state.auth.revoke(&token).await;
     }

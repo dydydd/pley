@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -171,7 +170,7 @@ fun PhonePlayerScreen(
             toasts,
             Modifier
                 .align(Alignment.TopCenter)
-                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .windowInsetsPadding(WindowInsets.player)
                 .padding(top = 64.dp),
         )
     }
@@ -240,9 +239,15 @@ private fun PlayerEffects(state: PlayerScreenState, picture: PictureState, toast
     LaunchedEffect(state, picture) {
         snapshotFlow { state.burnedSubtitles }.collect { picture.burnedSubtitles = it }
     }
-    // Paused from anywhere (a headset, picture in picture, audio focus): the controls show, and stay.
+    // Paused from anywhere (a headset, picture in picture, audio focus): the controls show, and stay. Not from
+    // the remote, on another device: whoever paused isn't here to use them, and its notice says why it paused.
     LaunchedEffect(state) {
-        snapshotFlow { state.phase == PlayerPhase.Paused }.collect { paused -> if (paused && !state.locked) state.controlsVisible = true }
+        snapshotFlow { state.phase == PlayerPhase.Paused && !state.pausedByRemote }.collect { paused ->
+            if (paused && !state.locked) state.controlsVisible = true
+        }
+    }
+    LaunchedEffect(state) {
+        snapshotFlow { state.pausedByRemote }.collect { if (!it) state.remotePauseEnded() }
     }
     // Each item after the first (the next episode, a queue's next) shows the controls as it begins to play,
     // its title at the top as the first's was: the TV and the native Samsung app show the title then.
@@ -259,6 +264,16 @@ private fun PlayerEffects(state: PlayerScreenState, picture: PictureState, toast
             if (notice != null) {
                 toasts.show(notice)
                 state.controller.dismissNotice()
+            }
+        }
+    }
+    // What the remote did, from another device ("Paused", "+30 s"): a toast, in place of the controls.
+    LaunchedEffect(state, toasts) {
+        // Keyed by its count too: the same words again are said again.
+        snapshotFlow { state.remoteNoticeId to state.remoteNotice }.collect { (_, notice) ->
+            if (notice != null) {
+                toasts.show(notice)
+                state.controller.dismissRemoteNotice()
             }
         }
     }

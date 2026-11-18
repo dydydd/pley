@@ -8,8 +8,10 @@ import { TestButton } from "./SettingsForm";
 
 const SETTINGS = {
   server_name: "Den",
+  language: "",
   tmdb_api_key: "",
   metadata_language: "en-US",
+  country: "",
   tv_metadata: "auto",
   tvdb_api_key: "",
   tvdb_pin: "",
@@ -17,6 +19,8 @@ const SETTINGS = {
   hwaccel: "auto",
   hardware_decoding: true,
   tonemapping: "auto",
+  transcode_video: true,
+  max_video_transcodes: 4,
   max_transcodes: 4,
   transcode_preset: "veryfast",
   throttle_transcodes: true,
@@ -57,6 +61,55 @@ describe("ServerSettings", () => {
     expect(await screen.findByText("Settings saved")).toBeInTheDocument();
     await waitFor(() => expect(requests.find((r) => r.method === "PUT")?.body).toEqual({ third_party_apps: true }));
     expect(screen.getByRole("switch", { name: "Apps by other publishers" })).toBeChecked();
+  });
+
+  it("shows the metadata language's country until one is chosen, and saves the one chosen", async () => {
+    const user = userEvent.setup();
+    const requests = mockApi({
+      "GET /api/settings": () => ({ ...SETTINGS, metadata_language: "en-GB" }),
+      "GET /api/system": () => ({}),
+      "GET /api/ratings/systems": () => ({
+        region: "GB",
+        systems: [
+          { country: "GB", name: "United Kingdom", ratings: [] },
+          { country: "NZ", name: "New Zealand", ratings: [] },
+          { country: "US", name: "United States", ratings: [] },
+        ],
+      }),
+      "PUT /api/settings": (req) => ({ ...SETTINGS, ...(req.body as Partial<Settings>) }),
+    });
+    renderWithProviders(<ServerSettings />);
+    const country = await screen.findByLabelText("Country");
+    await screen.findByRole("option", { name: "New Zealand" });
+    expect(country).toHaveValue("GB");
+
+    await user.selectOptions(country, "NZ");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(requests.find((r) => r.method === "PUT")?.body).toEqual({ country: "NZ" }));
+  });
+
+  it("turns reading NFO files off", async () => {
+    const user = userEvent.setup();
+    const requests = mockApi({
+      "GET /api/settings": () => ({ ...SETTINGS, read_nfo: true }),
+      "GET /api/system": () => ({}),
+      "PUT /api/settings": (req) => ({ ...SETTINGS, read_nfo: true, ...(req.body as Partial<Settings>) }),
+    });
+    renderWithProviders(<ServerSettings />);
+    const toggle = await screen.findByRole("switch", { name: "Read NFO files" });
+    expect(toggle).toBeChecked();
+
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(requests.find((r) => r.method === "PUT")?.body).toEqual({ read_nfo: false }));
+    expect(screen.getByRole("switch", { name: "Read NFO files" })).not.toBeChecked();
+  });
+
+  it("has no NFO switch for a server that doesn't read NFO files", async () => {
+    mockApi({ "GET /api/settings": () => SETTINGS, "GET /api/system": () => ({}) });
+    renderWithProviders(<ServerSettings />);
+    expect(await screen.findByLabelText("Server name")).toHaveValue("Den");
+    expect(screen.queryByRole("switch", { name: "Read NFO files" })).not.toBeInTheDocument();
   });
 
   it("requires two-step sign-in only from an administrator who uses it", async () => {
@@ -227,7 +280,7 @@ describe("ServerSettings", () => {
       "GET /api/settings": () => ({ ...SETTINGS, opensubtitles_api_key: "key", opensubtitles_username: "ana", opensubtitles_password_set: true }),
       "GET /api/system": () => ({}),
       "PUT /api/settings": (req) => ({ ...SETTINGS, ...(req.body as Partial<Settings>), opensubtitles_password: undefined, opensubtitles_password_set: true }),
-      "POST /api/settings/test": (): ServiceTestResult => ({ ok: true, message: "OpenSubtitles accepted the key and signed the account in.", ms: 240 }),
+      "POST /api/settings/test": (): ServiceTestResult => ({ ok: true, message: "OpenSubtitles accepted the key and signed the account in.", refused: false, ms: 240 }),
     });
     renderWithProviders(<ServerSettings />);
     const password = await screen.findByLabelText("OpenSubtitles password");
@@ -269,8 +322,8 @@ describe("TestButton", () => {
     const requests = mockApi({
       "POST /api/settings/test": ({ body }): ServiceTestResult =>
         (body as { api_key: string }).api_key === "good"
-          ? { ok: true, message: "TMDB accepted the key.", ms: 182 }
-          : { ok: false, message: "TMDB rejected this key.", ms: 95 },
+          ? { ok: true, message: "TMDB accepted the key.", refused: false, ms: 182 }
+          : { ok: false, message: "TMDB rejected this key.", refused: true, ms: 95 },
     });
     const { rerender } = renderWithProviders(<TestButton label="Test the TMDB key" test={{ service: "tmdb", api_key: "good" }} />);
 

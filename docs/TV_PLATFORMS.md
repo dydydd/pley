@@ -51,10 +51,11 @@ The native Samsung app installs the same way, as a `.tpk`
 
 Sign-in, server discovery (a sweep of the TV's subnet), "Who's watching?"
 and its PINs, the screens, the player's keys and panels, and offline
-behaviour follow the Android TV app. With Always start as too, a start
-never goes on as a profile with a PIN without it: the TV keeps the profile
-it was left on (`GET /api/auth/me`, with `has_pin`), and until it has,
-asks "Who's watching?". What differs:
+behaviour follow the Android TV app. A start goes straight into Home as
+the profile the TV was left on when that profile has no PIN, and never
+goes on as one with a PIN without it, with Always start as too: the TV
+keeps the profile it was left on (`GET /api/auth/me`, with `has_pin`), and
+until it has, asks "Who's watching?". What differs:
 
 ### Remote keys
 
@@ -136,7 +137,9 @@ shows it after Home, remembered on the TV so it shows at launch. On this TV:
 - **Guide:** two and a half hours across. Left and Right go programme by
   programme, rewind and fast forward (or Previous and Next) move two hours,
   CH+ and CH− a screen of channels, and Back returns to now before it goes
-  to the rail. A long OK or the menu key opens a programme's details.
+  to the rail. A long OK or the menu key opens a programme's details, with
+  Watch and, beside it, the favourite as a star alone, filled for a
+  favourite, as in the player's controls.
 - **Tuning:** `POST …/watch` with this TV's id (`pley.installId`) and
   `keyed_urls`, so AVPlay can play the playlist without the token. The app
   waits for the playlist, then plays the server's live HLS from its live
@@ -157,6 +160,133 @@ shows it after Home, remembered on the TV so it shows at launch. On this TV:
   stopped" with the server's words, and Watch again in place of Try again.
   The card stays when the app is hidden and shown again; nothing is tuned
   until Watch again.
+
+### Remote control
+
+The TV obeys the remote on the profile's other devices that have one
+([API.md](API.md#remote-control)) and shows no remote of its own. Its
+players say what they obey when they start (`controls`) and that they play
+on a TV (`device_kind: "tv"`); the server names the TV from its web engine
+("Samsung TV"). They obey:
+
+- **Movies and episodes:** play, pause, seek and skip, and next where
+  something can come next (an episode, a playlist or collection). Next at
+  the end does nothing, and says nothing on the TV; a video has no
+  previous. The audio and subtitles, where the file has them (`audio`,
+  `subtitles`), change as the player's own Audio and Subtitles change
+  them, picks saved the same way: in place where the TV's player can, else
+  with a new session (a stream's audio, picture subtitles burned in). The
+  quality (`quality`, one of the ids the Quality menu offers for the file)
+  changes as a pick in that menu does, kept for the next titles; a new
+  session plays it where it asks for another stream.
+- **Music:** play, pause, seek, skip, next and previous, as the buttons:
+  previous more than 3 s into a track, or on the first, goes back to its
+  start. Music playing behind the other screens obeys too.
+- **Live TV:** next and previous, channel up and down in the order CH+
+  and CH− go through, round the ends. It has no pause or seek. Stopped
+  from another device or by an administrator (`session_stopped`), it
+  shows **Live TV stopped** and says who and why, with Watch again, as for
+  a connection taken over.
+
+Only the player of the session named acts on a command, a seek stays
+within the title, and a skip counts from where it is. Each change is
+reported at once, so the remote sees it; another title, track or channel
+tells the server with its own session, and a new session for an audio or
+subtitle track reports as it begins. A play on a player already playing,
+a pause on one already paused, or a track picked that is the one chosen,
+says so again at once, so a remote a little behind settles; a track the
+file doesn't have, or a quality its menu doesn't offer, does nothing.
+Every report of a video says which audio and subtitles play
+(`audio_index`, `subtitle_index`, `-1` for none) and which quality is
+picked (`quality`: `auto`, `original`, `8m`…), so the remote ticks them;
+music has none. The rule is pinned for both Samsung apps by
+`packages/tv/test/fixtures/remote.json`, and the tracks and the quality by
+`tracks.json` beside it.
+
+A command never brings up the player's controls: whoever sent it is on
+another device. What it changed shows for 2 s as the player's toast, top
+right, as a media key's track change does: "Paused", "Playing", "+30 s"
+or "−10 s" as far as a skip asked, "Jumped to 12:34" where a seek went,
+and "Audio: …", "Subtitles: …", "Subtitles off" or "Quality: …" as the
+menus name them. Next, a channel change and a command that changes
+nothing show nothing new. Controls already up as the remote pauses hide
+5 s after the last key, as while it plays, until a key on the TV makes
+the pause the person's own; then they stay, as for any pause.
+
+**Casts.** The TV is one of the devices the profile's remotes play things
+on ([API.md](API.md#casting)) while its event stream is open: the stream
+names it a receiver by its id (`pley.installId`), a TV taking titles and
+playlists (`casts=item`) and channels while the rail shows Live TV
+(`live`), and switching to the profile of a remote of another profile
+that casts to it (`switch`), and opens again when Live TV comes or goes; the server names
+it, as it does its players. What a remote sends plays as the TV's own
+Play would, in place of what plays:
+
+- a movie or an episode in the player, from the place sent, else where
+  Play resumes, with the audio and subtitles sent (`-1`: none) for that
+  play, in place of the saved ones, which stay for a track its file
+  doesn't have; a show or a season its next episode. The quality is the
+  TV's own;
+- an album or an artist as the music's queue, in order or shuffled, with
+  Now Playing; a track its album from it, at the place sent;
+- a playlist as its page plays it: music as the queue, video in the
+  player through the playlist (shuffled: from a random entry);
+- a channel in the live player, channel up and down going through All
+  channels.
+
+"Playing from" and the remote's device ("another device" when it has no
+name) shows over what starts for 4 s, as the app's toasts do; a show,
+album or playlist with nothing to play says "Nothing to play". A cast for
+another device, or one that comes while the app is hidden, signing in or
+asking who's watching, does nothing, and of two sent close together the
+later plays.
+
+A remote on another profile of the household casts to the TV too: its
+cast names that profile (`profile_id`) and brings a `switch_ticket`. The
+TV ends what plays first, and waits up to 5 s, as Android TV does, for
+its last reports (where it got to, `stopped`, the session's end) to go
+out with the sign-in they belong to; what hasn't gone by then is
+dropped, never sent as the new profile, whose watch history it isn't.
+Then it switches to that profile with the switch-profile grant, the
+ticket in place of a PIN, as "Who's watching?" switches: what was shown
+for the profile before goes, the event stream starts over as the new
+one, and the rail and Home are the new profile's. What was cast then
+plays over its Home, once. A switch that fails (the ticket spent or
+expired, the server out of reach) says "Couldn't switch to the remote's
+profile" and plays nothing. A cast naming another profile without a
+ticket does nothing. Every other cast heard while the switch is made is
+dropped, whichever profile sent it: one for the profile the TV leaves
+isn't the new one's, and another switch would undo the first. Once the
+TV is the new profile, casts play as ever, that profile's own remote's
+too, the later of two in place of the first. "Who's watching?" still
+takes no casts: whoever stands at the TV is choosing, and a cast would
+choose for them. The rules are in `packages/tv/test/fixtures/tracks.json`
+too.
+
+### Collections
+
+A movie or show library's Recommended tab shows the rows administrators
+chose for it, and Home those chosen for Home, where collections of the
+same title in several libraries are one row ([API.md](API.md#rows)). A
+row's See all opens the collection it shows (a row's title takes no
+focus on the TV); a merged row opens its collections together, every
+title in the row's order, with a chip for each library they come from,
+which opens that library's collection. Play there plays the movies one
+after another, or, with none, a show's next episode.
+
+The Collections tab groups a library's collections under their categories,
+Other among them, in the order administrators gave them: a row for each,
+or a grid without a heading when only one group shows. The Category chip,
+there when there is more than one category to choose, narrows it to one;
+how a collection was made matters only to administrators, so the TV
+doesn't filter by it. A collection's page shows its category beside
+"Collection", unless it's Other. Managing categories and choosing the rows
+of Home and Recommended are in the web and desktop apps. The grouping is
+pinned by `packages/tv/test/fixtures/collections.json`, which the native
+app runs too. A server from before categories answers
+`GET /api/collection-categories` with `404`: its collections show as they
+did, in one grid, and its rows' See all opens the library in the row's
+order.
 
 ### Requests
 
@@ -190,12 +320,23 @@ also what waits for them, in red while some failed.
   What came while the app wasn't listening (before it started, while the
   event stream was down) is found among the 20 newest unseen requests.
   Other news shows only as the number and in the lists.
+- **Home:** the hero features what the web's banner and the Android app
+  do: the newest movies and shows not yet watched that have a backdrop, a
+  library's at a time, then My List's (the newest watched ones once
+  everything has been), each with why it is there ("New in Movies"), Play,
+  Info and My List. It takes turns through them: Right from its last
+  button goes on to the next title, focus back on Play, and it turns by
+  itself every 9 s while no key is pressed, each press starting the time
+  over; with Reduce motion only Right turns it. With nothing to feature,
+  the hero is Continue Watching's first and stays.
 - **Discover:** a hero for the first trending title, then Trending this
   week, Popular movies, Popular shows, Coming to cinemas and Popular
   anime, each loaded as it comes near the screen, then Your requests;
   at the top, the way to the requests with their number. It has no
   search field: Search finds TMDB's titles. Posters say In library,
-  Partly in library, Requested or Declined. A list reads TMDB's pages
+  Partly in library, Requested or Declined. A title a library has
+  whole opens the library's page, here and in Search, since its page
+  would only offer Open. A list reads TMDB's pages
   until it has more than a screenful, 5 at most at a time, since an age
   limit can leave page after page empty: a row shows what they had, and
   a grid (See all, and Search's Discover row's) ends in Show more,
@@ -235,6 +376,58 @@ also what waits for them, in red while some failed.
   `Intl.RelativeTimeFormat`. Settings → About says the app uses the TMDB
   API.
 
+### Language
+
+The app is in English, French and Spanish ([API.md](API.md#language)):
+the account's language, else the one picked on this TV, else the TV's,
+else the server's, else English. `packages/tv/test/fixtures/language.json`
+pins that order for both Samsung apps.
+
+- **The globe:** Choose your server and typing an address have a small
+  globe at the bottom right, on the forget hint's line; the sign-in code
+  has it at the top right, on the logo's line. It names the language shown
+  by its two letters ("FR"); Down or Up reaches it, Left and Right don't. OK opens a side panel:
+  Automatic, with what that is on this TV (its language, else the
+  server's, else English), then English, Français and Español, the choice
+  in force checked. A choice shows at once and is kept on the TV
+  (`pley.deviceLanguage`); Automatic forgets it. Signed in, an account's
+  own language comes first, and its Automatic is this choice.
+- **The TV's language:** what Tizen's system information says
+  (`tizen.systeminfo`, `LOCALE`), then the web engine's
+  `navigator.languages`, which Tizen's runtime sets from the TV's menu
+  language. A tag such as `fr-CA` counts as French.
+- **At a start** the app shows the language it showed last
+  (`pley.language`), never another while it waits, which would flash. It
+  changes, signed in, once the account has been heard
+  (`GET /api/auth/me`), and on a TV in a language Pley doesn't have, once
+  the server has said its own (`GET /api/server`, asked again when the
+  events reconnect if it didn't answer). The account's own language counts
+  as soon as it is heard.
+- **A change** (another profile, signing out, Settings) draws the screens
+  again in the new language at once, and asks for Home's and the
+  libraries' rows again, as the server writes their titles.
+- **Settings → Profile → Language:** Automatic, with what that is on
+  this TV: the one picked with the globe, else its language, or the
+  server's on a TV in a language Pley doesn't have; then English, Français
+  and Español, each named in itself. A choice is the profile's on all its
+  devices (`PUT /api/me/language`). A Pley from before languages keeps no
+  account's language (its `GET /api/server` names none, and the route
+  answers 404 or 405): there the row is this TV's, as the globe picks it,
+  with Automatic the TV's own language; a choice shows at once and is kept
+  on the TV (`pley.deviceLanguage`).
+- **Requests** to the server carry `Accept-Language` with the language
+  shown.
+- **Dates and numbers** are written with `Intl` in the language shown,
+  with the TV's region when the TV is in that language, so `en-GB` keeps
+  its day before the month. The TVs' engines have no `Intl.PluralRules`:
+  the plural forms of English, French and Spanish are written in the app,
+  as CLDR has them.
+- **The words** are in `packages/tv/src/i18n/locales/<language>/<area>.json`,
+  in the web app's format (`{{name}}`, `_one`, `_many`, `_other`), all
+  three languages in the app's script. A key is typed from the English
+  files, so a wrong one fails the type check; English stands in for a word
+  missing elsewhere, and the tests check every language has every word.
+
 ## Building and testing
 
 ### Commands
@@ -255,10 +448,13 @@ bun run --cwd apps/tizen build       # only the app's dist/; --dev keeps it read
   the PATH, and a security profile named by `PLEY_TIZEN_PROFILE` (default
   `pley-dev`).
 - **Icons:** `bun scripts/render-icons.mjs` draws Samsung's icons, square
-  as the TV's menu draws its other apps. One TV may have more than one of
-  Pley's Samsung apps, so the native app's icon is plain, the web app's says
-  WEB on blue, and a profiling build of the native app (an app of its own,
-  `app.pley.tizen.debug`, "Pley (debug)") says DEBUG on yellow.
+  as the TV's menu draws its other apps. The native app's has the mark
+  above the name, as the other apps' tiles there show theirs. One TV may
+  have more than one of Pley's Samsung apps, so the web app's says WEB on
+  blue under the mark. A profiling build of the native app (an app of its
+  own, `app.pley.tizen.debug`, "Pley (debug)") has the native app's icon
+  with a yellow DEBUG ribbon across its top right corner, set in from the
+  corner so the apps bar's rounded corners leave the word whole.
 
 ### Testing without a TV
 
@@ -275,11 +471,12 @@ its packages into the SDK by hand and it runs on WHPX.
 | Path | What |
 |---|---|
 | `api/`, `net/`, `auth/` | HTTP API, event stream, server discovery, sign-in with a code, profiles and PINs, the server's proof before a token goes ([Telling servers apart](API.md#telling-servers-apart)) |
-| `state.ts`, `platform.ts` | What the TV keeps (servers, sign-ins, settings, a per-install id, what requests are for the profile); what the app's shell provides |
+| `state.ts`, `platform.ts` | What the TV keeps (servers, sign-ins, settings, a per-install id, what requests are for the profile, the language shown last); what the app's shell provides |
+| `i18n/` | The words in English, French and Spanish, `t()` and `Trans`, plural forms, the language shown, dates and numbers in it |
 | `requests.ts` | Requests' words and rules: badges, a title's one main action, the season picker, stages, what may be done to a request, the server's answers |
 | `ui/focus.ts`, `ui/input.ts`, `ui/keys.ts` | Focus, remote keys, a pointer and its wheel |
 | `ui/shell/`, `ui/screens/`, `ui/kit/` | The rail, back stack and screens |
-| `player/` | Playback: the play request, recovery, quality, Up Next, skip markers, seek previews, sleep timer, reports, music |
+| `player/` | Playback: the play request, recovery, quality, Up Next, skip markers, seek previews, sleep timer, reports, music, the remote and casts |
 | `live/` | Live TV: categories, the guide's pages, a channel on the TV's player |
 | `subs/` | Subtitles drawn by the app |
 | `caps/` | The server's direct-play rules, so Playback details can say why |
@@ -352,13 +549,17 @@ output is set to Dolby; TrueHD and DTS only when Settings → Playback asks.
 
 AVPlay rules the engine keeps: one call at a time while a seek runs; no
 seek to 0; stop and close before the next source; the picture placed in
-1920×1080 coordinates; the screen saver off during playback. When the TV
-hides the app, the session closes and reopens at the same place.
+1920×1080 coordinates; the screen saver off during playback. AVPlay, and
+the native player too, can say one failure twice (its error, and the call
+that failed): the apps act on a session's first only, so the fallbacks go
+one step at a time. When the TV hides the app, the session closes and
+reopens at the same place.
 
 ## Releases
 
-The app is the `samsung` unit in [RELEASING.md](RELEASING.md). The package
-is signed with a Samsung certificate, so it is made by hand
+The app is the `samsung` unit in [RELEASING.md](RELEASING.md); the native
+app is `samsung-native` ([Installing a release](#installing-a-release)). The
+web app's package is signed with a Samsung certificate, so it is made by hand
 (`bun run tizen`); keep the author certificate, since every store update
 must be signed with it.
 
@@ -374,6 +575,9 @@ Exit key always exits
 
 - No playback speed.
 - No subtitle upload or delete.
+- No audiobooks, in this app or the native one: the server gives them no
+  audiobook library, nor their books on Home, in search or in history.
+  They are in the web and desktop apps.
 
 ## The native Samsung app
 
@@ -391,11 +595,13 @@ Home: the hero, the server's rows and the rail, and item pages: the hero
 and its buttons, seasons and episodes, Extras, Cast and More Like This,
 and the side panels; library pages (the chips and panels, the filters by
 resolution and dynamic range among them, the grid with the A to Z jump,
-Recommended and Collections) and the Libraries page;
+Recommended, and Collections grouped by category with the Category chip,
+as [Collections](#collections) describes) and the Libraries page;
 search (the field and the TV's keyboard, results in rows, each with all
 the server finds, up to 200, Live TV's channels in a row before People
 that play the one chosen, recent searches); people's pages (the photo, the name and a row per role); the
-rail's Collections and a collection's page, with Play and Shuffle; the
+rail's Collections, a collection's page with Play and Shuffle, and the
+merged page of a Home row of several libraries' collections; the
 watch history page; playlists (their covers, a playlist's page with
 moving and removing entries, Rename and Delete, Add to playlist, New
 playlist and saving a library's filters as a smart playlist); Settings
@@ -409,7 +615,13 @@ doesn't play); music's artist and
 album pages (Play, Shuffle, the albums, the tracks by disc) and Now Playing
 (the scrubber, the controls, the sleep timer and the queue), with the
 music playing on behind the other pages, driven by the remote's media keys
-from any of them, and pausing for a video; and the player: the stream on
+from any of them, and pausing for a video; Discover and requests, ported from Android TV
+([Requests](#requests): the rail's entry and its number, Discover's hero
+and rows, a title's page and Which seasons?, the requests and their
+actions, Discover's row in Search, Request more seasons on a show's page,
+what is ready to watch popping up, and TMDB's credit in Settings →
+About; Overview opens in a panel beside
+the page, where the TV's dialogs hold four lines); and the player: the stream on
 the TV's own player, chosen with the TV's capabilities, seeking with Left
 and Right with previews of where to (as YouTube's TV app: it waits for OK,
 and a held key runs faster the longer it's held), OK showing the
@@ -417,8 +629,12 @@ controls, the scrubber with its chapters (Up while a seek waits opens
 them as a row of cards to go to) and the control row, the title
 for a few seconds as each item begins, text subtitles in Settings' look
 (the CAPTIONS key turns them off and on), picture subtitles (PGS, VobSub,
-DVB) decoded from the server's `.mks` and drawn as the web app draws them,
-burned in by the server only when it can't make that file, the side
+DVB) decoded from the server's `.mks` and drawn as the web app draws them
+(a whole one read in parts by its Cues, `Player/PictureRanges.cs`: the
+pictures from 30 s before the film to 5 minutes after it once its picture
+shows, the next as it plays on, those around a seek as it lands; one the
+server is still making, or without Cues, read whole), burned in by the
+server only when it can't make that file, the side
 panels (Subtitles with Sync and, for text subtitles, their look, Audio,
 Quality, the sleep timer, Speed where the TV's player has other speeds, and Info,
 where the server's speed sits beside the TV's network speed: the fastest
@@ -433,6 +649,36 @@ Android's, its music pauses while the app is hidden, since a hidden app
 gives up the TV's player, and plays on from there when the app is back.
 The other pages come next.
 
+Tizen's player prepares an HLS stream from its first segment and ignores
+`EXT-X-START`, so a film resumed part-way had it fetch the film's start,
+and the server make the stream there, before seeking to where it resumed.
+A film resumed 10 s or more in is given its playlists by the app instead,
+from the TV's loopback, its media playlist beginning at the segment the
+film resumes in and naming every segment by the server's own address: the
+player prepares there, a second or two before the resume point, with no
+seek, and the video still comes straight from the server. Only the
+server's own addresses are asked for through it, so another program on the
+TV can't use it to reach another host. The app asks the
+server for both playlists as soon as it has the stream, while the TV's
+player is still being set up: the server takes a third of a second for
+the first. The player then
+counts from that segment, which the engine adds back to every position,
+seek and duration; a seek before it starts a session there, as any new
+stream starts, under its black cover.
+The player's calls that hold their caller (making it and giving it its
+source, its position, its prepare, a seek, its streams' details) are made
+off the UI thread, one at a time, so the screen and its spinner keep
+moving while a film opens; those bound to the window (its display, the
+picture's region, starting it, letting it go) stay on it.
+Tizen's player says neither when its first picture is out nor when it
+waits for data, only where it is, so the engine reads its position again
+and again and `Player/PlaybackWatch.cs` decides: waiting from its prepare
+until the picture moves, after a seek until it moves on from where it
+landed (a little off where it was sent), and when it stands still 1.5 s
+while it should play; it puts the position on the film's timeline too.
+The engine says it is prepared apart (`Opened`), for the audio chosen to
+be switched to before it plays.
+
 A channel starts as on Android: its `stream.ts` (the provider's MPEG-TS,
 from its last keyframe) is read while the server says what it makes of the
 channel, and plays when that is the channel as it is, or with sound every
@@ -443,8 +689,12 @@ server takes an app's token nowhere else, so the app reads it with its
 token and hands it on to the player as it comes, on the TV's loopback
 address under a random path that lasts one channel (`Net/StreamRelay.cs`).
 Live channels start once 0.5 s is buffered, 1.5 s after a stall, as on
-Android; films the same from a server at home, and 1 s and 2 s from
-elsewhere. A film asks the server for its stream before its player
+Android; films start once 0.5 s is buffered from a server at home and 1 s
+from elsewhere, a film resumed part-way (its playlists trimmed) once 1.5 s
+is, as its 4K remux ran dry within a second on less. Tizen's player waits
+for its buffer after every seek too, not only after a stall, so films wait
+for 0.5 s there, where Android waits 1.5 s or 2 s after a stall: a seek
+took 2 s, now under one. A film asks the server for its stream before its player
 screen is made, which takes the UI thread half a second the first time.
 
 Someone taking over a channel's connection (the server's
@@ -453,12 +703,107 @@ TV stopped" with the server's words, Watch again first and focused. The
 card stays when the app is hidden and shown again; nothing is tuned until
 Watch again.
 
+The remote on the profile's other devices is obeyed as by the web app
+([Remote control](#remote-control)) and Android TV's players: the player,
+the music behind the other pages and the live player say what they obey
+(`controls`) and that they play on a TV (`device_kind: "tv"`, on the
+`stream.ts` it reads too), act only on their own session, and report each
+change at once; a film or music told to play or pause as it already is
+says so again. The player changes the audio and subtitles as its Audio
+and Subtitles panels do, and the quality (`quality`) as its Quality panel
+does, the pick kept for the next titles as the panel's is: a quality that
+plays something else starts a new session, which reports as it begins,
+and Original from Automatic, or the quality picked already, reports at
+once. Every report of it says which tracks play and which quality is
+picked (`quality`, by id: `auto`, `original`, `8m`…). A file on a drive
+has no Quality menu, and lists no `quality`. The
+remote's next and previous on Live TV go through the
+channels as channel up and down do. Live TV stopped from another device or
+by an administrator (`session_stopped`) shows the same card, saying who
+stopped it and, on a line of its own, their message, as on Android TV. The
+rule is `Player/Remote.cs`, pinned by the same fixtures as the web app's.
+As on Android TV, a command shows no controls: what it changed is a toast
+for 2 s at the player's top right, as the CAPTIONS key's, in the Samsung
+app's words ([Remote control](#remote-control)); one that changes nothing
+says nothing, and the remote's pause keeps no controls up until a key on
+the TV makes it the person's own.
+Casts play as on the web app ([Remote control](#remote-control)), taken
+while the rail's pages or a player show: what a remote sends takes the
+place of the player showing once that one has let go of the TV's player,
+with "Playing from …" at the player's top right, or over Now Playing as
+the pages' toasts show, at their foot. A movie or an episode sent with
+the tracks picked on the remote's page (`audio_index`, `subtitle_index`,
+`-1` for none) plays with them, for that play only and without saving
+them; a track its file doesn't have (another version's) leaves the choice
+to the profile's, and the quality stays the TV's own. A channel opens the
+live player on it, as Watch on that channel does, with channel up and
+down going through All channels. A music playlist plays as the
+music's queue, where the playlist page's own Play opens its first entry's
+album, as Android TV's does. A cast from another profile's remote closes
+the player, switches to that profile as the web app does (the player's
+and the music's reports share one queue, which the switch waits up to
+5 s for), and plays over the new profile's Home. The rules are
+`Player/Cast.cs`.
+
 | | |
 |---|---|
 | Folder | `apps/tizen-native` |
 | Package | Tizen .NET app (`.tpk`, id `app.pley.tizen`), named "Pley (native)" on the TV |
 | Screens | NUI, Samsung's C# toolkit on its DALi engine |
 | Oldest TV | Tizen 9 |
+
+### Language
+
+The native app is in English, French and Spanish, in the language
+[API.md](API.md#language) describes: the account's, else the one picked on
+this TV, else the TV's own when Pley has it, else the server's, else
+English (`packages/tv/test/fixtures/language.json` pins the order for both
+Samsung apps).
+
+Choose your server and typing an address have a small globe at the bottom
+right, the sign-in code at the top right on the logo's line, as the web
+Samsung app has it (`ButtonKind.Small`: 32 tall, no fill until focused),
+naming the language shown by its two letters ("FR"); Down or Up reaches it. OK opens a side
+panel: "Automatic (English)" (the TV's language where Pley has it, else
+the server's, else English), then English, Français and Español, the
+choice in force checked. A choice shows at once, the screen drawn again in
+it with the globe focused and an address being typed kept, and is kept in
+the TV's preferences (`pley.deviceLanguage`); Automatic forgets it. Signed
+in, an account's own language comes first, and its Automatic is this
+choice. The last language shown is kept on the TV, so the next start shows
+it before the server answers, rather than the TV's for a moment; when the
+account's or the server's turns out to be another, the app changes to it.
+The pages are drawn again where they were, Settings on the row that had
+focus; a film or a channel keeps its words until it closes. The server
+list and the sign-in code are drawn again too, the code unchanged, while
+Who's watching? and the moment after a code is approved keep theirs until
+the next page, which the profile brings its own language to.
+
+Settings → Profile → Language lists "Automatic (Français)" (the one picked
+with the globe, else the TV's language, else the server's), then English,
+Français and Español, each in itself. Choosing
+one sends `PUT /api/me/language`, and the app shows it once the server has
+it. A Pley from before languages keeps no account's language (its
+`GET /api/server` names none, and the route answers 404 or 405): there the
+row is this TV's, as the globe picks it, with Automatic the TV's own
+language, and a choice shows at once and is kept in the TV's preferences
+(`pley.deviceLanguage`), as the Android app has it. Requests carry
+`Accept-Language` with the language shown, so what the
+server writes itself (Home's rows) comes in it. Dates and numbers follow
+the language, in the TV's region format when the TV is in that language
+(en-GB keeps its 24-hour clock).
+
+The words are in `src/Pley.Tv.Core/Locales/<language>/<area>.json`, a file
+per area of the app, in the format of the server's and the web app's
+catalogs (i18next's: nested keys, `{{name}}` for values, `_one`, `_many`
+and `_other` for counts), built into the Core library and read with
+`Strings` (`Strings.T("signin.servers.title")`, `Strings.Count(key, n)`).
+JSON rather than .NET's resx: the same files and format as the rest of
+Pley, so the web app's words carry over as they are, plurals by CLDR's
+rules, which resx has no form for, and no satellite assemblies to package.
+A word a language lacks shows in English. The Core's tests hold every
+language to English's keys, its own plural forms and the same values, and
+French and Spanish to their punctuation.
 
 ### How it is built
 
@@ -483,7 +828,11 @@ Watch again.
   the TV was left on when it has one); `rail.json` pins the rail's
   entries (up to six libraries, then Libraries; nothing left out for
   Live TV or Now Playing) and how far they scroll for the entry focus is
-  on. Where the Android app is
+  on; `requests.json` pins where a Discover poster opens; `featured.json`
+  pins which titles Home's hero features, and in what order; `language.json`
+  pins which language shows, and that a server naming any language, even
+  one the app doesn't have, keeps an account's. Where the
+  Android app is
   stricter (a token answer without `token_type`, a device code without
   `expires_in`), the native app follows it, and its test says which
   fixture case it answers differently.
@@ -524,12 +873,29 @@ dotnet test apps/tizen-native/test/Pley.Tv.Core.Tests   # the Core's tests
 PLEY_TIZEN_PROFILE=<profile> bun run tizen-native        # apps/tizen-native/out/pley-tizen.tpk, signed
 tizen install -n pley-tizen.tpk -t <target> -- apps/tizen-native/out
 tizen run -p app.pley.tizen -t <target>
-bun scripts/check-nuget-licenses.mjs                     # the licences of the packages it ships with
+bun scripts/check-nuget-licenses.mjs                     # the licences of the packages it ships with, and NOTICES.txt
 ```
 
 `tizen run` brings the app to the front when it is running already; an
 install ends it, so installing again starts it afresh. It is named
 "Pley (native)" among the TV's apps.
+
+### Installing a release
+
+Pley's releases have the app's package, `pley-samsung-native-<version>.tpk`,
+as the .NET SDK builds it: signed with Tizen's default certificate, which
+no TV takes. Signed again with a certificate that lists the TV
+([Setting up](#setting-up)), it installs as a package built here does,
+with the Tizen SDK and no .NET SDK:
+
+```sh
+tizen package -t tpk -s <profile> -- pley-samsung-native-<version>.tpk
+tizen install -n pley-samsung-native-<version>.tpk -t <target> -- <its folder>
+```
+
+The release's build is `bun run tizen-native --unsigned`
+(`apps/tizen-native/out/pley-tizen-unsigned.tpk`). A .tpk is how Tizen
+installs a .NET app; a .wgt holds a web app, as the web Samsung app's does.
 
 ### Profiling
 
@@ -547,7 +913,8 @@ PLEY_TIZEN_METRICS=http://<computer>:7531 bun run tizen-native
 ```
 
 While the listener runs, the same script drives the app from the computer.
-The app asks it every second for something to do: a screenshot of its
+The app asks it for something to do, and the listener holds the ask until
+it has a command, so a command reaches the TV at once: a screenshot of its
 window, saved in `apps/tizen-native/out` (the video's plane comes out
 black), or the remote's keys, pressed 300 ms apart. `--tv` picks the TV
 whose model name holds the text given.
@@ -556,6 +923,49 @@ whose model name holds the text given.
 node apps/tizen-native/scripts/metrics.mjs shot                 # prints the screenshot's path
 node apps/tizen-native/scripts/metrics.mjs keys Left Down OK    # Up, Down, Left, Right, OK, Back, Menu
 node apps/tizen-native/scripts/metrics.mjs --tv S89C shot
+```
+
+An animation takes the TV longer to capture than it lasts, so `record`
+slows the animations that allow it (those whose code calls
+`Profile.Slowed`: the rail, and Home's tiles, rows and hero) as many times
+as it says, presses the keys given, and catches an area of the window, in
+its pixels, as JPEGs one after another for as long as it says. The frames
+are saved in `apps/tizen-native/out/rec-<time>-<model>`, each named with
+when it was caught at the animation's own speed; at 20 times slower, a
+frame comes every 3 ms of it for half the screen, every 6 for all of it.
+
+```sh
+node apps/tizen-native/scripts/metrics.mjs record 20 6000 0,0,960,1080 Right   # 20× slower, 6 s, the left half
+```
+
+While a video streams, it marks the network once a second, off the UI
+thread: what each interface received, TCP's segments and retransmissions,
+the Wi-Fi driver's signal and discards, the access point's signal, link
+rate and band, the bytes waiting unread in the TV's sockets (many: the
+player reads slowly; none: the network brings slowly) and the player's
+buffering. `speed`, with the video paused, has the TV fetch the stream's
+next segments itself, one at a time as the player does, then the last one
+again (ready on the server, so the network alone), then four at once, and
+marks how long each took to start and how fast it came.
+`wifi` marks the access point the TV is joined to (by the end of its
+BSSID, which tells a mesh network's nodes apart; not the network's name)
+and those of the same network in the TV's last scan, with their signal,
+band and rate; `wifi scan` scans first (the
+profiling build alone has `network.set` for it), as Tizen lists a network
+once in an ordinary scan, however many access points it has.
+`trace on` keeps the trace going between videos, as a film opens and
+closes, with the app's memory and how busy the TV's CPUs are, until
+`trace off`. `buffer 1000` and `rebuffer 2000` have the next film wait
+for that much video before it plays from where it resumed, and after a
+stall or a seek (`buffer 0`, `rebuffer 0`: as the app has it); `trim off`
+has the next film resumed part-way given its playlists whole, as before
+the app trimmed them (`trim on` again). The trace
+marks each seek's time until the picture moves again, the engine's status
+as it changes and the player screen's spinner as it shows and goes.
+
+```sh
+node apps/tizen-native/scripts/metrics.mjs --tv S89C speed
+node apps/tizen-native/scripts/metrics.mjs --tv S89C wifi
 ```
 
 A build without `PLEY_TIZEN_METRICS` has none of this: the calls of

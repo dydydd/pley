@@ -60,6 +60,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
 import androidx.navigation3.runtime.NavBackStack
 import androidx.navigation3.runtime.NavEntry
@@ -72,17 +73,20 @@ import androidx.navigation3.scene.DialogSceneStrategy
 import androidx.navigation3.scene.Scene
 import androidx.navigation3.ui.NavDisplay
 import app.pley.android.common.TestTags
+import app.pley.android.common.perf.FrameRate
 import app.pley.android.common.perf.StartupSignals
 import app.pley.android.data.SessionState
 import app.pley.android.designsystem.PleyColors
 import app.pley.android.designsystem.PleyMotion
 import app.pley.android.designsystem.icon.Icon
 import app.pley.android.designsystem.reducedMotion
+import app.pley.android.player.CastFrom
 import app.pley.android.screens.PleyKey
 import app.pley.android.screens.ScreensGraph
 import app.pley.android.screens.requests.RequestsEntry
 import app.pley.android.ui.phone.R
 import app.pley.android.ui.phone.account.accountEntries
+import app.pley.android.ui.phone.admin.adminEntries
 import app.pley.android.ui.phone.home.homeEntries
 import app.pley.android.ui.phone.item.itemEntries
 import app.pley.android.ui.phone.kit.FittedLabel
@@ -96,6 +100,14 @@ import app.pley.android.ui.phone.music.musicEntries
 import app.pley.android.ui.phone.onboarding.onboardingEntries
 import app.pley.android.ui.phone.livetv.liveTvEntries
 import app.pley.android.ui.phone.playlists.playlistsEntries
+import app.pley.android.ui.phone.remote.CastTarget
+import app.pley.android.ui.phone.remote.CastsSent
+import app.pley.android.ui.phone.remote.FollowCasts
+import app.pley.android.ui.phone.remote.LocalPlayOn
+import app.pley.android.ui.phone.remote.PlayOnCasts
+import app.pley.android.ui.phone.remote.PlayOnHost
+import app.pley.android.ui.phone.remote.PlayOnSheet
+import app.pley.android.ui.phone.remote.RemoteSlot
 import app.pley.android.ui.phone.requests.RequestsTabIcon
 import app.pley.android.ui.phone.requests.requestsEntries
 import app.pley.android.ui.phone.search.searchEntries
@@ -103,6 +115,7 @@ import app.pley.android.ui.phone.theme.LocalPhoneMetrics
 import app.pley.android.ui.phone.theme.PhoneTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -154,6 +167,11 @@ internal fun PhoneShell(
     val shell = remember(navigation) { PhoneShellState(navigation, resources, start.server) }
     val graphs by rememberUpdatedState(graph)
     LaunchedEffect(shell) { onReady(shell, navigation) }
+    // The screen the frame-rate counter's lines name, read outside composition.
+    LaunchedEffect(navigation) {
+        snapshotFlow { if (navigation.inside) navigation.stack()?.lastOrNull() else navigation.root.lastOrNull() }
+            .collect { FrameRate.route = it }
+    }
     AfterFirstFrame(shell, graphs)
 
     if (first == app.pley.android.screens.PleyKey.Home) {
@@ -167,9 +185,17 @@ internal fun PhoneShell(
     val entries = remember { shellEntries() }
     val downloadsLabel = stringResource(R.string.downloads_offline_action)
     val offlineAction = remember(navigation, downloadsLabel) { OfflineAction(downloadsLabel) { navigation.open(PleyKey.Downloads) } }
+    val playOn = remember(shell) {
+        object : PlayOnHost {
+            override val devices get() = shell.remoteDevices
+
+            override fun playOn(target: CastTarget) = shell.playOn(target)
+        }
+    }
     CompositionLocalProvider(
         LocalPhoneNavigator provides navigation,
         LocalPhoneShell provides shell,
+        LocalPlayOn provides playOn,
         LocalOffline provides shell.offlineState,
         LocalOfflineAction provides offlineAction.takeIf { navigation.inside },
         LocalPhoneDeviceTier provides tier,
@@ -187,12 +213,15 @@ internal fun PhoneShell(
  * (signed out by the server) and the session (signed out before the shell
  * listened, as when this device can't read its tokens anymore), the
  * server in use, live updates while the app is started, the music
- * playing, requests (and their news, told while the app shows), and the
- * capability probe. The graph's parts are made off the main thread.
+ * playing, what plays on the profile's other devices (the remote), what
+ * they cast here and what the live player sent them, requests (and their
+ * news, told while the app shows), and the capability probe. The graph's
+ * parts are made off the main thread.
  */
 @Composable
 private fun AfterFirstFrame(shell: PhoneShellState, graph: () -> ScreensGraph) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val resources = LocalResources.current
     LaunchedEffect(shell) {
         withFrameNanos { }
         val g = withContext(Dispatchers.Default) { graph() }
@@ -217,6 +246,32 @@ private fun AfterFirstFrame(shell: PhoneShellState, graph: () -> ScreensGraph) {
         launch {
             val music = withContext(Dispatchers.Default) { g.player.music.nowPlaying }
             music.collect { shell.nowPlaying = it }
+        }
+        launch {
+            // The profile's other devices, for the remote: read while the app shows.
+            val remote = withContext(Dispatchers.Default) { g.data.remote }
+            shell.remote = remote
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                remote.devices.collect { shell.remoteDevices = it }
+            }
+        }
+        launch {
+            // What the profile's remotes cast here plays from now on: music says where it came from here, the
+            // players say it themselves.
+            val casts = withContext(Dispatchers.Default) { g.casts }
+            casts.start()
+            // One from another profile that couldn't switch this phone to it plays nothing: said here too.
+            launch { casts.refused.collect { shell.toasts.show(CastFrom.switchFailed(resources)) } }
+            casts.music.collect { shell.toasts.show(it.from.notice(resources)) }
+        }
+        launch {
+            // Sent from the live player, which closed: the remote's bar follows it here.
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                CastsSent.pending.filterNotNull().collect { sent ->
+                    CastsSent.said(sent)
+                    shell.castSent(sent.deviceId)
+                }
+            }
         }
         launch {
             // The server's events connected again: it answers, and the offline banner goes.
@@ -255,6 +310,7 @@ private fun shellEntries(): (NavKey) -> NavEntry<NavKey> {
         playlistsEntries()
         liveTvEntries()
         accountEntries()
+        adminEntries()
         musicEntries()
         requestsEntries()
     }
@@ -276,7 +332,7 @@ private fun GettingIn(navigation: PhoneNavigation, shell: PhoneShellState, entri
     }
 }
 
-/** In: the navigation bar or rail, each tab's back stack, the mini player and the toasts above the bar. */
+/** In: the navigation bar or rail, each tab's back stack, the remote's bar, the mini player and the toasts above the bar. */
 @Composable
 private fun Tabs(navigation: PhoneNavigation, shell: PhoneShellState, entries: (NavKey) -> NavEntry<NavKey>) {
     val stacks: Map<PhoneTab, NavBackStack<NavKey>> = PhoneTab.entries.associateWith { rememberNavBackStack(it.root) }
@@ -352,11 +408,31 @@ private fun Tabs(navigation: PhoneNavigation, shell: PhoneShellState, entries: (
                     Modifier.align(Alignment.BottomCenter).windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom)),
                 )
             }
+            RemoteSlot(shell.remoteDevices, shell.remote, shell.server, shell.remoteAsked)
             MiniPlayerSlot(shell.nowPlaying)
         }
     }
+    PlayOnSlot(shell)
     // Back from another tab's first screen goes to Home, then out of the app.
     BackHandler(enabled = tab != PhoneTab.Home && stacks.getValue(tab).size == 1) { navigation.select(PhoneTab.Home) }
+}
+
+/**
+ * Play on…'s chooser while a page asked for it: sent, it closes, and the
+ * remote's bar says it starts on the device, then what plays there. The
+ * cast is the activity's ([PlayOnCasts]): it goes on when the chooser is
+ * closed before the device took it, the bar following it then, and what
+ * the chooser would have said of it is a toast.
+ */
+@Composable
+private fun PlayOnSlot(shell: PhoneShellState) {
+    val casts: PlayOnCasts = viewModel { PlayOnCasts() }
+    FollowCasts(casts, shell.toasts) { deviceId, _ -> shell.castSent(deviceId) }
+    val target = shell.playingOn ?: return
+    val remote = shell.remote ?: return
+    key(shell.playOnOpened) {
+        PlayOnSheet(target, shell.remoteDevices, remote, casts, onDismiss = { shell.playingOn = null })
+    }
 }
 
 @Composable

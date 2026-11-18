@@ -54,6 +54,10 @@ public final class AppModel: ObservableObject, SnapshotCache {
         public var nowPlaying: @MainActor () -> any NowPlayingSystem
         /// A random number below its argument, for shuffling music.
         public var random: @Sendable (Int) -> Int
+        /// What the profile's remotes call this device, read as each player starts.
+        public var deviceName: @MainActor () -> String?
+        /// What kind of device this is, as the event stream tells the profile's remotes.
+        public var deviceKind: @MainActor () -> DeviceKind?
 
         public init(clientId: String = ClientID.current(), lateReports: URL? = nil,
                     quality: any QualityMemory = DefaultsQuality(),
@@ -64,7 +68,9 @@ public final class AppModel: ObservableObject, SnapshotCache {
                     subtitleOffsets: any SubtitleOffsets = DefaultsSubtitleOffsets(),
                     musicOutputs: @escaping @MainActor () -> any MusicOutput = { AVMusicOutput() },
                     nowPlaying: @escaping @MainActor () -> any NowPlayingSystem = { SystemNowPlaying() },
-                    random: @escaping @Sendable (Int) -> Int = { Int.random(in: 0..<$0) }) {
+                    random: @escaping @Sendable (Int) -> Int = { Int.random(in: 0..<$0) },
+                    deviceName: @escaping @MainActor () -> String? = { DeviceName.current },
+                    deviceKind: @escaping @MainActor () -> DeviceKind? = { DeviceKind(rawValue: DeviceName.kind) }) {
             self.clientId = clientId
             self.lateReports = lateReports
             self.quality = quality
@@ -76,10 +82,14 @@ public final class AppModel: ObservableObject, SnapshotCache {
             self.musicOutputs = musicOutputs
             self.nowPlaying = nowPlaying
             self.random = random
+            self.deviceName = deviceName
+            self.deviceKind = deviceKind
         }
     }
 
-    @Published public private(set) var root: Root = .starting
+    @Published public private(set) var root: Root = .starting {
+        didSet { followLanguage() }
+    }
     /// The servers' navigation: a server's sign-in on top of the list.
     /// Bound to its `NavigationStack`, so Back pops it.
     @Published public var signingIn: [ServerEntry] = []
@@ -90,7 +100,21 @@ public final class AppModel: ObservableObject, SnapshotCache {
     /// in use asks for its PIN when it has one, as on Android TV.
     @Published public private(set) var profilesAtStart = false
     /// Who the app acts as on the open server, when signed in.
-    @Published public private(set) var user: User?
+    @Published public private(set) var user: User? {
+        didSet { followLanguage() }
+    }
+    /// The language the app is shown in (docs/APPLE.md, "Languages"): the
+    /// account's, else this device's, else the server's, else English. The
+    /// apps put `locale` in their root's environment and remake their
+    /// views when it changes.
+    @Published public private(set) var language: Language = .english
+    /// The locale the language is shown in: the device's own where the
+    /// device is in that language (en-GB keeps its 24-hour clock), else
+    /// the language alone.
+    @Published public private(set) var locale = Locale(identifier: "en")
+    /// The language picked on this device with the globe before signing
+    /// in; `nil`: Automatic, the device's own.
+    @Published public private(set) var pickedLanguage: Language?
     /// The server open, by the name it gave.
     @Published public private(set) var server: ServerEntry?
     /// Why the servers or sign-in show by themselves (a sign-in that ended,
@@ -108,6 +132,13 @@ public final class AppModel: ObservableObject, SnapshotCache {
     public var playerShown: PlaybackController? { pictureInPicture ? nil : player }
     /// The live player open, if any: one playback at a time, so it and `player` are never both open.
     @Published public private(set) var livePlayer: LivePlayerModel?
+    /// Goes up whenever the profile's sessions may have changed (`sessions_changed`, the event
+    /// stream connecting again, the app back in front): what lists them (the remote) reads them again.
+    @Published public private(set) var sessionsVersion = 0
+    /// The Mac: a playback a cast from another device asked for, which the
+    /// app's window opens in a window of its own (`castOpened`), as its
+    /// pages do. iPhone, iPad and Apple TV play it at once.
+    @Published public private(set) var castOpening: CastOpening?
     /// What changed on the server last (its events, gathered for 0.3 s,
     /// and this app's own writes): the screens showing it read it again.
     @Published public private(set) var change: ServerChange?
@@ -116,9 +147,6 @@ public final class AppModel: ObservableObject, SnapshotCache {
     /// The server can't be reached: the screens show what was saved of
     /// them, the banner says so, and the app tries again (`reconnect`).
     @Published public private(set) var offline = false
-    /// What the offline banner says: why the server is out of reach, when
-    /// another device answers at its address.
-    @Published public private(set) var offlineMessage = DownloadWords.offline
 
     public let session: SessionManager
     public let servers: ServerRepository
@@ -142,6 +170,8 @@ public final class AppModel: ObservableObject, SnapshotCache {
     public let serverEvents = ServerEvents()
     /// Live TV on the open server, shared by its pages, Search and the live player.
     public let live: LiveTvRepository
+    /// Requests on the open server: the summary behind their ways in, and their news.
+    public let requests: RequestsRepository
     /// Music, for the app's whole life: it plays on with no screen open.
     public private(set) lazy var music: MusicPlayback = makeMusic()
     /// The system's Now Playing: music, video or Live TV, whichever played last.
@@ -152,6 +182,9 @@ public final class AppModel: ObservableObject, SnapshotCache {
     #endif
     /// The item actions and the marks they made.
     public private(set) lazy var actions = ItemActionsModel(app: self)
+    /// The profile's other devices and what plays on them: the remote, and
+    /// "Play on…" (iPhone, iPad and Mac; Apple TV only takes casts).
+    public private(set) lazy var remote = RemoteModel(app: self)
     /// The downloads (iPhone, iPad and Mac); none on Apple TV.
     public let downloads: any DownloadsService
     /// The screens as last read, per server and profile, for when the
@@ -172,17 +205,34 @@ public final class AppModel: ObservableObject, SnapshotCache {
     private var reconnectTask: Task<Void, Never>?
     /// The sign-in read for the downloads after a wake in the background.
     private var wake: Task<Void, Never>?
+    /// The device's languages, the one it prefers first, and where the language shown goes (`ShownLanguage`).
+    private let deviceLanguages: () -> [String]
+    private let applyLanguage: (Language, Locale) -> Void
+    /// The open server's language, once `GET /api/server` answered (`known`); `code` is `nil` before one was chosen.
+    private var serverLanguage: (known: Bool, code: String?) = (false, nil)
+    /// The server answered the account's language with `404` or `405`: a
+    /// Pley from before languages, whose Language row picks on this device.
+    @Published private var languageRouteMissing = false
     private var started = false
     /// Wakes the reconnect loop when the network changes.
     private var paths: NWPathMonitor?
     /// The network changed since the last try.
     private var pathChanged = false
-    /// The event stream of a server's API (the tests give their own).
-    private let eventSignals: @Sendable (PleyAPI) -> AsyncStream<EventSignal>
+    /// The event stream of a server's API, naming this device as a
+    /// receiver (the tests give their own).
+    private let eventSignals: @Sendable (PleyAPI, EventReceiver?) -> AsyncStream<EventSignal>
+    /// The receiver the event stream running names: it opens again when
+    /// what the device takes changes (Live TV comes or goes).
+    private var streamedReceiver: EventReceiver?
+    private var receiverWatch: AnyCancellable?
+    /// "Playing from …" for the playback a cast opens: its player says it
+    /// as it starts (on the Mac, in the window it opens).
+    private var pendingCastSaid: (opening: CastOpening, text: String)?
     /// Whether this is the Apple TV app, which asks "Who's watching?" at start.
     private let tv: Bool
-    /// Whether the app is in the foreground: the event stream runs only then.
-    private var active = true
+    /// Whether the app is in the foreground: screens poll what moves only
+    /// then, and the event stream runs then, or while music plays in the background.
+    public private(set) var active = true
     private var eventsRunning = false
 
     private var listener: Task<Void, Never>?
@@ -194,6 +244,20 @@ public final class AppModel: ObservableObject, SnapshotCache {
     /// What the video or the live player shows the system, as they change.
     private var playerWatch: AnyCancellable?
     private var liveWatch: AnyCancellable?
+    private var requestsWatch: AnyCancellable?
+    private var playersWatch: AnyCancellable?
+    /// Requests' news waiting for the player to close: never over a video.
+    private var heldNews: [RequestNews] = []
+    /// The most news kept while a player shows.
+    public static let heldNewsMax = 3
+    /// The time between held news, one toast's time; shorter in tests.
+    public var heldNewsGap: Double = ShellModel.toastSeconds
+    /// The held news being told, one after another.
+    private var heldNewsTask: Task<Void, Never>?
+    /// Apple TV: requests' news waiting to pop up, oldest first. The shell
+    /// shows the first once nothing else needs the remote, and takes it off
+    /// (`noticeShown`).
+    @Published public private(set) var notices: [RequestNews] = []
     /// What the system's Now Playing was told last of a video, to send only what changed.
     private var videoShown: (info: NowPlayingInfo, at: Int64)?
     /// The picture Now Playing shows for the music or video playing: its path and the image.
@@ -209,10 +273,14 @@ public final class AppModel: ObservableObject, SnapshotCache {
                 settings: AppSettings = AppSettings(), tv: Bool = ShellModel.isTV,
                 downloads: (any DownloadsService)? = nil, snapshots: SnapshotStore? = nil,
                 shelf: ((@escaping @Sendable (String, Int) async throws -> Data) -> TopShelfWriter?)? = nil,
-                eventSignals: @escaping @Sendable (PleyAPI) -> AsyncStream<EventSignal> = {
-                    EventStream(api: $0).signals()
-                }) {
+                eventSignals: @escaping @Sendable (PleyAPI, EventReceiver?) -> AsyncStream<EventSignal> = {
+                    EventStream(api: $0, receiver: $1).signals()
+                },
+                deviceLanguages: @escaping () -> [String] = { ["en-US"] },
+                applyLanguage: @escaping (Language, Locale) -> Void = { _, _ in }) {
         self.session = session
+        self.deviceLanguages = deviceLanguages
+        self.applyLanguage = applyLanguage
         self.downloads = downloads ?? NoDownloads()
         self.snapshots = snapshots
         // The shelf reads the open server's pictures as they are.
@@ -235,6 +303,10 @@ public final class AppModel: ObservableObject, SnapshotCache {
             guard let api = await session.api else { throw PleyError.signedOut }
             return api
         }
+        requests = RequestsRepository(api: { [session] in
+            guard let api = await session.api else { throw PleyError.signedOut }
+            return api
+        }, settings: settings, tv: tv)
         // One loader for the app, always with the open server's API.
         images = ImageLoader { [session] path, width in
             guard let api = await session.api else { throw PleyError.signedOut }
@@ -256,8 +328,38 @@ public final class AppModel: ObservableObject, SnapshotCache {
             Task { @MainActor in self?.settleShelfLink() }
         }
         live.cache = self
+        requests.cache = self
+        requests.onChange = { [weak self] change in self?.note(ServerChange(requests: change)) }
+        serverEvents.onRequestChange = { [weak self] change in self?.requests.heard(change) }
+        serverEvents.onRequestNews = { [weak self] news in self?.requests.heard(news) }
+        serverEvents.onRequestsSettings = { [weak self] in self?.requests.settingsChanged() }
+        serverEvents.onConnection = { [weak self] connected in self?.requests.setStreaming(connected) }
+        requestsWatch = requests.$summary.sink { [weak self] summary in
+            self?.shell.setRequestsEntry(.of(.of(summary)), known: summary != nil)
+        }
+        requests.onNews = { [weak self] news in self?.heard(news) }
+        playersWatch = $player.combineLatest($livePlayer).sink { [weak self] player, live in
+            guard player == nil, live == nil else { return }
+            Task { @MainActor in self?.showHeldNews() }
+        }
         serverEvents.onSessionStopped = { [weak self] id, message, byAdmin in
             self?.sessionStopped(id, message: message, byAdmin: byAdmin)
+        }
+        serverEvents.onLiveTakenOver = { [weak self] id, message in self?.livePlayer?.playback.takenOver(id, message: message) }
+        serverEvents.onPlayerCommand = { [weak self] id, command in self?.playerCommand(id, command) }
+        serverEvents.onCast = { [weak self] receiverId, target, from in
+            self?.heardCast(receiverId, target, from: from)
+        }
+        // Live TV coming or going changes what this device takes from a remote: the stream says it again.
+        receiverWatch = shell.$liveTv.map { $0?.available == true }.removeDuplicates().dropFirst()
+            .sink { [weak self] _ in
+                // `@Published` tells before it sets: read once it has.
+                Task { @MainActor in self?.receiverMayHaveChanged() }
+            }
+        // In the background nothing shows the list: coming back to the front reads it.
+        serverEvents.onSessionsChanged = { [weak self] in
+            guard let self, self.active else { return }
+            self.sessionsVersion += 1
         }
         #if os(iOS) || os(tvOS)
         audio.onPause = { [weak self] in
@@ -266,6 +368,10 @@ public final class AppModel: ObservableObject, SnapshotCache {
         }
         audio.onResumeMusic = { [weak self] in self?.music.play() }
         #endif
+
+        // The language shown last, before the server says which: nothing shows in another first.
+        pickedLanguage = settings.pickedLanguage
+        showLanguage(settings.lastLanguage ?? settings.pickedLanguage ?? Language.ofDevice(deviceLanguages()) ?? .english)
     }
 
     /// The app as it runs: the Keychain, the system's sign-in sheet and
@@ -291,7 +397,9 @@ public final class AppModel: ObservableObject, SnapshotCache {
         #endif
         return AppModel(session: session, servers: servers, transport: transport, authenticator: authenticator,
                         discover: { discovery.browse() }, settings: settings,
-                        downloads: downloads?(settings, transport.gate), snapshots: SnapshotStore(), shelf: shelf)
+                        downloads: downloads?(settings, transport.gate), snapshots: SnapshotStore(), shelf: shelf,
+                        deviceLanguages: { ShownLanguage.deviceLanguages },
+                        applyLanguage: { ShownLanguage.show($0, locale: $1) })
     }
 
     /// At start: opens the server used last when the app is signed in to
@@ -317,10 +425,10 @@ public final class AppModel: ObservableObject, SnapshotCache {
             }
         } catch {
             // Out of reach: what was saved shows, while the app tries again.
-            if LateReports.unreachable(error), await startOffline(last, error) { return }
+            if LateReports.unreachable(error), await startOffline(last) { return }
             downloads.signedIn(nil)
             root = .servers
-            notice = "\(last.name): \(describe(error))"
+            notice = localized("\(last.name): \(describe(error))")
         }
     }
 
@@ -351,7 +459,7 @@ public final class AppModel: ObservableObject, SnapshotCache {
     /// its saved screens: when a sign-in is kept and its profile was saved.
     /// Apple TV's start gate needs the server, which checks a profile's PIN,
     /// so the app starts offline only where the gate would open Home.
-    private func startOffline(_ last: SavedServer, _ error: any Error) async -> Bool {
+    private func startOffline(_ last: SavedServer) async -> Bool {
         guard let snapshots, let profileId = settings.lastProfile(origin: last.origin),
               StartGate.decide(tv: tv, household: settings.household(origin: last.origin).map(\.id),
                                alwaysStartAs: settings.alwaysStartAs(origin: last.origin), current: profileId) == .home,
@@ -364,7 +472,7 @@ public final class AppModel: ObservableObject, SnapshotCache {
         homeVersion += 1
         signingIn = []
         root = .signedIn
-        wentOffline(error)
+        wentOffline()
         loadLibraries()
         loadLiveTv()
         await scopeDownloads()
@@ -386,6 +494,7 @@ public final class AppModel: ObservableObject, SnapshotCache {
             if another {
                 music.stop()
                 stopEvents()
+                requests.reset()
                 shell.reset()
                 actions.reset()
             }
@@ -430,6 +539,9 @@ public final class AppModel: ObservableObject, SnapshotCache {
             signedInNow(user)
         }
         homeVersion += 1
+        sessionsVersion += 1
+        heldNews = []
+        notices = []
         shell.reset()
         actions.reset()
         profilesFromShell = false
@@ -451,6 +563,9 @@ public final class AppModel: ObservableObject, SnapshotCache {
         shelf?.clear()
         goOnline()
         user = nil
+        requests.reset()
+        heldNews = []
+        notices = []
         shell.reset()
         actions.reset()
         root = .servers
@@ -468,7 +583,27 @@ public final class AppModel: ObservableObject, SnapshotCache {
             goOnline()
             server = nil
             user = nil
+            requests.reset()
         }
+    }
+
+    /// Signs in again on the open server, for the scopes this sign-in came
+    /// before (requests, approvals): its sign-in shows over the servers,
+    /// saying why. Signing in brings the app back with the new scopes.
+    public func signInAgain() {
+        guard let server else { return }
+        Task { await closePlayer() }
+        notice = RequestWords.signInNotice
+        root = .servers
+        signingIn = [server]
+    }
+
+    /// Signing in again was given up: the app as it was.
+    public func cancelSignInAgain() {
+        guard user != nil else { return }
+        notice = nil
+        signingIn = []
+        root = .signedIn
     }
 
     /// The servers, keeping the sign-in; with `adding`, the address
@@ -557,10 +692,12 @@ public final class AppModel: ObservableObject, SnapshotCache {
             late: lateReports(origin: origin, profileId: user.id), quality: playerSetup.quality,
             ceiling: playerSetup.ceilings(origin), clock: playerSetup.clock, engines: playerSetup.engines,
             subtitleOffsets: playerSetup.subtitleOffsets, profileId: user.id,
-            autoplayNext: settings.autoplayNext, local: downloads.local, subtitleStyle: settings)
+            autoplayNext: settings.autoplayNext, local: downloads.local, subtitleStyle: settings,
+            deviceName: playerSetup.deviceName())
         let controller = PlaybackController(request: request, environment: environment)
         // Started first, so the screens get its AVPlayer with it.
         controller.start()
+        if let said = castSaid(for: .video(request)) { controller.say(said) }
         player = controller
         follow(controller)
         return controller
@@ -573,6 +710,7 @@ public final class AppModel: ObservableObject, SnapshotCache {
         guard let current = player, controller == nil || controller === current else { return }
         player = nil
         pictureInPicture = false
+        followBackground()
         playerWatch = nil
         videoShown = nil
         nowPlaying.release(.video)
@@ -585,6 +723,7 @@ public final class AppModel: ObservableObject, SnapshotCache {
     public func pictureInPictureStarted() {
         guard player != nil else { return }
         pictureInPicture = true
+        followBackground()
     }
 
     /// Picture in Picture asks for the player back: it shows again.
@@ -597,6 +736,7 @@ public final class AppModel: ObservableObject, SnapshotCache {
     public func pictureInPictureClosed() {
         guard pictureInPicture else { return }
         pictureInPicture = false
+        followBackground()
         Task { await closePlayer() }
     }
 
@@ -612,9 +752,11 @@ public final class AppModel: ObservableObject, SnapshotCache {
         await closePlayer()
         guard asked == plays, user != nil else { return nil }
         let playback = LivePlayback(live: live, clientId: playerSetup.clientId, clock: playerSetup.clock,
-                                    engines: playerSetup.liveEngines)
+                                    engines: playerSetup.liveEngines, controls: LivePlayerModel.controls,
+                                    deviceName: playerSetup.deviceName())
         let model = LivePlayerModel(request: request, live: live, playback: playback, seen: seen,
                                     toast: { [weak self] text in self?.shell.show(text) })
+        if let said = castSaid(for: .live(request)) { model.showBanner(said) }
         livePlayer = model
         follow(model)
         return model
@@ -680,7 +822,7 @@ public final class AppModel: ObservableObject, SnapshotCache {
                 guard let self, let user = self.user, let origin = await self.session.origin else { return nil }
                 return self.lateReports(origin: origin, profileId: user.id)
             },
-            clock: setup.clock, outputs: setup.musicOutputs, random: setup.random)
+            clock: setup.clock, outputs: setup.musicOutputs, random: setup.random, deviceName: setup.deviceName())
         let music = MusicPlayback(environment: environment)
         music.onChange = { [weak self] state in self?.musicChanged(state) }
         return music
@@ -689,6 +831,7 @@ public final class AppModel: ObservableObject, SnapshotCache {
     private func musicChanged(_ state: MusicState) {
         shell.setNowPlaying(state.active)
         playbackChanged()
+        followBackground()
         guard state.active else {
             nowPlaying.release(.music)
             return
@@ -798,7 +941,7 @@ public final class AppModel: ObservableObject, SnapshotCache {
 
     private func liveInfo(_ model: LivePlayerModel) -> NowPlayingInfo {
         let channel = model.channel
-        return NowPlayingInfo(title: channel?.numberedName ?? "Live TV", album: channel?.now?.title, rate: 1,
+        return NowPlayingInfo(title: channel?.numberedName ?? localized("Live TV"), album: channel?.now?.title, rate: 1,
                               kind: .video, isLive: true, artwork: picture(channel?.logo), artworkPath: channel?.logo)
     }
 
@@ -852,21 +995,41 @@ public final class AppModel: ObservableObject, SnapshotCache {
     // MARK: The server's events
 
     /// The app came to the foreground (`true`) or left it: the event
-    /// stream runs only in the foreground. Back in front, everything shown
-    /// is read again, since events were missed.
+    /// stream runs only in the foreground, or while something plays in
+    /// the background. Back in
+    /// front, everything shown is read again, since events were missed.
     public func sceneActive(_ active: Bool) {
         guard active != self.active else { return }
         self.active = active
         livePlayer?.sceneActive(active)
+        requests.setForeground(active)
         if active {
             if offline { Task { await reconnect() } }
             // Conversions on the server are followed only while Pley is open.
             downloads.resume()
             startEvents()
-            if user != nil { note(ServerChange(home: true, libraries: true, watchlist: true, everything: true)) }
-        } else {
+            if user != nil {
+                note(ServerChange(home: true, libraries: true, watchlist: true, everything: true))
+                sessionsVersion += 1
+            }
+        } else if !playsInBackground {
             stopEvents()
         }
+    }
+
+    /// Music, or a video in Picture in Picture, playing in the background
+    /// keeps the event stream, so the profile's remotes reach it, as on
+    /// Android; once it ends or music pauses, the system suspends the app,
+    /// and the stream goes until something plays or the app is back.
+    private func followBackground() {
+        guard !active else { return }
+        if playsInBackground { startEvents() } else { stopEvents() }
+    }
+
+    /// Music plays, or loads its next track meanwhile, or a video goes on in
+    /// Picture in Picture: its session keeps the controls it declared.
+    private var playsInBackground: Bool {
+        music.state.playing || music.state.loading || (pictureInPicture && player != nil)
     }
 
     /// A change this app made itself: the other screens showing it follow.
@@ -875,23 +1038,243 @@ public final class AppModel: ObservableObject, SnapshotCache {
     }
 
     private func startEvents() {
-        guard active, user != nil, !offline, !eventsRunning else { return }
+        guard active || playsInBackground, user != nil, !offline, !eventsRunning else { return }
         eventsRunning = true
         let signals = eventSignals
         Task { [weak self] in
             guard let self, let api = await self.session.api, self.eventsRunning else { return }
-            self.serverEvents.start(signals(api))
+            // What this device takes says whether Live TV shows: not known yet (a sign-in, another
+            // profile), it is read first, so the stream opens once, saying it.
+            if self.shell.liveTv == nil, let summary = try? await self.live.summary(), self.user != nil {
+                self.shell.setLiveTv(summary)
+            }
+            guard self.eventsRunning else { return }
+            let receiver = self.receiver
+            self.streamedReceiver = receiver
+            self.serverEvents.start(signals(api, receiver))
         }
     }
 
     private func stopEvents() {
         eventsRunning = false
+        streamedReceiver = nil
         serverEvents.stop()
+    }
+
+    /// This device as the event stream names it, so the profile's remotes
+    /// cast to it: this install's client id, the name and kind its play
+    /// requests give, and what it plays: titles, music and playlists
+    /// always, and Live TV's channels while Live TV shows.
+    var receiver: EventReceiver {
+        EventReceiver(id: receiverId, deviceName: playerSetup.deviceName(), deviceKind: playerSetup.deviceKind(),
+                      casts: shell.showsLiveTv ? [.item, .live] : [.item])
+    }
+
+    /// The id the profile's remotes cast to this device by: its client id.
+    public var receiverId: String { playerSetup.clientId }
+
+    /// What this device takes may have changed: a stream running says it again.
+    private func receiverMayHaveChanged() {
+        guard eventsRunning, let streamed = streamedReceiver, streamed != receiver else { return }
+        restartEvents()
     }
 
     private func restartEvents() {
         stopEvents()
         startEvents()
+    }
+
+    /// Something to tell of the profile's requests: a toast with Open, held
+    /// while a video or a channel plays, and shown once it closes. On Apple
+    /// TV, a pop-up's, which waits for the remote itself (`notices`).
+    func heard(_ news: RequestNews) {
+        guard user != nil else { return }
+        if tv {
+            notices.append(news)
+            if notices.count > Self.heldNewsMax { notices.removeFirst(notices.count - Self.heldNewsMax) }
+            return
+        }
+        if player != nil || livePlayer != nil {
+            heldNews.append(news)
+            if heldNews.count > Self.heldNewsMax { heldNews.removeFirst(heldNews.count - Self.heldNewsMax) }
+            return
+        }
+        tell(news)
+    }
+
+    private func tell(_ news: RequestNews) {
+        var error = false
+        if case .failed = news { error = true }
+        let screen = Self.opens(news)
+        shell.show(RequestWords.notice(news), action: ToastAction(localized("Open")) { [weak self] in
+            self?.shell.open(screen)
+        }, error: error)
+    }
+
+    /// The news held while a player showed, one after another.
+    private func showHeldNews() {
+        // A chain from a player closed before stops: only one tells at a time.
+        heldNewsTask?.cancel()
+        heldNewsTask = nil
+        guard !heldNews.isEmpty, player == nil, livePlayer == nil, user != nil else { return }
+        let news = heldNews.removeFirst()
+        tell(news)
+        guard !heldNews.isEmpty else { return }
+        let gap = heldNewsGap
+        heldNewsTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(gap))
+            guard !Task.isCancelled else { return }
+            self?.showHeldNews()
+        }
+    }
+
+    /// The news waiting for the player to close.
+    public var newsHeld: [RequestNews] { heldNews }
+
+    /// The sessions playing on this device: a remote here lists the others.
+    public var sessionsHere: Set<String> {
+        var here = Set([music.sessionId, player?.session?.id, livePlayer?.playback.sessionId].compactMap { $0 })
+        here.remove("")
+        return here
+    }
+
+    /// A command from the profile's remote on another device: the player
+    /// of that session acts on it, if it plays here (each one checks).
+    private func playerCommand(_ id: String, _ command: PlayerCommand) {
+        if music.sessionId == id {
+            music.obey(command, for: id)
+            // The place may have moved without the state changing: the system's clock follows.
+            nowPlaying.update(.music, info: musicInfo(music.state))
+        }
+        player?.obey(command, for: id)
+        livePlayer?.obey(command, for: id)
+    }
+
+    /// Something the profile's remote on another device sent this device
+    /// to play (`cast`): played as this device's own Play would on its
+    /// page, when it is for this device and the app is in front, signed in
+    /// as the profile. One for another device, or one that comes while the
+    /// app is in the background, does nothing.
+    private func heardCast(_ receiverId: String, _ target: CastTarget, from: String?) {
+        guard receiverId == self.receiverId, active, user != nil, root == .signedIn else { return }
+        Task { await playCast(target, from: from) }
+    }
+
+    /// Plays what a remote cast here as this device's own Play does on its
+    /// page (docs/APPLE.md, Remote control): a movie or an episode where
+    /// Play starts it (at `startMs` when the remote gave one, with the
+    /// tracks it picked), a show or a season its next episode, a track its
+    /// album from it, an album, an artist or a playlist what it holds, in
+    /// order or shuffled, and a channel live (the live player open tunes
+    /// it). What plays is replaced, and "Playing from …" says where it came
+    /// from: over the player, or as a toast for music.
+    func playCast(_ target: CastTarget, from: String?) async {
+        let said = Words.playingFrom(from)
+        guard let api = await session.api else { return }
+        switch target.what {
+        case .channel(let id):
+            // The live player open tunes it, as its Channels list does: its screen (the Mac's window)
+            // stays rather than closing and opening again. Otherwise it opens on the channel.
+            if let current = livePlayer, let channel = try? await live.channel(id) {
+                guard livePlayer === current else { return }
+                current.tune(channel)
+                current.showBanner(said)
+                return
+            }
+            openCast(.live(LiveRequest(channelId: id, category: .all)), saying: said)
+        case .playlist(let id):
+            let playlist = PlaylistModel(app: self, playlistId: id)
+            await playlist.load()
+            guard playlist.canPlay else { return }
+            if playlist.video {
+                guard let request = playlist.play(shuffle: target.shuffle) else { return }
+                openCast(.video(request), saying: said)
+            } else {
+                // Music starts playing here at once.
+                _ = playlist.play(shuffle: target.shuffle)
+                shell.show(said)
+            }
+        case .item(let id):
+            guard let item = try? await api.item(id) else { return }
+            switch item.kind {
+            case .movie, .episode:
+                // With the tracks picked on the remote's page, for this play.
+                let request = PlayRequest(itemId: id, startMs: target.startMs, audioIndex: target.audioIndex,
+                                          subtitleIndex: target.subtitleIndex)
+                openCast(.video(request), saying: said)
+            case .show, .season:
+                guard let next = try? await api.onDeck(id) else { return }
+                openCast(.video(PlayRequest(itemId: next.id)), saying: said)
+            case .track:
+                // As choosing it on its album's page: the album from it, else the track alone.
+                let album = item.summary.parentId.map { AlbumModel(app: self, itemId: $0, track: id) }
+                await album?.load()
+                if await album?.play(from: id) != true { await playMusic([item.summary]) }
+                shell.show(said)
+            case .album:
+                let album = AlbumModel(app: self, itemId: id)
+                await album.load()
+                guard album.canPlay else { return }
+                await album.play(shuffle: target.shuffle)
+                shell.show(said)
+            case .artist:
+                let artist = ArtistModel(app: self, itemId: id)
+                await artist.load()
+                guard artist.canPlay else { return }
+                await artist.play(shuffle: target.shuffle)
+                shell.show(said)
+            default:
+                return
+            }
+        }
+    }
+
+    /// Opens the player for a cast, "Playing from …" said over it as it
+    /// starts: at once on iPhone, iPad and Apple TV, in a window of its own
+    /// on the Mac (`castOpening`). The shell's own sheets close first (the
+    /// remote, Now Playing, a playlist's), so the player isn't left waiting
+    /// behind one.
+    private func openCast(_ opening: CastOpening, saying said: String) {
+        pendingCastSaid = (opening, said)
+        #if os(macOS)
+        castOpening = opening
+        #else
+        #if os(iOS)
+        remote.presented = false
+        #endif
+        shell.nowPlayingOpen = false
+        shell.sheet = nil
+        switch opening {
+        case .video(let request): Task { await self.play(request) }
+        case .live(let request): Task { await self.watchLive(request) }
+        }
+        #endif
+    }
+
+    /// The Mac's window opened what a cast asked for.
+    public func castOpened() {
+        castOpening = nil
+    }
+
+    /// What the playback `opening` starts says, when a cast opened it; the
+    /// next playback takes it either way, so it never says it twice.
+    private func castSaid(for opening: CastOpening) -> String? {
+        let said = pendingCastSaid
+        pendingCastSaid = nil
+        guard let said, said.opening == opening else { return nil }
+        return said.text
+    }
+
+    /// Apple TV's pop-up shows `news`: it's off the queue, so newer news can't push it out.
+    public func noticeShown(_ news: RequestNews) {
+        guard let index = notices.firstIndex(of: news) else { return }
+        notices.remove(at: index)
+    }
+
+    /// Where a pop-up's Open goes: the title, once ready in a library; else the requests.
+    public nonisolated static func opens(_ news: RequestNews) -> Screen {
+        if case .ready(_, _, _, let itemId?, _, _, _) = news { return .item(itemId) }
+        return .requests
     }
 
     /// One of this profile's playbacks was stopped from elsewhere: the
@@ -901,7 +1284,8 @@ public final class AppModel: ObservableObject, SnapshotCache {
             music.stoppedByServer()
             return
         }
-        // A live session's stop shows in its player, which asks why.
+        // Live TV says so in its player, which stays open on it.
+        livePlayer?.playback.stoppedElsewhere(id, message: message, byAdmin: byAdmin)
         guard let player, player.session?.id == id else { return }
         let text = player.stoppedByServer(message: message, byAdmin: byAdmin)
         shell.show(text)
@@ -929,7 +1313,7 @@ public final class AppModel: ObservableObject, SnapshotCache {
                 }
                 return fresh
             } catch where LateReports.unreachable(error) {
-                wentOffline(error)
+                wentOffline()
                 guard let saved = await saved(T.self, key, origin: origin, profileId: profileId) else { throw error }
                 return saved
             }
@@ -948,12 +1332,11 @@ public final class AppModel: ObservableObject, SnapshotCache {
         return try? PleyJSON.decoder.decode(T.self, from: data)
     }
 
-    /// The server couldn't be reached (`error`, when known): the banner
-    /// shows, and the app tries again after 2, 5, 15 and 30 s, then every
-    /// minute, and whenever the network changes.
-    public func wentOffline(_ error: (any Error)? = nil) {
+    /// The server couldn't be reached: the banner shows, and the app tries
+    /// again after 2, 5, 15 and 30 s, then every minute, and whenever the
+    /// network changes.
+    public func wentOffline() {
         guard user != nil else { return }
-        if let error { saidOffline(error) }
         if !offline { offline = true }
         guard reconnectTask == nil else { return }
         let monitor = NWPathMonitor()
@@ -983,8 +1366,9 @@ public final class AppModel: ObservableObject, SnapshotCache {
         }
     }
 
-    /// Tries the server now (the banner's Try again, the app coming back to
-    /// the front); `true` when it answered and the app is online again.
+    /// Tries the server now (the app coming back to the front, or the
+    /// retries while offline); `true` when it answered and the app is online
+    /// again.
     @discardableResult
     public func reconnect() async -> Bool {
         guard offline, user != nil else { return !offline }
@@ -1006,12 +1390,15 @@ public final class AppModel: ObservableObject, SnapshotCache {
             group.cancelAll()
             return first
         }
-        if case .some(.some(let error)) = outcome, offline { saidOffline(error) }
         guard case .some(.none) = outcome, offline, let user else { return false }
         stopReconnecting()
         offline = false
         if let api = await session.api, let fresh = try? await api.me() { self.user = fresh }
-        if let server, let name = await session.serverInfo?.name {
+        let info = await session.serverInfo
+        serverLanguage = (info != nil, info?.language)
+        if info?.language != nil { languageRouteMissing = false }
+        followLanguage()
+        if let server, let name = info?.name {
             self.server = ServerEntry(origin: server.origin, name: BonjourTXT.cleanName(name).isEmpty ? server.name
                                         : BonjourTXT.cleanName(name), id: server.id, saved: server.saved,
                                       found: server.found)
@@ -1019,14 +1406,10 @@ public final class AppModel: ObservableObject, SnapshotCache {
         signedInNow(self.user ?? user)
         downloads.resume()
         homeVersion += 1
+        // The remote's list may have gone on showing sessions that ended meanwhile.
+        sessionsVersion += 1
         note(ServerChange(home: true, libraries: true, watchlist: true, everything: true))
         return true
-    }
-
-    /// The banner says why when another device answers at the server's address.
-    private func saidOffline(_ error: any Error) {
-        let message = (error as? PleyError)?.isAnotherDevice == true ? DownloadWords.anotherDevice : DownloadWords.offline
-        if offlineMessage != message { offlineMessage = message }
     }
 
     /// No longer taken for out of reach: the server or the sign-in changed,
@@ -1053,6 +1436,120 @@ public final class AppModel: ObservableObject, SnapshotCache {
         let caps = caps
         downloads.signedIn(DownloadScope(origin: origin, profileId: user.id, api: api, tokens: tokens,
                                          caps: { await caps.warmUp().report }))
+    }
+
+    // MARK: Language
+
+    /// The language the app should show now (docs/APPLE.md, "Languages"),
+    /// shown at once: signed in, the account's own, else this device's (the
+    /// one picked with the globe, else the first of the device's that Pley
+    /// has), else the server's, else English; without an account, this
+    /// device's, else English. While the app is starting, or signed in on a
+    /// device in a language Pley doesn't have before the server has said
+    /// its own, the language shown stays.
+    private func followLanguage() {
+        let here = pickedLanguage ?? Language.ofDevice(deviceLanguages())
+        let wanted: Language?
+        if let user {
+            wanted = Language.of(user.language) ?? here
+                ?? (serverLanguage.known ? Language.of(serverLanguage.code) ?? .english : nil)
+        } else if root == .starting {
+            wanted = nil
+        } else {
+            wanted = here ?? .english
+        }
+        if let wanted { showLanguage(wanted) }
+    }
+
+    private func showLanguage(_ language: Language) {
+        let locale = Language.locale(of: language, device: deviceLanguages())
+        settings.lastLanguage = language
+        guard language != self.language || locale != self.locale else { return }
+        applyLanguage(language, locale)
+        self.language = language
+        self.locale = locale
+        // The server writes Home's and the libraries' row titles in the language asked for.
+        if user != nil { homeVersion += 1 }
+    }
+
+    /// What the account's Automatic stands for here: this device's language
+    /// (the globe's, else the device's own), else the server's, else English.
+    public var automaticLanguage: Language {
+        pickedLanguage ?? Language.ofDevice(deviceLanguages()) ?? Language.of(serverLanguage.code) ?? .english
+    }
+
+    /// The first of the device's languages that Pley has: what the globe's Automatic stands for.
+    public var deviceLanguage: Language? { Language.ofDevice(deviceLanguages()) }
+
+    /// The Language row's and the globe's choices: Automatic (`nil`),
+    /// standing for `automatic`, then each language named in itself.
+    public static func languageChoices(automatic: Language) -> [SettingChoice<Language?>] {
+        [SettingChoice<Language?>(nil, Language.label(nil, automatic: automatic))]
+            + Language.allCases.map { SettingChoice<Language?>($0, $0.autonym) }
+    }
+
+    /// Whether the server keeps an account's language. Every Pley with
+    /// languages names its own in `GET /api/server` and answers
+    /// `PUT /api/me/language`; on one from before them, the Language row
+    /// is this device's, as the globe is before signing in.
+    public var keepsAccountLanguage: Bool {
+        !(serverLanguage.known && serverLanguage.code == nil) && !languageRouteMissing
+    }
+
+    /// The Language row's choice: the account's, or this device's where the server keeps none.
+    public var languageRowChoice: Language? {
+        keepsAccountLanguage ? Language.of(user?.language) : pickedLanguage
+    }
+
+    /// What the Language row's Automatic stands for: the account's
+    /// Automatic, or, where the server keeps none, the device's own.
+    public var languageRowAutomatic: Language {
+        keepsAccountLanguage ? automaticLanguage : deviceLanguage ?? Language.of(serverLanguage.code) ?? .english
+    }
+
+    /// From the Language row: the account's language (`chooseLanguage`, a
+    /// refusal said in a toast), or this device's where the server keeps
+    /// none, as a `404` or `405` shows on a Pley from before languages.
+    public func setAccountLanguage(_ language: Language?) async {
+        guard keepsAccountLanguage else { return pickLanguage(language) }
+        do {
+            try await chooseLanguage(language)
+        } catch PleyError.api(404, _, _), PleyError.api(405, _, _), PleyError.unreadable(404),
+                PleyError.unreadable(405) {
+            languageRouteMissing = true
+            pickLanguage(language)
+        } catch {
+            shell.show(Toast(describe(error), style: .error))
+        }
+    }
+
+    /// Picks this device's language (`nil`: Automatic, the device's own):
+    /// the globe of the screens before signing in. It shows at once, and an
+    /// account's Automatic means it.
+    public func pickLanguage(_ language: Language?) {
+        settings.pickedLanguage = language
+        pickedLanguage = language
+        followLanguage()
+    }
+
+    /// Makes `language` the account's (`PUT /api/me/language`; `nil`:
+    /// Automatic), shown at once and put back if the server refuses.
+    public func chooseLanguage(_ language: Language?) async throws {
+        guard let before = user, let api = await session.api else { throw PleyError.signedOut }
+        var chosen = before
+        chosen.language = language?.code
+        user = chosen
+        do {
+            let fresh = try await api.setLanguage(language?.code)
+            guard user?.id == fresh.id else { return }
+            user = fresh
+            if let origin = server?.origin, let snapshots, let data = try? PleyJSON.encoder.encode(fresh) {
+                await snapshots.write(origin: origin, profileId: fresh.id, key: SnapshotKeys.me, data: data)
+            }
+        } catch {
+            if user?.id == before.id { user = before }
+            throw error
+        }
     }
 
     // MARK: Top Shelf
@@ -1175,6 +1672,7 @@ public final class AppModel: ObservableObject, SnapshotCache {
             }
         }
         Task { await scopeDownloads() }
+        if let origin = server?.origin { requests.start(origin: origin, profileId: user.id) }
         startEvents()
         loadLibraries()
         loadLiveTv()
@@ -1217,7 +1715,11 @@ public final class AppModel: ObservableObject, SnapshotCache {
             // Another server's pictures can share these paths.
             await images.empty()
         }
-        let given = await session.serverInfo?.name
+        let info = await session.serverInfo
+        serverLanguage = (info != nil, info?.language)
+        if info?.language != nil { languageRouteMissing = false }
+        followLanguage()
+        let given = info?.name
         let shown = given.map { BonjourTXT.cleanName($0) }.flatMap { $0.isEmpty ? nil : $0 } ?? name
         server = ServerEntry(origin: home, name: shown, id: id, saved: saved, found: found)
     }
@@ -1244,6 +1746,9 @@ public final class AppModel: ObservableObject, SnapshotCache {
         shelf?.clear()
         user = nil
         notice = message
+        requests.reset()
+        heldNews = []
+        notices = []
         shell.reset()
         actions.reset()
         root = .servers
@@ -1254,7 +1759,7 @@ public final class AppModel: ObservableObject, SnapshotCache {
 /// `error` in words for people.
 public func describe(_ error: any Error) -> String {
     if let error = error as? any LocalizedError, let text = error.errorDescription, !text.isEmpty { return text }
-    return "something went wrong: try again"
+    return localized("something went wrong: try again")
 }
 
 /// `text` as a sentence: a capital first, a full stop last. The app's own
@@ -1284,4 +1789,11 @@ public enum StartGate {
         guard let always = alwaysStartAs, household.contains(always) else { return .profiles }
         return always == current ? .home : .switchTo(always)
     }
+}
+
+/// What a cast from another device opens on the Mac, in a window of its
+/// own: a player, or Live TV's.
+public enum CastOpening: Hashable, Sendable {
+    case video(PlayRequest)
+    case live(LiveRequest)
 }

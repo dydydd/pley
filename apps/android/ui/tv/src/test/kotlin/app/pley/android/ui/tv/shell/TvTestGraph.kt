@@ -14,6 +14,7 @@ import app.pley.android.data.HistoryRepository
 import app.pley.android.data.LibraryItems
 import app.pley.android.data.LibraryItemsRepository
 import app.pley.android.data.LibraryQuery
+import app.pley.android.data.LibraryViews
 import app.pley.android.data.LiveUpdates
 import app.pley.android.data.Loadable
 import app.pley.android.data.PeopleRepository
@@ -27,6 +28,7 @@ import app.pley.android.data.SessionState
 import app.pley.android.data.Settings
 import app.pley.android.data.SnapshotStore
 import app.pley.android.data.TrackDefaultsRepository
+import app.pley.android.model.CollectionCategory
 import app.pley.android.model.CollectionDetail
 import app.pley.android.model.CollectionSummary
 import app.pley.android.model.Hubs
@@ -42,6 +44,7 @@ import app.pley.android.screens.PlayerLauncher
 import app.pley.android.screens.PleyGraphOwner
 import app.pley.android.screens.ScreensGraph
 import app.pley.android.testing.Fixtures
+import app.pley.android.testing.caps.FakeCapsGraph
 import app.pley.android.ui.tv.home.TestHomeSources
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -60,12 +63,26 @@ class TvTestGraph : ScreensGraph {
     /** Every library's listing, whatever its sort and filters. */
     val listing = MutableStateFlow<Loadable<LibraryItems>>(Loadable.Loading)
 
+    /** How each library was left on this device (its view, as kept): not at all, unless a test says. */
+    val left = HashMap<Long, String>()
+
+    /**
+     * The device's settings. Home's banner is on, off as it is by default
+     * only where a test says: most of these tests walk its hero.
+     */
+    val settingsFlow = MutableStateFlow(Settings(homeBanner = true))
+
     /** What every library can be filtered by: nothing, unless a test says. */
     val filters = MutableStateFlow<Loadable<LibraryFilters>>(Loadable.Ready(LibraryFilters(), fresh = true))
 
+    /** Every library's collections, and the categories they're grouped by: none unless a test sets them. */
+    val collectionList = MutableStateFlow<Loadable<List<CollectionSummary>>>(Loadable.Ready(emptyList(), fresh = true))
+    val categoryList = MutableStateFlow<Loadable<List<CollectionCategory>>>(Loadable.Ready(emptyList(), fresh = true))
+
     override val device = DeviceProfile(FormFactor.Tv, fireTv = false, tier = Tier.T2, model = "test", totalRamBytes = 4L shl 30, lowRam = false)
     override val auth: AuthGraph get() = unused("auth")
-    override val caps: CapsGraph get() = unused("caps")
+    // A title's page reads what the device plays to choose the version it shows: nothing known here.
+    override val caps: CapsGraph = FakeCapsGraph()
     override val player: PlayerGraph get() = unused("player")
     override val playerLauncher: PlayerLauncher get() = sources.launcher
 
@@ -92,6 +109,13 @@ class TvTestGraph : ScreensGraph {
             override suspend fun clientId(): String = "android-test"
         }
         override val snapshots: SnapshotStore get() = unused("snapshots")
+        override val libraryViews = object : LibraryViews {
+            override suspend fun of(libraryId: Long): String? = left[libraryId]
+
+            override suspend fun keep(libraryId: Long, view: String) {
+                if (view.isEmpty()) left.remove(libraryId) else left[libraryId] = view
+            }
+        }
         override val libraryItems = object : LibraryItemsRepository {
             override fun items(libraryId: Long, query: LibraryQuery): Flow<Loadable<LibraryItems>> = listing
             override fun filters(libraryId: Long): Flow<Loadable<LibraryFilters>> = filters
@@ -102,9 +126,10 @@ class TvTestGraph : ScreensGraph {
             override val recent: Flow<List<String>> = flowOf(emptyList())
         }
         override val people: PeopleRepository get() = unused("people")
-        // A library's Collections tab: none.
+        // A library's Collections tab: [collectionList], by [categoryList].
         override val collections = object : CollectionsRepository {
-            override fun collections(libraryId: Long): Flow<Loadable<List<CollectionSummary>>> = flowOf(Loadable.Ready(emptyList(), fresh = true))
+            override fun collections(libraryId: Long): Flow<Loadable<List<CollectionSummary>>> = collectionList
+            override fun categories(): Flow<Loadable<List<CollectionCategory>>> = categoryList
             override fun collection(collectionId: Long): Flow<Loadable<CollectionDetail>> = flowOf(Loadable.Loading)
         }
         // The Playlists tab: none yet.
@@ -123,7 +148,7 @@ class TvTestGraph : ScreensGraph {
         override val trackDefaults: TrackDefaultsRepository get() = unused("trackDefaults")
         override val watchlist: app.pley.android.data.WatchlistRepository get() = unused("watchlist")
         override val settings = object : AppSettings {
-            override val settings: Flow<Settings> = MutableStateFlow(Settings())
+            override val settings: Flow<Settings> = settingsFlow
             override suspend fun update(change: (Settings) -> Settings) = Unit
         }
     }

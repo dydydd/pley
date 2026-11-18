@@ -1,5 +1,6 @@
 import type { MediaFile, PlaybackMode } from "../api/types";
 import { formatBitrate, resolutionLabel } from "../format/format";
+import { t } from "../i18n";
 import type { Rung } from "./autoquality";
 
 /**
@@ -14,9 +15,24 @@ export interface QualityPreset {
   maxHeight: number | null;
 }
 
-export const ORIGINAL: QualityPreset = { id: "original", label: "Original", maxBitrateKbps: null, maxHeight: null };
+// The two named qualities' labels are words: read where they show, in the language shown then.
+export const ORIGINAL: QualityPreset = {
+  id: "original",
+  get label() {
+    return t("player.quality.original");
+  },
+  maxBitrateKbps: null,
+  maxHeight: null,
+};
 /** The original, lower only when it doesn't play well (autoquality.ts). */
-export const AUTO: QualityPreset = { id: "auto", label: "Automatic", maxBitrateKbps: null, maxHeight: null };
+export const AUTO: QualityPreset = {
+  id: "auto",
+  get label() {
+    return t("player.quality.automatic");
+  },
+  maxBitrateKbps: null,
+  maxHeight: null,
+};
 
 /** The 4K qualities first, then 1080p and below. */
 export const PRESETS: QualityPreset[] = [
@@ -107,6 +123,15 @@ export function qualitiesFor(file: MediaFile | null, table: QualityPreset[] = PR
   }
   copies.sort((a, b) => b.lines - a.lines || b.preset.maxBitrateKbps! - a.preset.maxBitrateKbps!);
   return out.concat(copies.map((c) => c.preset));
+}
+
+/**
+ * The qualities the menu offers for `file`: those worth offering
+ * (`qualitiesFor`), or the original alone on a server that converts no
+ * video (`PlaybackInfo.original_only`), which has no other to give.
+ */
+export function offeredQualities(file: MediaFile | null, originalOnly: boolean): QualityPreset[] {
+  return originalOnly ? [ORIGINAL] : qualitiesFor(file);
 }
 
 /**

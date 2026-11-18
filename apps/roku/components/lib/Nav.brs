@@ -14,6 +14,7 @@ function navScreen(name as string) as string
         details: "DetailsScreen",
         grid: "GridScreen",
         collection: "CollectionScreen",
+        collections: "CollectionsScreen",
         person: "PersonScreen",
         artist: "ArtistScreen",
         album: "AlbumScreen",
@@ -55,9 +56,13 @@ end function
 ' version doesn't open. A season opens its show on that season; a
 ' collection, a person and an artist, their page; a playlist, its
 ' entries; a track, its album; an extra plays at once. A TMDB title
-' opens its page (Request more seasons, with its season picker); See all,
-' its list, or TMDB's results for its words (a library row's See all is
-' its screen's to open: invalid here).
+' opens its page (Request more seasons, with its season picker), or the
+' library's title when a library this account can open has it whole,
+' since its page would offer only Open (a show partly there opens its
+' page, where more seasons can be asked for); See all, its list, or
+' TMDB's results for its words, or its collections (one's page, or the
+' merged page of several); a library row's See all is its screen's to
+' open: invalid here.
 function navForTile(tile as object) as dynamic
     kind = httpString(tile.kind)
     if kind = "discover" or kind = "askMore"
@@ -65,10 +70,15 @@ function navForTile(tile as object) as dynamic
         tmdbKind = httpString(tile.tmdbKind)
         if tmdbId = 0 or (tmdbKind <> "movie" and tmdbKind <> "show") then return invalid
         if kind = "askMore" then return { to: "requestTitle", params: { kind: tmdbKind, tmdbId: tmdbId, title: httpString(tile.showTitle), pick: true } }
+        libraryId = httpNumber(tile.libraryId, 0)
+        if httpString(tile.status) = "library" and libraryId > 0 then return { to: "details", params: { itemId: libraryId } }
         return { to: "requestTitle", params: { kind: tmdbKind, tmdbId: tmdbId, title: httpString(tile.title) } }
     end if
     if kind = "more"
         if httpString(tile.sort) <> "" then return invalid
+        collections = httpArray(tile.collections)
+        if collections.Count() = 1 then return { to: "collection", params: { id: collections[0], title: httpString(tile.rowTitle) } }
+        if collections.Count() > 1 then return { to: "collection", params: { ids: collections, title: httpString(tile.rowTitle) } }
         query = httpString(tile.query)
         list = httpString(tile.list)
         if query <> "" then return { to: "discoverList", params: { query: query } }

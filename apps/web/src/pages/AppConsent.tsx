@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useNavigate } from "react-router";
+import { Trans, useTranslation } from "react-i18next";
 import { Check, ShieldCheck, TriangleAlert } from "lucide-react";
 import { errorMessage, isApiError } from "@/api/client";
 import { useLogout, useProfiles, useServer } from "@/api/hooks";
@@ -8,17 +9,29 @@ import { useOptionalAudioPlayer } from "@/audio/AudioPlayer";
 import { useAuth } from "@/auth";
 import { Avatar } from "@/components/Avatar";
 import { Badge, Button } from "@/components/ui";
+import { t as translate } from "@/i18n";
+import { cn } from "@/lib/cn";
 import { AuthLayout } from "./AuthLayout";
 
-/** What each scope lets an app do, for the profile it acts as. */
-const SCOPE_WORDS: Record<string, (profile: string) => string> = {
-  library: (p) => `See ${p}'s libraries, playlists and watch history.`,
-  play: (p) => `Play titles, and keep ${p}'s place, watched marks, ratings, track choices and library order.`,
-  playlists: (p) => `Make, change and delete ${p}'s playlists.`,
-  profiles: () => "Switch to the household's other profiles. Profiles with a PIN still ask for it.",
-  requests: (p) => `Ask for movies and shows the libraries don't have, and follow ${p}'s requests.`,
-  approvals: () => "Approve and decline what people ask for, where the account is an administrator.",
-};
+/** The scopes Pley has words for (`consent.scopes`): what each lets an app do, for the profile it acts as. */
+const SCOPES = ["library", "play", "playlists", "profiles", "requests", "approvals", "activity"] as const;
+
+function knownScope(scope: string): scope is (typeof SCOPES)[number] {
+  return (SCOPES as readonly string[]).includes(scope);
+}
+
+/** The administrator rights the person may give or not (`consent.optional`), each with a checkbox: managing the server. */
+const OPTIONAL = ["server"] as const;
+
+function knownOptional(scope: string): scope is (typeof OPTIONAL)[number] {
+  return (OPTIONAL as readonly string[]).includes(scope);
+}
+
+/** Where an optional scope is listed: in `OPTIONAL`'s order, any Pley has no words for last. */
+function order(scope: string): number {
+  const at = (OPTIONAL as readonly string[]).indexOf(scope);
+  return at < 0 ? OPTIONAL.length : at;
+}
 
 /** How long the page must have been seen before Allow can be pressed. */
 const STEADY_MS = 1000;
@@ -81,51 +94,114 @@ function useKeysSettled(ms: number) {
 /** Where an app's answer goes back to, in words. */
 export function whereItGoes(redirect: AppRedirect): string {
   return redirect.kind === "web"
-    ? `the website ${redirect.to}`
+    ? translate("consent.website", { ns: "pages", address: redirect.to })
     : redirect.kind === "loopback"
-      ? "an app on this computer"
-      : "an app on this device";
+      ? translate("consent.appOnComputer", { ns: "pages" })
+      : translate("consent.appOnDevice", { ns: "pages" });
 }
 
 /** Where the answer goes, and what to be sure of before allowing. */
 function Destination({ redirect }: { redirect: ConsentRequest["redirect"] }) {
+  const { t } = useTranslation("pages");
   if (redirect.kind === "device") {
+    const device = redirect.device ?? t("consent.aDevice");
     return (
       <div>
-        <p className="font-medium">It goes to:</p>
+        <p className="font-medium">{t("consent.goesTo")}</p>
         <p className="mt-1">
-          the TV or device showing{" "}
-          <span className="font-mono font-semibold tracking-wider">{redirect.to}</span>
+          <Trans
+            t={t}
+            i18nKey="consent.deviceShowing"
+            values={{ code: redirect.to }}
+            components={{ code: <span className="font-mono font-semibold tracking-wider" /> }}
+          />
         </p>
         {redirect.device || redirect.address ? (
           <p className="mt-1 text-muted">
-            It says it is {redirect.device ?? "a device"}
-            {redirect.address ? `, at ${redirect.address}` : ""}.
+            {redirect.address ? t("consent.saysItIsAt", { device, address: redirect.address }) : t("consent.saysItIs", { device })}
           </p>
         ) : null}
-        <p className="mt-1 text-danger">
-          Only allow this if that code is on a screen in front of you right now. Never use a code someone sent you.
-        </p>
+        <p className="mt-1 text-danger">{t("consent.onlyIfOnScreen")}</p>
       </div>
     );
   }
   return (
     <div>
-      <p className="font-medium">It goes back to:</p>
+      <p className="font-medium">{t("consent.goesBackTo")}</p>
       <p className="mt-1">{whereItGoes(redirect)}</p>
-      {redirect.kind !== "web" ? (
-        <p className="mt-1 text-danger">Only allow this if you just started signing in to the app.</p>
-      ) : null}
+      {redirect.kind !== "web" ? <p className="mt-1 text-danger">{t("consent.onlyIfStarted")}</p> : null}
     </div>
+  );
+}
+
+/** One administrator right, given only when its box is ticked: the whole row is the label. */
+function OptionalScope({
+  scope,
+  checked,
+  disabled,
+  onChange,
+}: {
+  scope: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  const { t } = useTranslation("pages");
+  const id = useId();
+  return (
+    <label
+      htmlFor={id}
+      className={cn(
+        "flex min-h-14 cursor-pointer items-start gap-3 px-3 py-3 transition-colors hover:bg-white/5",
+        disabled && "cursor-default opacity-60 hover:bg-transparent",
+      )}
+    >
+      <input
+        id={id}
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        // Named by its label alone; the hint describes it.
+        aria-labelledby={`${id}-label`}
+        aria-describedby={knownOptional(scope) ? `${id}-hint` : undefined}
+        onChange={(e) => onChange(e.target.checked)}
+        className="peer sr-only"
+      />
+      <span
+        aria-hidden
+        className={cn(
+          "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded border-2 transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-accent peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-surface",
+          checked ? "border-accent bg-accent text-accent-fg" : "border-border-strong",
+        )}
+      >
+        {checked ? <Check className="size-3.5" strokeWidth={3} /> : null}
+      </span>
+      <span className="min-w-0">
+        <span id={`${id}-label`} className="block font-medium">
+          {knownOptional(scope) ? t(`consent.optional.${scope}.label`) : scope}
+        </span>
+        {knownOptional(scope) ? (
+          <span id={`${id}-hint`} className="mt-0.5 block text-xs text-muted">
+            {t(`consent.optional.${scope}.hint`)}
+          </span>
+        ) : null}
+      </span>
+    </label>
   );
 }
 
 /**
  * Asks whether an app may use the account: an app that sent the browser to
  * the authorize page, or a TV that showed a code. It shows only what the
- * server answered, as text. Deny has the focus, and Allow waits until the
- * page has been seen for a whole second. A key held down, or pressed right
- * as the question shows, answers nothing: a refusal can't be taken back.
+ * server answered, as text. Deny has the focus, and Allow, with the box for
+ * managing the server, waits until the page has been seen for a whole
+ * second. A key held down, or pressed right as the question shows, answers
+ * nothing: a refusal can't be taken back.
+ *
+ * Managing the server, when an app asks for it, is a box the person ticks:
+ * the app works without it, and it isn't given unless ticked here. The
+ * server offers it only to an administrator, and lists approving requests,
+ * which Pley's own apps need on an administrator's account, with the rest.
  */
 export function AppConsent({
   request,
@@ -135,9 +211,10 @@ export function AppConsent({
   request: ConsentRequest;
   /** This page, with what it needs to start again: "Use another profile" and "Not you? Sign out" come back to it. */
   returnTo: string;
-  /** Sends the answer; the page takes over once it is in. A 404 means the request is over. */
-  onAnswer: (allow: boolean) => Promise<unknown>;
+  /** Sends the answer, with the scopes allowed; the page takes over once it is in. A 404 means the request is over. */
+  onAnswer: (allow: boolean, scopes: string[]) => Promise<unknown>;
 }) {
+  const { t } = useTranslation("pages");
   const user = useAuth();
   const server = useServer();
   const profiles = useProfiles(user.home);
@@ -150,16 +227,22 @@ export function AppConsent({
   /** The button pressed, while its answer is on its way. */
   const [deciding, setDeciding] = useState<"allow" | "deny" | null>(null);
   const [error, setError] = useState<unknown>(null);
+  /** The administrator rights ticked: none until the person ticks them. */
+  const [ticked, setTicked] = useState<ReadonlySet<string>>(() => new Set());
 
   const { client, redirect } = request;
   const app = appName(client);
+  const optional = request.optional;
+  const required = request.scopes.filter((scope) => !optional.includes(scope));
+  const offered = [...optional].sort((a, b) => order(a) - order(b));
 
   const answer = (allow: boolean) => {
     if (sent.current || (allow && !ready)) return;
     sent.current = true;
     setDeciding(allow ? "allow" : "deny");
     setError(null);
-    onAnswer(allow).catch((err: unknown) => {
+    const scopes = allow ? request.scopes.filter((scope) => !optional.includes(scope) || ticked.has(scope)) : [];
+    onAnswer(allow, scopes).catch((err: unknown) => {
       // 404: the request is over; anything else may be tried again.
       sent.current = isApiError(err, 404);
       setDeciding(null);
@@ -169,22 +252,20 @@ export function AppConsent({
 
   const over = isApiError(error, 404);
   const canSwitch = (profiles.data?.length ?? 0) > 1;
-  // The one administrator right an app can get: managing requests.
-  const approves = user.is_admin && request.scopes.includes("approvals");
 
   return (
-    <AuthLayout title={`${app} wants to use your Pley account`} subtitle={server.data ? `on ${server.data.name}` : undefined}>
+    <AuthLayout title={t("consent.title", { app })} subtitle={server.data ? t("consent.onServer", { server: server.data.name }) : undefined}>
       <div className="space-y-6 text-sm">
         {client.first_party ? (
           <Badge tone="accent">
-            <ShieldCheck className="size-3.5" aria-hidden /> Pley's own app
+            <ShieldCheck className="size-3.5" aria-hidden /> {t("consent.firstParty")}
           </Badge>
         ) : (
           <div className="flex gap-2.5 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-fg/90">
             <TriangleAlert className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
             <div className="space-y-1">
-              {client.name ? <p>It calls itself “{client.name}” (Pley can't check that name)</p> : null}
-              <p>This app isn't one of Pley's own</p>
+              {client.name ? <p>{t("consent.callsItself", { name: client.name })}</p> : null}
+              <p>{t("consent.notOwn")}</p>
             </div>
           </div>
         )}
@@ -200,7 +281,7 @@ export function AppConsent({
                   className="font-medium text-accent hover:text-accent-hover"
                   onClick={() => void navigate(`/profiles?next=${encodeURIComponent(returnTo)}`)}
                 >
-                  Use another profile
+                  {t("consent.otherProfile")}
                 </button>
               ) : null}
               <button
@@ -214,43 +295,69 @@ export function AppConsent({
                   });
                 }}
               >
-                Not you? Sign out
+                {t("consent.notYou")}
               </button>
             </div>
           </div>
         </div>
 
         <div>
-          <p className="font-medium">It will be able to:</p>
+          <p className="font-medium">{t("consent.willBeAble")}</p>
           <ul className="mt-2 space-y-1.5">
-            {request.scopes.map((scope) => (
+            {required.map((scope) => (
               <li key={scope} className="flex gap-2">
                 <Check className="mt-0.5 size-4 shrink-0 text-success" aria-hidden />
-                <span>{SCOPE_WORDS[scope]?.(user.name) ?? scope}</span>
+                <span>
+                  {scope === "activity"
+                    ? // Everyone's streams only ever go to Pley's own apps on an administrator's account: others see and stop the profile's own.
+                      t(client.first_party && user.is_admin ? "consent.scopes.activityEveryone" : "consent.scopes.activity", {
+                        profile: user.name,
+                      })
+                    : knownScope(scope)
+                      ? t(`consent.scopes.${scope}`, { profile: user.name })
+                      : scope}
+                </span>
               </li>
             ))}
           </ul>
-          <p className="mt-3 text-muted">
-            {approves
-              ? "It can't change your password, sign-in settings or devices."
-              : "It can't change your password, sign-in settings or devices, and it never gets administrator rights."}
-          </p>
-          {user.is_admin ? (
-            <p className="mt-1 text-muted">
-              {approves
-                ? "Of your administrator rights it gets only approving and declining requests: the others stay in Pley's web app."
-                : "Your administrator rights stay in Pley's web app."}
-            </p>
-          ) : null}
         </div>
+
+        {offered.length > 0 ? (
+          <fieldset>
+            <legend className="flex w-full items-baseline justify-between gap-3">
+              <span className="font-medium">{t("consent.adminAccess")}</span>
+              <span className="text-xs text-muted">{t("consent.optionalLabel")}</span>
+            </legend>
+            <div className="mt-2 divide-y divide-border overflow-hidden rounded-lg border border-border">
+              {offered.map((scope) => (
+                <OptionalScope
+                  key={scope}
+                  scope={scope}
+                  checked={ticked.has(scope)}
+                  // As Allow, until the page has been seen for a whole second: the second half of a
+                  // double click meant for another page can't tick it. Keys have settled by then.
+                  disabled={!ready || deciding !== null}
+                  onChange={(on) =>
+                    setTicked((before) => {
+                      const next = new Set(before);
+                      if (on) next.add(scope);
+                      else next.delete(scope);
+                      return next;
+                    })
+                  }
+                />
+              ))}
+            </div>
+          </fieldset>
+        ) : null}
+
+        <p className="text-muted">{t(user.is_admin ? "consent.cantChangeAdmin" : "consent.cantChange")}</p>
 
         <Destination redirect={redirect} />
 
         {over ? (
           <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-danger">
-            {redirect.kind === "device"
-              ? "This request is over: start again on your TV"
-              : "This request is over: start again from the app"}
+            {redirect.kind === "device" ? t("consent.overTv") : t("consent.overApp")}
           </p>
         ) : (
           <>
@@ -272,7 +379,7 @@ export function AppConsent({
                 }}
                 onClick={() => answer(false)}
               >
-                Don't allow
+                {t("consent.deny")}
               </Button>
               <Button
                 variant="primary"
@@ -281,7 +388,7 @@ export function AppConsent({
                 disabled={!ready || deciding !== null}
                 onClick={() => answer(true)}
               >
-                Allow
+                {t("consent.allow")}
               </Button>
             </div>
           </>

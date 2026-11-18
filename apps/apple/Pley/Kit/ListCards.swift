@@ -47,7 +47,7 @@ struct CollectionTile: View {
                     }
                     .overlay(alignment: .topLeading) {
                         if card.smart || card.automatic {
-                            ListBadge(text: card.smart ? "Smart" : "TMDB").padding(6)
+                            ListBadge(text: card.smart ? localized("Smart") : "TMDB").padding(6)
                         }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: Metrics.corner))
@@ -95,6 +95,7 @@ struct CollectionTile: View {
 
 /// A small word over a picture: "Smart", "TMDB".
 struct ListBadge: View {
+    /// Shown as it is: callers pass words through `localized`.
     let text: String
 
     var body: some View {
@@ -157,7 +158,7 @@ struct PlaylistTile: View {
             VStack(alignment: .leading, spacing: 6) {
                 PlaylistMosaic(app: app, artwork: card.artwork, video: card.video, size: width)
                     .overlay(alignment: .topLeading) {
-                        if card.smart { ListBadge(text: "Smart").padding(6) }
+                        if card.smart { ListBadge(text: localized("Smart")).padding(6) }
                     }
                     .overlay {
                         if hovering && reduceMotion {
@@ -201,19 +202,24 @@ struct PlaylistTile: View {
     }
 }
 
-/// Play and Shuffle, for collections and playlists.
+/// Play and Shuffle, for collections, playlists and music; with `remote`
+/// and `cast`, "Play on…" beside them, with "Shuffle on…" in it.
 struct PlayShuffleButtons: View {
     let prefix: String
     let canPlay: Bool
     let canShuffle: Bool
     let play: () -> Void
     let shuffle: () -> Void
+    /// The profile's other devices, and what "Play on…" sends them; `nil`: none.
+    var remote: RemoteModel?
+    var cast: CastTarget?
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        // One under the other at the accessibility text sizes, so neither word breaks.
+        // One under the other at the accessibility text sizes, so neither word breaks;
+        // otherwise in a line, "Play on…" going under them where the line is too narrow.
         let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
-            : AnyLayout(HStackLayout(spacing: 12))
+            : AnyLayout(FlowLayout(spacing: 12, lineSpacing: 12))
         layout {
             Button(action: play) {
                 Label("Play", systemImage: "play.fill")
@@ -240,6 +246,13 @@ struct PlayShuffleButtons: View {
             .buttonStyle(.bordered)
             .disabled(!canShuffle)
             .accessibilityIdentifier("\(prefix).shuffle")
+            if let remote, let cast {
+                PlayOnMenu(remote: remote, target: cast, shuffle: canShuffle, prefix: prefix)
+                    .labelStyle(.titleAndIcon)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .menuStyle(.button)
+                    .buttonStyle(.bordered)
+            }
         }
         // A list's row offers any height: the buttons keep their own. Being
         // bordered, each keeps its own hit area there, not the whole row's.

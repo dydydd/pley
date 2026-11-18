@@ -22,12 +22,20 @@ pub(crate) async fn item_or_404(state: &AppState, user_id: i64, id: i64) -> ApiR
 }
 
 pub async fn get(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>) -> ApiResult<Json<ItemDetail>> {
-    let row = item_or_404(&state, user.id, id).await?;
+    let mut row = item_or_404(&state, user.id, id).await?;
+    // What a `.strm` file's media is is found as its item is first opened.
+    if matches!(row.kind.as_str(), "movie" | "episode" | "extra") && crate::strm::glance(&state, id).await {
+        row = item_or_404(&state, user.id, id).await?;
+    }
     let scope = streams::scope(&row);
     let resume = resume_ms(&row);
     let mut detail = catalog::item_detail(&state.db, row).await?;
     detail.locked_fields = crate::overrides::locked_fields(&state.db, id).await?;
+    detail.nfo_fields = crate::overrides::nfo_fields(&state.db, id).await?;
     detail.in_watchlist = catalog::in_watchlist(&state.db, user.id, id).await?;
+    if crate::labels::shown_to(&user) {
+        detail.labels = Some(crate::labels::for_items(&state.db, &[id]).await?.remove(&id).unwrap_or_default());
+    }
     if matches!(detail.summary.kind.as_str(), "movie" | "show") {
         detail.extras = catalog::extras(&state.db, user.id, id).await?.iter().map(ItemRow::to_summary).collect();
     }
@@ -47,13 +55,14 @@ pub async fn get(State(state): State<AppState>, user: AuthUser, Path(id): Path<i
     if matches!(detail.summary.kind.as_str(), "movie" | "episode") {
         for file in catalog::files_for_item(&state.db, detail.summary.id).await? {
             state.trickplay.request(&file);
-            if file.video_codec.is_some() {
+            if file.video_codec.is_some() && !file.is_strm() {
                 state.transcoder.prefetch_soon(&file.path, resume);
             }
             let Some(dto) = detail.files.iter_mut().find(|f| f.id == file.id) else { continue };
             if dto.chapters.len() > 1 && state.trickplay.has_chapter_images(&file) {
                 let version = file.fingerprint.as_deref().unwrap_or_default();
-                for (n, chapter) in dto.chapters.iter_mut().enumerate() {
+                for chapter in &mut dto.chapters {
+                    let n = chapter.probed_index;
                     chapter.thumb_url = Some(format!("/api/files/{}/chapters/{n}.jpg?v={version}", file.id));
                 }
             }
@@ -61,7 +70,9 @@ pub async fn get(State(state): State<AppState>, user: AuthUser, Path(id): Path<i
     }
     if state.transcoder.is_available() {
         for file in &detail.files {
-            if remux_candidate(file.container.as_deref(), &file.streams) {
+            // (A `.strm` file's media has its keyframes read when it plays.)
+            let strm = crate::library::walk::is_strm(std::path::Path::new(&file.path));
+            if !strm && remux_candidate(file.container.as_deref(), &file.streams) {
                 let transcoder = state.transcoder.clone();
                 let path = file.path.clone();
                 tokio::spawn(async move {
@@ -84,7 +95,7 @@ pub async fn get(State(state): State<AppState>, user: AuthUser, Path(id): Path<i
 }
 
 /// Where Play starts for this user: the resume point, or the beginning once watched.
-fn resume_ms(row: &ItemRow) -> i64 {
+pub(crate) fn resume_ms(row: &ItemRow) -> i64 {
     if row.watched { 0 } else { row.position_ms.max(0) }
 }
 
@@ -105,7 +116,7 @@ pub async fn prefetch(State(state): State<AppState>, user: AuthUser, Path(id): P
     if let Some(item) = target {
         let start = resume_ms(&item);
         for file in catalog::files_for_item(&state.db, item.id).await? {
-            if file.video_codec.is_some() {
+            if file.video_codec.is_some() && !file.is_strm() {
                 state.transcoder.prefetch_soon(&file.path, start);
             }
         }
@@ -223,6 +234,16 @@ pub struct Progress {
     /// happened to the item since.
     #[serde(default)]
     age_ms: Option<i64>,
+    /// The audio track the player plays, and the subtitles it shows (`-1`:
+    /// none), by stream index: kept on the session for the user's remotes.
+    #[serde(default)]
+    audio_index: Option<i64>,
+    #[serde(default)]
+    subtitle_index: Option<i64>,
+    /// The quality its Quality menu has picked, by id: kept on the session
+    /// for the user's remotes.
+    #[serde(default)]
+    quality: Option<String>,
 }
 
 fn playing() -> String {
@@ -254,7 +275,7 @@ pub async fn progress(
     Json(body): Json<Progress>,
 ) -> ApiResult<StatusCode> {
     let row = item_or_404(&state, user.id, id).await?;
-    if !matches!(row.kind.as_str(), "movie" | "episode" | "track" | "extra") {
+    if !matches!(row.kind.as_str(), "movie" | "episode" | "track" | "part" | "extra") {
         return Err(AppError::bad_request("progress can only be recorded for playable items"));
     }
     if !matches!(body.state.as_str(), "playing" | "paused" | "stopped" | "buffering") {
@@ -262,6 +283,16 @@ pub async fn progress(
     }
     if let Some(age_ms) = body.age_ms.filter(|age| *age > 0)
         && changed_since(&state, user.id, id, age_ms).await?
+    {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    // A report of another profile's session went with this profile's token:
+    // its device switched profiles, for a cast, as it was sent. The place
+    // is that profile's, not this one's, so nothing is kept.
+    if let Some(sid) = body.session_id.as_deref()
+        && let Some(owner) =
+            state.sessions.get(sid).map(|s| s.user_id).or_else(|| state.sessions.stopped(sid).map(|s| s.user_id))
+        && owner != user.id
     {
         return Ok(StatusCode::NO_CONTENT);
     }
@@ -294,7 +325,9 @@ pub async fn progress(
     if let Some(session) = body.session_id.as_deref().and_then(|sid| state.sessions.get(sid))
         && session.user_id == user.id
     {
-        let changed = session.update(body.position_ms, &body.state);
+        let moved = session.update(body.position_ms, &body.state);
+        let switched = session.report_tracks(body.audio_index, body.subtitle_index);
+        let switched = session.report_quality(body.quality.as_deref()) || switched;
         if session.should_touch_transcoder()
             && let Some(job) = session.job_id()
         {
@@ -303,8 +336,8 @@ pub async fn progress(
                 let _ = transcoder.touch_job(&job).await;
             });
         }
-        if changed {
-            state.events.send(ServerEvent::SessionsChanged);
+        if moved || switched {
+            state.events.send(ServerEvent::SessionsChanged { user_id: session.user_id });
         }
     }
     Ok(StatusCode::NO_CONTENT)
@@ -467,13 +500,13 @@ async fn resolve_artwork(state: &AppState, id: i64, kind: &str) -> ApiResult<Pat
                     AppError::not_found("no artwork")
                 });
             }
-            ("poster", "album") => {
+            ("poster", "album" | "audiobook") => {
                 if let Some(path) = extract_cover(state, current).await? {
                     return Ok(path);
                 }
                 return Err(AppError::not_found("no artwork"));
             }
-            ("poster", "season" | "episode" | "track" | "extra") | ("backdrop", _) => match row.parent_id {
+            ("poster", "season" | "episode" | "track" | "part" | "extra") | ("backdrop", _) => match row.parent_id {
                 Some(parent) => current = parent,
                 None => break,
             },
@@ -490,6 +523,10 @@ async fn generate_thumb(state: &AppState, item_id: i64) -> ApiResult<PathBuf> {
         .into_iter()
         .next()
         .ok_or_else(|| AppError::not_found("no media file"))?;
+    // A `.strm` file's media is read only to play it ([`crate::strm`]).
+    if file.is_strm() {
+        return Err(AppError::not_found("no frame grab"));
+    }
     let fingerprint = state.store.fingerprint_of(file.id, &file.path, file.fingerprint.as_deref()).await?;
     let dir = state.store.media_dir(&fingerprint).ok_or_else(|| AppError::not_found("no media folder"))?;
     let target = dir.join("thumb.jpg");
@@ -539,7 +576,8 @@ async fn generate_thumb(state: &AppState, item_id: i64) -> ApiResult<PathBuf> {
     }
 }
 
-/// The cover embedded in an album's tracks, stored as the album's poster.
+/// The cover embedded in an album's tracks (an audiobook's parts), stored as
+/// the album's poster.
 async fn extract_cover(state: &AppState, album_id: i64) -> ApiResult<Option<PathBuf>> {
     let lock = state.images.generation_lock(album_id);
     let _guard = lock.lock().await;

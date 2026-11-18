@@ -5,14 +5,19 @@ import app.pley.android.common.ImageUrls
 import app.pley.android.model.Added
 import app.pley.android.model.Approval
 import app.pley.android.model.Asked
+import app.pley.android.model.CastRequest
+import app.pley.android.model.CollectionCategories
 import app.pley.android.model.CollectionDetail
 import app.pley.android.model.Decline
+import app.pley.android.model.DeviceKind
 import app.pley.android.model.DiscoverDetail
 import app.pley.android.model.DiscoverList
 import app.pley.android.model.DiscoverPage
 import app.pley.android.model.ItemRequest
 import app.pley.android.model.MediaRequest
 import app.pley.android.model.NewRequest
+import app.pley.android.model.PairingCode
+import app.pley.android.model.PairingRequest
 import app.pley.android.model.RequestList
 import app.pley.android.model.RequestOptions
 import app.pley.android.model.RequestQuery
@@ -30,6 +35,7 @@ import app.pley.android.model.ItemIds
 import app.pley.android.model.ItemList
 import app.pley.android.model.ItemsPage
 import app.pley.android.model.DynamicRangeFilter
+import app.pley.android.model.LanguageChoice
 import app.pley.android.model.Library
 import app.pley.android.model.LibraryFilters
 import app.pley.android.model.LibraryIds
@@ -52,16 +58,20 @@ import app.pley.android.model.SpeedSample
 import app.pley.android.model.SubtitleResults
 import app.pley.android.model.SubtitleTrack
 import app.pley.android.model.Me
+import app.pley.android.model.MergedCollection
 import app.pley.android.model.NewPlaylist
 import app.pley.android.model.PersonDetail
 import app.pley.android.model.PlaybackInfo
 import app.pley.android.model.PlaybackRequest
+import app.pley.android.model.PlayerCommandRequest
+import app.pley.android.model.PlayingSession
 import app.pley.android.model.PlaylistDetail
 import app.pley.android.model.PlaylistList
 import app.pley.android.model.PlaylistPatch
 import app.pley.android.model.PleyJson
 import app.pley.android.model.ProgressReport
 import app.pley.android.model.RatingRequest
+import app.pley.android.model.RemoteDevice
 import app.pley.android.model.SearchResults
 import app.pley.android.model.ServerInfo
 import app.pley.android.model.SessionStatus
@@ -75,6 +85,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -105,15 +116,24 @@ class HttpPleyApi(
     issuer: String,
     client: () -> OkHttpClient,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    /** What remotes call this device, sent with playbacks and Live TV ([DeviceNames.of]); `null`: left out. */
+    private val deviceName: () -> String? = { null },
+    /** What kind of device this is, sent with playbacks and Live TV ([DeviceKinds.of]); `null`: left out. */
+    private val deviceKind: () -> DeviceKind? = { null },
 ) : PleyApi {
     /** The server's origin: `http://nas:7539`. */
     val issuer: String = Addresses.origin(issuer) ?: issuer.trimEnd('/')
 
     private val base: HttpUrl = this.issuer.toHttpUrl()
     private val lazyClient = lazy(client)
+    private val lazyDeviceClient = lazy { waitingForDevices(lazyClient.value) }
 
     private suspend fun http(): OkHttpClient =
         if (lazyClient.isInitialized()) lazyClient.value else withContext(io) { lazyClient.value }
+
+    /** [http], for the calls the server answers once a device on its network did ([DEVICE_READ_SECONDS]). */
+    private suspend fun deviceHttp(): OkHttpClient =
+        if (lazyDeviceClient.isInitialized()) lazyDeviceClient.value else withContext(io) { lazyDeviceClient.value }
 
     // ---------------------------------------------------------------- server
 
@@ -122,6 +142,9 @@ class HttpPleyApi(
     override suspend fun server(): ServerInfo = get(ServerInfo.serializer(), "api", "server")
 
     override suspend fun me(): Me = get(Me.serializer(), "api", "auth", "me")
+
+    override suspend fun setLanguage(language: String?): Me =
+        send("PUT", Me.serializer(), json(LanguageChoice.serializer(), LanguageChoice(language)), "api", "me", "language")
 
     override fun avatarUrl(userId: Long, version: String?): String =
         picture(listOf("api", "users", userId, "avatar"), width = null, version = version)
@@ -186,6 +209,12 @@ class HttpPleyApi(
 
     override suspend fun collection(id: Long): CollectionDetail = get(CollectionDetail.serializer(), "api", "collections", id)
 
+    override suspend fun collectionCategories(): CollectionCategories =
+        get(CollectionCategories.serializer(), "api", "collection-categories")
+
+    override suspend fun mergedCollection(ids: List<Long>): MergedCollection =
+        get(MergedCollection.serializer(), "api", "collections", "merged", query = listOf("ids" to ids.joinToString(",")))
+
     override fun collectionImageUrl(id: Long, kind: ImageKind, width: Int?, version: String?): String {
         require(kind != ImageKind.Thumb) { "collections have a poster and a backdrop only" }
         return picture(listOf("api", "collections", id, "images", kind.wire), width, version)
@@ -245,8 +274,10 @@ class HttpPleyApi(
 
     // ---------------------------------------------------------------- playback
 
-    override suspend fun startPlayback(request: PlaybackRequest): PlaybackInfo =
-        send("POST", PlaybackInfo.serializer(), json(PlaybackRequest.serializer(), request), "api", "playback")
+    override suspend fun startPlayback(request: PlaybackRequest): PlaybackInfo {
+        val named = request.copy(deviceName = request.deviceName ?: deviceName(), deviceKind = request.deviceKind ?: deviceKind())
+        return send("POST", PlaybackInfo.serializer(), json(PlaybackRequest.serializer(), named), "api", "playback")
+    }
 
     override suspend fun convert(request: PlaybackRequest): ConversionInfo =
         send("POST", ConversionInfo.serializer(), json(PlaybackRequest.serializer(), request), "api", "conversions")
@@ -344,6 +375,33 @@ class HttpPleyApi(
     override fun chapterImageUrl(fileId: Long, chapter: Int, version: String?): String =
         picture(listOf("api", "files", fileId, "chapters", "$chapter.jpg"), width = null, version = version)
 
+    override suspend fun playingSessions(): List<PlayingSession> = get(ListSerializer(PlayingSession.serializer()), "api", "sessions")
+
+    override suspend fun sendCommand(sessionId: String, command: PlayerCommandRequest) =
+        call("POST", json(PlayerCommandRequest.serializer(), command), "api", "sessions", sessionId, "command")
+
+    override suspend fun stopSession(sessionId: String) = call("DELETE", null, "api", "sessions", sessionId)
+
+    override suspend fun remoteDevices(): List<RemoteDevice> =
+        get(ListSerializer(RemoteDevice.serializer()), "api", "remote", "devices", query = listOf("household" to "1", "nearby" to "1"))
+
+    override suspend fun showPairingCode(receiverId: String): PairingCode =
+        postToDevice("{}".toRequestBody(JSON), receiverId, "pairing") { it.decode(PairingCode.serializer()) }
+
+    override suspend fun pair(receiverId: String, code: String) =
+        postToDevice(json(PairingRequest.serializer(), PairingRequest(code)), receiverId, "pairing") { it.expectSuccess() }
+
+    override suspend fun cast(receiverId: String, request: CastRequest) =
+        postToDevice(json(CastRequest.serializer(), request), receiverId, "cast") { it.expectSuccess() }
+
+    /**
+     * POST /api/remote/devices/{receiverId}/{route}: a Google Cast or an
+     * AirPlay device answers through the server, which answers once it did,
+     * so this waits as long as the server waits for it.
+     */
+    private suspend fun <T> postToDevice(body: RequestBody, receiverId: String, route: String, read: (okhttp3.Response) -> T): T =
+        deviceHttp().fetch(jsonRequest(address(listOf("api", "remote", "devices", receiverId, route))).post(body).build(), read)
+
     override suspend fun reportProgress(itemId: Long, report: ProgressReport) =
         call("POST", json(ProgressReport.serializer(), report), "api", "items", itemId, "progress")
 
@@ -401,10 +459,17 @@ class HttpPleyApi(
             call("DELETE", null, "api", "live", "channels", channelId, "favorite")
         }
 
-    override suspend fun watchChannel(channelId: Long, request: WatchRequest): LiveWatching =
-        send("POST", LiveWatching.serializer(), json(WatchRequest.serializer(), request), "api", "live", "channels", channelId, "watch")
+    override suspend fun watchChannel(channelId: Long, request: WatchRequest): LiveWatching {
+        val named = request.copy(deviceName = request.deviceName ?: deviceName(), deviceKind = request.deviceKind ?: deviceKind())
+        return send("POST", LiveWatching.serializer(), json(WatchRequest.serializer(), named), "api", "live", "channels", channelId, "watch")
+    }
 
     override suspend fun livePlan(sessionId: String): LivePlan? = get(LivePlan.serializer().nullable, "api", "live", "sessions", sessionId, "plan")
+
+    override fun liveStreamUrl(channelId: Long, clientId: String): String = address(
+        listOf("api", "live", "channels", channelId, "stream.ts"),
+        listOf("client_id" to clientId, "device_kind" to deviceKind()?.wire),
+    ).toString()
 
     override suspend fun leaveChannel(sessionId: String) {
         val request = jsonRequest(address(listOf("api", "live", "sessions", sessionId))).delete().build()
@@ -492,6 +557,27 @@ class HttpPleyApi(
 
     override suspend fun requestOptions(): RequestOptions = get(RequestOptions.serializer(), "api", "requests", "options")
 
+    // ---------------------------------------------------------------- managing the server
+
+    override val admin: AdminApi = object : AdminApi {
+        override suspend fun <T> get(answer: DeserializationStrategy<T>, path: List<Any>, query: List<Pair<String, String?>>): T =
+            http().fetch(jsonRequest(address(path, query)).get().build()) { it.decode(answer) }
+
+        override suspend fun <T> send(method: String, answer: DeserializationStrategy<T>, path: List<Any>, body: JsonElement?): T =
+            http().fetch(jsonRequest(address(path)).method(method, jsonBody(method, body)).build()) { it.decode(answer) }
+
+        override suspend fun call(method: String, path: List<Any>, body: JsonElement?) {
+            http().fetch(jsonRequest(address(path)).method(method, jsonBody(method, body)).build()) { it.expectSuccess() }
+        }
+    }
+
+    /** [body] as JSON; without one, nothing for DELETE and an empty body for the methods that need one. */
+    private fun jsonBody(method: String, body: JsonElement?): RequestBody? = when {
+        body != null -> PleyJson.encodeToString(JsonElement.serializer(), body).toRequestBody(JSON)
+        method == "GET" || method == "DELETE" -> null
+        else -> EMPTY
+    }
+
     // ---------------------------------------------------------------- plumbing
 
     /** An address on the server: each segment encoded, then the query in the order given, `null`s left out. */
@@ -549,5 +635,18 @@ class HttpPleyApi(
          * SUBTITLES_COMPLETE_HEADER).
          */
         const val SUBTITLES_COMPLETE_HEADER = "X-Pley-Complete"
+
+        /**
+         * How long a cast or a pairing may go without an answer, in seconds,
+         * rather than OkHttp's 10: the server answers a cast to a Google Cast
+         * or AirPlay device once it plays. It stops one that hasn't after 3
+         * minutes, but its answer may come seconds after that, so clients
+         * wait about 4 (docs/API.md, "Casting").
+         */
+        const val DEVICE_READ_SECONDS = 240L
+
+        /** [client], waiting [DEVICE_READ_SECONDS] for an answer. */
+        internal fun waitingForDevices(client: OkHttpClient): OkHttpClient =
+            client.newBuilder().readTimeout(DEVICE_READ_SECONDS, TimeUnit.SECONDS).build()
     }
 }

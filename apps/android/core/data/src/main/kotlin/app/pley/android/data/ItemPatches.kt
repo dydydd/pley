@@ -11,6 +11,7 @@ import app.pley.android.model.ItemList
 import app.pley.android.model.ItemSummary
 import app.pley.android.model.ItemsPage
 import app.pley.android.model.MaybeItem
+import app.pley.android.model.MergedCollection
 import app.pley.android.model.PersonDetail
 import app.pley.android.model.PlaylistDetail
 import app.pley.android.model.SearchResults
@@ -48,6 +49,7 @@ internal class ItemPatch(
         is MaybeItem -> value.item?.let(summary)?.let { if (it === value.item) value else MaybeItem(it) } ?: value
         is SearchResults -> items(value.items).let { if (it === value.items) value else value.copy(items = it) }
         is CollectionDetail -> items(value.items).let { if (it === value.items) value else value.copy(items = it) }
+        is MergedCollection -> items(value.items).let { if (it === value.items) value else value.copy(items = it) }
         is PlaylistDetail -> {
             var changed = false
             val entries = value.entries.map { e ->
@@ -220,9 +222,9 @@ internal class ItemPatch(
         /**
          * Home's [hubs] with [item] put first in My List, or taken out of it
          * ([item] `null`: [itemId] leaves). A new My List goes after
-         * Continue Watching. `null` when nothing changes.
+         * Continue Watching, called [title]. `null` when nothing changes.
          */
-        fun myList(hubs: Hubs, itemId: Long, item: ItemSummary?): Hubs? {
+        fun myList(hubs: Hubs, itemId: Long, item: ItemSummary?, title: String = MY_LIST_TITLE): Hubs? {
             val at = hubs.hubs.indexOfFirst { it.key == HubKeys.MY_LIST }
             val list = hubs.hubs.getOrNull(at)
             if (item == null) {
@@ -235,12 +237,12 @@ internal class ItemPatch(
                 return Hubs(hubs.hubs.map { if (it === list) it.copy(items = listOf(item) + it.items.filterNot { s -> s.id == itemId }) else it })
             }
             val after = hubs.hubs.indexOfLast { it.key == HubKeys.CONTINUE_WATCHING } + 1
-            val hub = Hub(HubKeys.MY_LIST, MY_LIST_TITLE, null, listOf(item))
+            val hub = Hub(HubKeys.MY_LIST, title, null, listOf(item))
             return Hubs(hubs.hubs.take(after) + hub + hubs.hubs.drop(after))
         }
 
-        /** What the server calls Home's My List; it says so itself once asked again. */
-        private const val MY_LIST_TITLE = "My List"
+        /** What the server calls Home's My List in English; it says so itself, in the language asked, once asked again. */
+        const val MY_LIST_TITLE = "My List"
 
         /** The first [itemId] found among [values], as a summary. */
         fun find(values: List<Any?>, itemId: Long): ItemSummary? {

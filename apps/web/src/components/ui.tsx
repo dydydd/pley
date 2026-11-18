@@ -1,5 +1,6 @@
 import { forwardRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from "react";
 import { LoaderCircle } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/cn";
 
 type Variant = "primary" | "secondary" | "ghost" | "danger" | "outline";
@@ -91,11 +92,14 @@ export const TextInput = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLIn
   { className, ...rest },
   ref,
 ) {
+  // A width asked for replaces the full one: with both classes, the stylesheet's order decides.
+  const asksWidth = /(^|\s)w-/.test(className ?? "");
   return (
     <input
       ref={ref}
       className={cn(
-        "h-10 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-fg placeholder:text-subtle transition-colors focus:border-accent focus:outline-none disabled:opacity-60",
+        "h-10 rounded-md border border-border bg-surface-2 px-3 text-sm text-fg placeholder:text-subtle transition-colors focus:border-accent focus:outline-none disabled:opacity-60",
+        !asksWidth && "w-full",
         className,
       )}
       {...rest}
@@ -111,7 +115,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HTMLSel
     <select
       ref={ref}
       className={cn(
-        "h-9 rounded-md border border-border bg-surface-2 px-2.5 pr-8 text-sm text-fg transition-colors hover:border-border-strong focus:border-accent focus:outline-none",
+        "h-9 rounded-md border border-border bg-surface-2 px-2.5 pr-8 text-sm text-fg transition-colors hover:border-border-strong focus:border-accent focus:outline-none disabled:opacity-60",
         className,
       )}
       {...rest}
@@ -146,11 +150,14 @@ export function Field({
 }
 
 export function Toggle({
+  id,
   checked,
   onChange,
   label,
   disabled,
 }: {
+  /** For a `<label htmlFor>` elsewhere. */
+  id?: string;
   checked: boolean;
   onChange: (v: boolean) => void;
   label: string;
@@ -158,6 +165,7 @@ export function Toggle({
 }) {
   return (
     <button
+      id={id}
       type="button"
       role="switch"
       aria-checked={checked}
@@ -206,8 +214,9 @@ export function Badge({
   );
 }
 
-export function Spinner({ className, label = "Loading" }: { className?: string; label?: string }) {
-  return <LoaderCircle role="status" aria-label={label} className={cn("size-5 animate-spin text-muted", className)} />;
+export function Spinner({ className, label }: { className?: string; label?: string }) {
+  const { t } = useTranslation("components");
+  return <LoaderCircle role="status" aria-label={label ?? t("ui.loading")} className={cn("size-5 animate-spin text-muted", className)} />;
 }
 
 export function PageSpinner() {

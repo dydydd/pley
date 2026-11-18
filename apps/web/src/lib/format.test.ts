@@ -17,12 +17,12 @@ import {
   formatDuration,
   formatRelative,
   formatRemaining,
+  formatTimeLeft,
   formatUptime,
   fullTitle,
   isPlayableVideo,
   mediaBadges,
   mediaLine,
-  pluralize,
   progressFraction,
   resolutionLabel,
   seasonTitle,
@@ -86,6 +86,17 @@ describe("formatRemaining", () => {
   });
 });
 
+describe("formatTimeLeft", () => {
+  it("says about how long is left in minutes up to an hour and a half, then in hours", () => {
+    expect(formatTimeLeft(30)).toBe("under a minute left");
+    expect(formatTimeLeft(61)).toBe("about 2 minutes left");
+    expect(formatTimeLeft(60)).toBe("about 1 minute left");
+    expect(formatTimeLeft(89 * 60)).toBe("about 89 minutes left");
+    expect(formatTimeLeft(90 * 60)).toBe("about 2 hours left");
+    expect(formatTimeLeft(5 * 3600)).toBe("about 5 hours left");
+  });
+});
+
 describe("formatBytes", () => {
   it("picks a unit and keeps three significant digits", () => {
     expect(formatBytes(0)).toBe("0 B");
@@ -117,7 +128,7 @@ describe("formatBitrate", () => {
 
 describe("formatRelative", () => {
   const now = 1_700_000_000;
-  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
 
   afterEach(() => {
     vi.useRealTimers();
@@ -152,7 +163,7 @@ describe("formatRelative", () => {
 
 describe("formatDate", () => {
   it("formats a calendar date in the local time zone", () => {
-    const expected = new Date(2023, 3, 1).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    const expected = new Date(2023, 3, 1).toLocaleDateString("en", { year: "numeric", month: "short", day: "numeric" });
     expect(formatDate("2023-04-01")).toBe(expected);
   });
 
@@ -168,19 +179,6 @@ describe("formatUptime", () => {
     expect(formatUptime(3_700)).toBe("1h 1m");
     expect(formatUptime(120)).toBe("2m");
     expect(formatUptime(59)).toBe("0m");
-  });
-});
-
-describe("pluralize", () => {
-  it("uses the singular for exactly one", () => {
-    expect(pluralize(1, "movie")).toBe("1 movie");
-    expect(pluralize(0, "movie")).toBe("0 movies");
-    expect(pluralize(2, "movie")).toBe("2 movies");
-    expect(pluralize(3, "child", "children")).toBe("3 children");
-  });
-
-  it("formats the count for the locale", () => {
-    expect(pluralize(12_345, "movie")).toBe(`${(12_345).toLocaleString()} movies`);
   });
 });
 

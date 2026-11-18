@@ -8,8 +8,10 @@ import { DashboardSettings } from "./DashboardSettings";
 
 const playing: SessionInfo = {
   session_id: "abc",
+  kind: "item",
   user_id: 2,
   username: "sam",
+  device: "Firefox on macOS",
   item: makeItem({ id: 7, title: "Heat", duration_ms: 6_000_000 }),
   method: "transcode",
   position_ms: 60_000,
@@ -32,12 +34,26 @@ function serve(stop: () => unknown = () => undefined) {
 }
 
 describe("DashboardSettings stopping playback", () => {
+  it("says what each session plays on", async () => {
+    serve();
+    renderWithProviders(<DashboardSettings />);
+    expect(await screen.findByText("Firefox on macOS")).toBeInTheDocument();
+  });
+
+  it("says what plays each session: a Pley app, another app, or a device the server casts to", async () => {
+    const cast: SessionInfo = { ...playing, session_id: "def", device: "Den Apple TV", player: "airplay" };
+    mockApi({ "GET /api/activity": () => ({ scans: [], sessions: [{ ...playing, player: "pley" }, cast] }) });
+    renderWithProviders(<DashboardSettings />);
+    expect(await screen.findByText("Den Apple TV · AirPlay")).toBeInTheDocument();
+    expect(screen.getByText("Firefox on macOS · Pley app")).toBeInTheDocument();
+  });
+
   it("stops a session, with a message for the viewer", async () => {
     const user = userEvent.setup();
     const requests = serve();
     renderWithProviders(<DashboardSettings />);
 
-    await user.click(await screen.findByRole("button", { name: "Stop Heat for sam" }));
+    await user.click(await screen.findByRole("button", { name: "Stop Heat for sam on Firefox on macOS" }));
     const dialog = screen.getByRole("dialog", { name: "Stop playback" });
     expect(dialog).toHaveTextContent("Heat stops for sam right away.");
     await user.type(within(dialog).getByLabelText("Message"), "Server going down for updates");
@@ -54,8 +70,21 @@ describe("DashboardSettings stopping playback", () => {
     const user = userEvent.setup();
     const requests = serve();
     renderWithProviders(<DashboardSettings />);
-    await user.click(await screen.findByRole("button", { name: "Stop Heat for sam" }));
+    await user.click(await screen.findByRole("button", { name: "Stop Heat for sam on Firefox on macOS" }));
     await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Stop" }));
+    await waitFor(() => expect(requests.some((r) => r.method === "DELETE" && r.path === "/api/sessions/abc")).toBe(true));
+    expect(requests.find((r) => r.method === "DELETE")?.body).toBeUndefined();
+  });
+
+  it("offers no message for a player that can't show one", async () => {
+    const user = userEvent.setup();
+    const cast: SessionInfo = { ...playing, device: "Den Apple TV", player: "airplay" };
+    const requests = mockApi({ "GET /api/activity": () => ({ scans: [], sessions: [cast] }), "DELETE /api/sessions/abc": () => undefined });
+    renderWithProviders(<DashboardSettings />);
+    await user.click(await screen.findByRole("button", { name: "Stop Heat for sam on Den Apple TV" }));
+    const dialog = screen.getByRole("dialog", { name: "Stop playback" });
+    expect(within(dialog).queryByLabelText("Message")).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Stop" }));
     await waitFor(() => expect(requests.some((r) => r.method === "DELETE" && r.path === "/api/sessions/abc")).toBe(true));
     expect(requests.find((r) => r.method === "DELETE")?.body).toBeUndefined();
   });
@@ -64,7 +93,7 @@ describe("DashboardSettings stopping playback", () => {
     const user = userEvent.setup();
     serve(() => apiError(403, "forbidden", "only administrators can stop other people's playback"));
     renderWithProviders(<DashboardSettings />);
-    await user.click(await screen.findByRole("button", { name: "Stop Heat for sam" }));
+    await user.click(await screen.findByRole("button", { name: "Stop Heat for sam on Firefox on macOS" }));
     await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Stop" }));
     expect(await screen.findByText("Only administrators can stop other people's playback")).toBeInTheDocument();
     expect(screen.getByRole("dialog")).toBeInTheDocument();
@@ -89,6 +118,11 @@ describe("DashboardSettings library work", () => {
     activity = { ...activity, library_work: { mode: "hours", waiting: "busy", resumes_at: null, learned: true } };
     await client.invalidateQueries({ queryKey: ["activity"] });
     expect(await screen.findByText("37 seasons left · waits while other programs keep the processors busy")).toBeInTheDocument();
+
+    // New libraries are filling in: everything waits for them.
+    activity = { ...activity, library_work: { mode: "auto", waiting: "scanning", resumes_at: null, learned: true } };
+    await client.invalidateQueries({ queryKey: ["activity"] });
+    expect(await screen.findByText("37 seasons left · waits while new libraries are scanned or imported")).toBeInTheDocument();
 
     // Nothing waits.
     activity = { ...activity, library_work: null };

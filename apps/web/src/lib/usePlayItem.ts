@@ -6,6 +6,7 @@ import { fetchChildren, fetchOnDeck } from "@/api/hooks";
 import type { Id, ItemSummary } from "@/api/types";
 import { useOptionalAudioPlayer } from "@/audio/AudioPlayer";
 import { useToast } from "@/components/Toast";
+import { t } from "@/i18n";
 import { encodeId } from "./ids";
 
 export interface PlayUrlOptions {
@@ -31,10 +32,18 @@ export interface PlayOptions extends Omit<PlayUrlOptions, "startMs"> {
   shuffle?: boolean;
 }
 
+/** Where a book's part goes on: where it was left, unless it was heard to the end. */
+function resumeAt(part: ItemSummary | undefined): number {
+  if (!part || part.user_state.watched) return 0;
+  return part.user_state.position_ms;
+}
+
 /**
  * Returns `play(item)` which does the right thing for every kind:
  * video → player page (resuming), show/season → on-deck episode,
- * album/artist/track → global audio queue.
+ * album/artist/track → global audio queue, audiobook → its parts, from
+ * where it was left. It resolves to whether
+ * something plays; when nothing does, it has said why.
  */
 export function usePlayItem() {
   const navigate = useNavigate();
@@ -43,7 +52,7 @@ export function usePlayItem() {
   const toast = useToast();
 
   return useCallback(
-    async (item: ItemSummary, opts: PlayOptions = {}) => {
+    async (item: ItemSummary, opts: PlayOptions = {}): Promise<boolean> => {
       try {
         switch (item.kind) {
           case "movie":
@@ -52,38 +61,57 @@ export function usePlayItem() {
             const startMs = opts.fromStart ? 0 : item.user_state.watched ? 0 : item.user_state.position_ms;
             audio?.pause();
             void navigate(playUrl(item.id, { startMs, fileId: opts.fileId, audio: opts.audio, sub: opts.sub }));
-            return;
+            return true;
           }
           case "show":
           case "season": {
             const ep = await fetchOnDeck(qc, item.id);
             if (!ep) {
-              toast.info("Nothing to play yet");
-              return;
+              toast.info(t("play.nothingYet"));
+              return false;
             }
             audio?.pause();
             void navigate(playUrl(ep.id, { startMs: opts.fromStart ? 0 : ep.user_state.position_ms }));
-            return;
+            return true;
           }
           case "album": {
             const tracks = await fetchChildren(qc, item.id);
             if (!tracks.length) {
-              toast.info("This album has no tracks");
-              return;
+              toast.info(t("play.albumEmpty"));
+              return false;
             }
             audio?.playQueue(tracks, 0, { shuffle: opts.shuffle });
-            return;
+            return true;
           }
           case "artist": {
             const albums = await fetchChildren(qc, item.id);
             const lists = await Promise.all(albums.map((a) => fetchChildren(qc, a.id)));
             const tracks = lists.flat();
             if (!tracks.length) {
-              toast.info("No tracks found for this artist");
-              return;
+              toast.info(t("play.artistEmpty"));
+              return false;
             }
             audio?.playQueue(tracks, 0, { shuffle: opts.shuffle });
-            return;
+            return true;
+          }
+          case "audiobook":
+          case "part": {
+            // A book plays its parts in order, from the one it was left in
+            // (or the one chosen), where it was left.
+            const bookId = item.kind === "audiobook" ? item.id : item.parent_id;
+            if (!bookId) return false;
+            const [parts, deck] = await Promise.all([
+              fetchChildren(qc, bookId),
+              item.kind === "audiobook" ? fetchOnDeck(qc, bookId) : Promise.resolve(item),
+            ]);
+            if (!parts.length) {
+              toast.info(t("play.bookEmpty"));
+              return false;
+            }
+            const i = Math.max(0, parts.findIndex((p) => p.id === deck?.id));
+            const part = parts[i];
+            audio?.playQueue(parts, i, { startAtMs: opts.fromStart ? 0 : resumeAt(part) });
+            return true;
           }
           case "track": {
             if (item.parent_id) {
@@ -93,12 +121,13 @@ export function usePlayItem() {
             } else {
               audio?.playQueue([item], 0);
             }
-            return;
+            return true;
           }
         }
       } catch (err) {
         toast.error(errorMessage(err));
       }
+      return false;
     },
     [audio, navigate, qc, toast],
   );

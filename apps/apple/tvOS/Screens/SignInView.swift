@@ -4,7 +4,8 @@ import PleyScreens
 import SwiftUI
 
 /// Signing in with a code: the QR code on the left; the code, where to
-/// type it and Cancel on the right.
+/// type it and Cancel on the right. Signing in again to the server in use
+/// (for requests), Cancel and Menu go back to the app as it was.
 struct SignInView: View {
     @ObservedObject private var app: AppModel
     @StateObject private var model: SignInModel
@@ -42,10 +43,7 @@ struct SignInView: View {
                         Button("Get a new code") { model.signInWithCode() }
                             .focused($focus, equals: .again)
                     }
-                    Button("Cancel", role: .cancel) {
-                        model.cancel()
-                        app.closeSignIn()
-                    }
+                    Button("Cancel", role: .cancel) { cancel() }
                     .focused($focus, equals: .cancel)
                     .accessibilityIdentifier("signIn.cancel")
                 }
@@ -53,9 +51,28 @@ struct SignInView: View {
             .frame(maxWidth: 900, alignment: .leading)
         }
         .padding(80)
+        // The globe at the top right, on the title's line, while no account is signed in.
+        .overlay(alignment: .topTrailing) {
+            LanguageGlobe(app: app)
+                .padding(.top, 40)
+                .padding(.trailing, 80)
+        }
         .defaultFocus($focus, .cancel)
+        .onExitCommand(perform: again ? { cancel() } : nil)
         .onAppear { model.signInWithCode() }
         .onDisappear { model.cancel() }
+    }
+
+    /// Signing in again to the server in use, with the app behind it.
+    private var again: Bool { app.user != nil && app.server?.origin == model.entry.origin }
+
+    private func cancel() {
+        model.cancel()
+        if again {
+            app.cancelSignInAgain()
+        } else {
+            app.closeSignIn()
+        }
     }
 
     @ViewBuilder private var qr: some View {
@@ -75,8 +92,10 @@ struct SignInView: View {
             Text(code.userCode)
                 .font(.system(size: 88, weight: .bold, design: .monospaced))
                 .accessibilityIdentifier("signIn.userCode")
-            Text("Go to \(code.verificationURL.absoluteString) on your phone or computer and type this code, "
-                + "or scan the QR code.")
+            Text("""
+                Go to \(code.verificationURL.absoluteString) on your phone or computer and type this code, \
+                or scan the QR code.
+                """)
             HStack(spacing: 16) {
                 ProgressView()
                 Text("Waiting for you to allow it…")

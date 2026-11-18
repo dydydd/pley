@@ -7,6 +7,8 @@ import PackageDescription
 // no third-party package.
 let package = Package(
     name: "PleyKit",
+    // Each module with words has its own Localizable.xcstrings, found in Bundle.module (docs/APPLE.md, "Languages").
+    defaultLocalization: "en",
     platforms: [.iOS(.v16), .tvOS(.v18), .macOS(.v15)],
     products: [
         .library(name: "PleyModel", targets: ["PleyModel"]),
@@ -24,32 +26,42 @@ let package = Package(
         .library(name: "PleyTesting", targets: ["PleyTesting"]),
         .executable(name: "pley-apple-check", targets: ["pley-apple-check"]),
         .executable(name: "pley-apple-play", targets: ["pley-apple-play"]),
+        .executable(name: "pley-apple-fixtures", targets: ["pley-apple-fixtures"]),
     ],
     targets: [
-        .target(name: "PleyModel"),
+        .target(name: "PleyModel", resources: [.process("Localizable.xcstrings")]),
         .target(name: "PleyCommon"),
         // Apple TV's Top Shelf: the row the app saves and the extension shows, and its signed links.
         // Foundation and CryptoKit only, for the extension.
         .target(name: "PleyShelf"),
-        .target(name: "PleyNetwork", dependencies: ["PleyModel", "PleyCommon"]),
-        .target(name: "PleyAuth", dependencies: ["PleyModel", "PleyCommon", "PleyNetwork"]),
-        .target(name: "PleyData", dependencies: ["PleyModel", "PleyCommon", "PleyNetwork", "PleyAuth"]),
+        .target(name: "PleyNetwork", dependencies: ["PleyModel", "PleyCommon"],
+                resources: [.process("Localizable.xcstrings")]),
+        .target(name: "PleyAuth", dependencies: ["PleyModel", "PleyCommon", "PleyNetwork"],
+                resources: [.process("Localizable.xcstrings")]),
+        .target(name: "PleyData", dependencies: ["PleyModel", "PleyCommon", "PleyNetwork", "PleyAuth"],
+                resources: [.process("Localizable.xcstrings")]),
         // What this device plays: the caps report sent with playback requests.
-        .target(name: "PleyCaps", dependencies: ["PleyModel", "PleyCommon"]),
+        .target(name: "PleyCaps", dependencies: ["PleyModel", "PleyCommon"],
+                resources: [.process("Localizable.xcstrings")]),
         // Subtitles the app draws: WebVTT, picture tracks (PGS, VobSub, DVB) and their sync.
-        .target(name: "PleySubtitles", dependencies: ["PleyNetwork", "PleyModel"]),
+        .target(name: "PleySubtitles", dependencies: ["PleyNetwork", "PleyModel"],
+                resources: [.process("Localizable.xcstrings")]),
         // Playing: sessions on the server, their reports, recovery, and the AVPlayer engine.
         .target(name: "PleyPlayer", dependencies: ["PleySubtitles", "PleyCaps", "PleyData", "PleyNetwork", "PleyModel",
-                                                   "PleyCommon"]),
+                                                   "PleyCommon"],
+                resources: [.process("Localizable.xcstrings")]),
         // The screens' state, shared by the iPhone, iPad and Mac app and the Apple TV app; no views.
         .target(name: "PleyScreens", dependencies: ["PleyPlayer", "PleySubtitles", "PleyCaps", "PleyData", "PleyAuth",
-                                                    "PleyNetwork", "PleyModel", "PleyCommon", "PleyShelf"]),
+                                                    "PleyNetwork", "PleyModel", "PleyCommon", "PleyShelf"],
+                resources: [.process("Localizable.xcstrings")]),
         // The player's surface on each platform (AVKit's own controls) and what the apps lay over it.
         .target(name: "PleyPlayerViews", dependencies: ["PleyPlayer", "PleySubtitles", "PleyCaps", "PleyData",
-                                                        "PleyModel", "PleyCommon"]),
+                                                        "PleyModel", "PleyCommon"],
+                resources: [.process("Localizable.xcstrings")]),
         // Downloads to watch without the server: background transfers in pieces, offline files (iPhone, iPad, Mac).
         .target(name: "PleyDownloads", dependencies: ["PleyData", "PleyCaps", "PleyAuth", "PleyNetwork", "PleyModel",
-                                                      "PleyCommon"]),
+                                                      "PleyCommon"],
+                resources: [.process("Localizable.xcstrings")]),
         .target(name: "PleyTesting", dependencies: ["PleyModel", "PleyCommon"]),
         // Signs in to a real, disposable server (scripts/check-server.sh). macOS only.
         .executableTarget(name: "pley-apple-check", dependencies: ["PleyCaps", "PleyData", "PleyAuth", "PleyNetwork",
@@ -59,6 +71,8 @@ let package = Package(
                                                                   "PleyCaps", "PleyAuth",
                                                                   "PleyData", "PleyNetwork", "PleyModel", "PleyCommon",
                                                                   "PleyTesting"]),
+        // Serves the fixture server for the UI tests of requests (scripts/check-screens.sh). macOS only.
+        .executableTarget(name: "pley-apple-fixtures", dependencies: ["PleyTesting"]),
         .testTarget(name: "PleyModelTests", dependencies: ["PleyModel", "PleyTesting"]),
         .testTarget(name: "PleyCommonTests", dependencies: ["PleyCommon", "PleyTesting"]),
         .testTarget(name: "PleyNetworkTests", dependencies: ["PleyNetwork", "PleyModel", "PleyCommon", "PleyTesting"]),

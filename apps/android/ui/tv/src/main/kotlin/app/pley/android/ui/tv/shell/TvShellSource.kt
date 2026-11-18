@@ -9,6 +9,7 @@ import app.pley.android.data.SessionState
 import app.pley.android.data.valueOrNull
 import app.pley.android.designsystem.image.ArtworkImage
 import app.pley.android.model.Library
+import app.pley.android.player.CastFrom
 import app.pley.android.screens.ScreensGraph
 import app.pley.android.screens.requests.RequestsEntry
 import kotlinx.coroutines.CoroutineScope
@@ -87,6 +88,12 @@ interface TvShellSource {
     /** [notice] is on screen: off the queue, so newer news can't push it out. */
     fun dismiss(notice: RequestNotice) = Unit
 
+    /** Music a remote on another device cast here, as it starts, and where from: the shell opens Now Playing. */
+    val castMusic: Flow<CastFrom> get() = emptyFlow()
+
+    /** A cast from another profile's remote couldn't switch the TV to it: nothing plays, the shell says so. */
+    val castRefused: Flow<Unit> get() = emptyFlow()
+
     companion object {
         /**
          * The app's: the startup read's server and tokens ([startup]),
@@ -94,9 +101,9 @@ interface TvShellSource {
          * the data module last saw it ([householdSize]; 1 until it says).
          * The three are read at once, in the background, as soon as it is
          * made: made before the activity's first frame, it usually knows
-         * them by then. With "Always start as" in a household of several,
-         * the session's saved profile says whether it has a PIN too (from
-         * the disk). Making it touches nothing else.
+         * them by then. In a household of several, the session's saved
+         * profile says whether it has a PIN too (from the disk). Making it
+         * touches nothing else.
          */
         fun of(
             graph: ScreensGraph,
@@ -147,7 +154,7 @@ private class GraphShellSource(
             val (server, signedIn) = start.await()
             val size = profiles.await()
             val always = settings.await().alwaysStartAs
-            val hasPin = if (signedIn && size > 1 && always != null) leftOnPin() else null
+            val hasPin = if (signedIn && size > 1) leftOnPin() else null
             StartFacts(server, signedIn, profiles = size, alwaysStartAs = always, hasPin = hasPin)
         }.also { known = it }
     }
@@ -180,6 +187,8 @@ private class GraphShellSource(
     override suspend fun keepUpdated() {
         // A drive plugged in or pulled out while the app was away: some TV builds don't say.
         withContext(Dispatchers.Default) { graph.drives.refresh() }
+        // What the profile's remotes cast here plays from now on, also once the TV's player has the window.
+        withContext(Dispatchers.Default) { graph.casts }.start()
         // Server events flow while something listens to them (the data module's LiveUpdates).
         offMain { graph.data.liveUpdates.scans }.collect { }
     }
@@ -212,6 +221,10 @@ private class GraphShellSource(
 
     // Made by then: the notice was read from it.
     override fun dismiss(notice: RequestNotice) = graph.data.requests.dismiss(notice)
+
+    override val castMusic: Flow<CastFrom> = offMain { graph.casts.music }.map { it.from }
+
+    override val castRefused: Flow<Unit> = offMain { graph.casts.refused }
 
     private fun started(): RequestsRepository = graph.data.requests.also { it.start() }
 

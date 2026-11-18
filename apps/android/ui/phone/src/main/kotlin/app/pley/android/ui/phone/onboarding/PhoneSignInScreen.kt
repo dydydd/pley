@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
@@ -64,10 +63,13 @@ import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import app.pley.android.common.Language
+import app.pley.android.common.UiText
 import app.pley.android.designsystem.PleyColors
 import app.pley.android.designsystem.PleyShape
 import app.pley.android.designsystem.icon.Icon
 import app.pley.android.designsystem.icon.PleyIcons
+import app.pley.android.designsystem.text.asString
 import app.pley.android.screens.PleyKey
 import app.pley.android.screens.onboarding.BrowserSignIn
 import app.pley.android.screens.onboarding.LocalAccess
@@ -79,7 +81,8 @@ import app.pley.android.screens.onboarding.SignInProblem
 import app.pley.android.screens.onboarding.SignInViewModel
 import app.pley.android.screens.onboarding.go
 import app.pley.android.screens.onboarding.onboardingSource
-import app.pley.android.screens.onboarding.sentence
+import app.pley.android.screens.settings.DeviceLanguageUiState
+import app.pley.android.screens.settings.DeviceLanguageViewModel
 import app.pley.android.ui.phone.R
 import app.pley.android.ui.phone.kit.BusyLine
 import app.pley.android.ui.phone.kit.ConfirmDialog
@@ -96,7 +99,10 @@ import app.pley.android.ui.phone.shell.LocalPhoneNavigator
  * opens that page does the button sign in with a code from another device
  * instead. Over the button, a chosen server that requires two-step sign-in
  * says so: its page sets it up. [preselect] is the server the app was
- * signed out of (PleyKey.SignIn).
+ * signed out of, or signs in to again for a permission its sign-in didn't
+ * give (PleyKey.SignIn): Continue then opens its page even with the app
+ * signed in to it, and the new sign-in takes the old one's place. The
+ * globe in the top bar picks this device's language.
  */
 @Composable
 internal fun PhoneSignInScreen(preselect: String?) {
@@ -108,13 +114,17 @@ internal fun PhoneSignInScreen(preselect: String?) {
     val signIn = viewModel(key = "sign-in") { SignInViewModel(given ?: onboardingSource(), createSavedStateHandle()) }
     val state by servers.state.collectAsStateWithLifecycle()
     val signInState by signIn.state.collectAsStateWithLifecycle()
+    val languageModel: DeviceLanguageViewModel = viewModel(factory = DeviceLanguageViewModel.factory)
+    val language by languageModel.state.collectAsStateWithLifecycle()
     val withoutBrowser = remember(state.selected) { noBrowserFor(context, state.selected) }
     var viaCode by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(servers) {
         servers.chosen.collect { chosen ->
             when {
-                chosen.signedIn -> navigator.restart(PleyKey.Home)
+                // Signed in to it already: in, unless the page was opened to sign in to it again
+                // (PhoneShellState.signInAgain: a permission its sign-in didn't give).
+                chosen.signedIn && !sameServer(chosen.url, preselect) -> navigator.restart(PleyKey.Home)
                 viaCode || noBrowserFor(context, chosen.url) -> navigator.open(PleyKey.Link(chosen.url))
                 else -> signIn.signIn(activity, chosen.url)
             }
@@ -163,19 +173,25 @@ internal fun PhoneSignInScreen(preselect: String?) {
             state.selected?.let(servers::choose)
         },
         onOpenInBrowser = { server -> openInBrowser(context, server) },
+        language = language,
+        onLanguage = languageModel::choose,
     )
 }
 
 /**
  * Whether nothing on this phone opens [server]'s sign-in page: no app
  * takes a browsable view of its address. Browsers are visible to the app
- * from Android 11 through the manifest's queries.
+ * from Android 11 through the manifest's queries. Signing in then takes a
+ * code, which never allows managing the server (ManageServerScreen).
  */
-private fun noBrowserFor(context: Context, server: String?): Boolean {
+internal fun noBrowserFor(context: Context, server: String?): Boolean {
     val page = server?.toUri()?.takeIf { it.scheme == "http" || it.scheme == "https" } ?: ANY_PAGE.toUri()
     val view = Intent(Intent.ACTION_VIEW, page).addCategory(Intent.CATEGORY_BROWSABLE)
     return view.resolveActivity(context.packageManager) == null
 }
+
+/** Whether [chosen] is [preselect], the server the page was opened for, however either ends. */
+internal fun sameServer(chosen: String, preselect: String?): Boolean = preselect != null && chosen.trimEnd('/') == preselect.trimEnd('/')
 
 /** A page to ask about before a server is chosen. */
 private const val ANY_PAGE = "https://example.com"
@@ -199,6 +215,9 @@ internal fun PhoneSignInContent(
     onOpenInBrowser: (String) -> Unit,
     /** Continue with the address typed, once it answers: the button under the field says Continue, so it goes there. */
     onConnectAndContinue: (String) -> Unit = onConnect,
+    /** This device's language, for the globe; `null`: no globe. */
+    language: DeviceLanguageUiState? = null,
+    onLanguage: (Language?) -> Unit = {},
 ) {
     var forgetting by remember { mutableStateOf<ServerRow?>(null) }
     var addressOpen by rememberSaveable { mutableStateOf(false) }
@@ -225,16 +244,17 @@ internal fun PhoneSignInContent(
             .testTag(SIGN_IN_TAG),
     ) {
         Column(Modifier.fillMaxSize()) {
+            OnboardingTopBar(language, onLanguage, enabled = !busy)
             Column(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
-                    .statusBarsPadding()
                     .padding(horizontal = 24.dp)
                     .widthIn(max = 560.dp),
             ) {
-                Spacer(Modifier.height(96.dp))
+                // The wordmark where it was without the bar, 96 dp under the status bar.
+                Spacer(Modifier.height(32.dp))
                 PleyWordmark()
                 Spacer(Modifier.height(56.dp))
                 Text(stringResource(R.string.onboarding_title), style = MaterialTheme.typography.headlineMedium, color = PleyColors.Fg)
@@ -317,7 +337,7 @@ internal fun PhoneSignInContent(
                         withoutBrowser -> onUseCode
                         else -> onContinue
                     },
-                    icon = if (withoutBrowser) null else GlobeIcon,
+                    trailingIcon = if (withoutBrowser) null else BrowserIcon,
                     enabled = (state.selected != null || typed) && !busy && !state.checkingAddress,
                     modifier = Modifier.fillMaxWidth().testTag(CONTINUE_TAG),
                 )
@@ -461,12 +481,12 @@ private fun SignInStatus(signIn: BrowserSignIn, state: ServersUiState, onRetry: 
             val name = state.rows.firstOrNull { it.url == signIn.server }?.name ?: ServersViewModel.addressOf(signIn.server)
             val text = when (signIn.problem) {
                 SignInProblem.TooOld -> stringResource(R.string.onboarding_too_old, name)
-                else -> sentence(signIn.message)
+                else -> UiText.Sentence(signIn.text).asString()
             }
             Text(text, style = MaterialTheme.typography.bodyMedium, color = PleyColors.DangerText)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (signIn.problem == SignInProblem.TooOld) {
-                    TonalButton(stringResource(R.string.onboarding_open_in_browser), onClick = { onOpenInBrowser(signIn.server) }, icon = GlobeIcon)
+                    TonalButton(stringResource(R.string.onboarding_open_in_browser), onClick = { onOpenInBrowser(signIn.server) }, trailingIcon = BrowserIcon)
                 }
                 TonalButton(stringResource(R.string.onboarding_retry), onClick = onRetry, icon = PleyIcons.RefreshCw)
             }
@@ -478,11 +498,11 @@ private fun SignInStatus(signIn: BrowserSignIn, state: ServersUiState, onRetry: 
 /** What went wrong with a server, in words. */
 @Composable
 internal fun problemText(problem: ServersProblem): String = when (problem) {
-    is ServersProblem.Unreachable -> stringResource(R.string.onboarding_problem_unreachable, problem.address, problem.message)
+    is ServersProblem.Unreachable -> stringResource(R.string.onboarding_problem_unreachable, problem.address, problem.reason.asString())
     is ServersProblem.NotPley -> stringResource(R.string.onboarding_problem_not_pley, problem.address)
     is ServersProblem.Unencrypted -> stringResource(R.string.onboarding_problem_unencrypted, problem.address)
     ServersProblem.BadAddress -> stringResource(R.string.onboarding_problem_address)
-    is ServersProblem.Failed -> sentence(problem.message)
+    is ServersProblem.Failed -> UiText.Sentence(problem.text).asString()
 }
 
 internal const val SIGN_IN_TAG = "pley.signin"

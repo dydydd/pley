@@ -7,8 +7,13 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import app.pley.android.caps.CapsGraph
+import app.pley.android.caps.CapsSnapshot
+import app.pley.android.common.AppLanguage
 import app.pley.android.common.TraceNames
 import app.pley.android.data.DataGraph
+import app.pley.android.data.DownloadState
+import app.pley.android.data.Downloads
 import app.pley.android.data.Loadable
 import app.pley.android.data.PlayTarget
 import app.pley.android.data.map
@@ -21,6 +26,7 @@ import app.pley.android.model.ItemRequest
 import app.pley.android.model.ItemSummary
 import app.pley.android.network.ApiException
 import app.pley.android.player.PlayRequest
+import app.pley.android.player.session.PlaybackPlan
 import app.pley.android.screens.PlayerLauncher
 import app.pley.android.screens.PleyKey
 import app.pley.android.screens.requests.ItemRequestState
@@ -38,6 +44,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -53,7 +60,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.util.Locale
 
 /**
  * Something the page tells the person once: nothing to play, or an action
@@ -73,20 +79,24 @@ sealed interface ItemEvent {
  *
  * Playing goes through [PlayItem][app.pley.android.data.PlayItem] (movies and
  * episodes resume, shows play their next episode) and the [PlayerLauncher],
- * with the version and tracks chosen here; an audio track only when picked
- * here, else the server picks the one the device plays best. Choosing an
- * audio or subtitle track is saved for the item (PUT /api/items/{id}/streams),
+ * with the version and tracks chosen here: a version only when one was
+ * picked (a track picks its version too), else the player picks it as for
+ * Home, and the page shows the one it will play; an audio track only when
+ * picked here, else the server picks the one the device plays best. Choosing
+ * an audio or subtitle track is saved for the item (PUT /api/items/{id}/streams),
  * as on the web.
  * Watched marks, ratings and My List show at once and are undone if the server
- * refuses.
+ * refuses. The page is made again when the language shown changes: its
+ * dates and numbers are written in it.
  */
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class ItemViewModel(
     private val data: DataGraph,
     private val launcher: PlayerLauncher,
+    private val caps: CapsGraph,
     val itemId: Long,
+    private val downloads: Downloads = Downloads.None,
     compute: CoroutineDispatcher = Dispatchers.Default,
-    private val locale: Locale = Locale.getDefault(),
 ) : ViewModel() {
     private val pick = MutableStateFlow(StreamPick())
     private val chosenSeason = MutableStateFlow<Long?>(null)
@@ -112,7 +122,46 @@ class ItemViewModel(
     val state: StateFlow<ItemUiState> = retries
         .flatMapLatest { pageStates() }
         .flowOn(compute)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_MS), ItemUiState.Loading)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_MS), heldPage())
+
+    /**
+     * The page as what is held in memory makes it, there for its first
+     * frame: an item seen before, or one asked for ahead, opens whole,
+     * with no outline and no empty frame first. Loading when its details aren't held; its
+     * seasons, episodes and next episode are in it when they are held
+     * too, as the first page made from the server's answers has them.
+     * The one page made on the calling thread: nothing is waited for.
+     */
+    private fun heldPage(): ItemUiState {
+        val d = data.items.held(itemId) ?: return ItemUiState.Loading
+        val container = d.kind == ItemKind.Show || d.kind == ItemKind.Season
+        if (!container && d.kind != ItemKind.Movie && d.kind != ItemKind.Episode) return ItemUiState.Loading
+        val next = if (container) data.items.heldOnDeck(itemId) else null
+        val seasons = when (d.kind) {
+            ItemKind.Show -> data.items.heldChildren(itemId)
+            ItemKind.Season -> d.parentId?.let(data.items::heldChildren)
+            else -> null
+        }?.let(::seasonOrder)
+        val selected = when (d.kind) {
+            // As the page made later picks it: not before the next episode is known.
+            ItemKind.Show -> if (seasons != null && next != null) defaultSeason(seasons, next.valueOrNull) else null
+            ItemKind.Season -> itemId
+            else -> d.parentId
+        }
+        shown = d
+        val page = itemPage(
+            PageInput(
+                detail = d,
+                origin = data.servers.active.value.orEmpty(),
+                bestFile = bestFile(d),
+                onDeck = next ?: Loadable.Loading.takeIf { container },
+                seasons = seasons,
+                selectedSeason = selected,
+                episodes = selected?.let(data.items::heldChildren),
+            ),
+        )
+        return ItemUiState.Ready(page, Loadable.Ready(Unit, fresh = false))
+    }
 
     private fun pageStates(): Flow<ItemUiState> {
         val detail = data.items.detail(itemId)
@@ -152,12 +201,12 @@ class ItemViewModel(
             ItemKind.Show, ItemKind.Season -> data.items.onDeck(itemId)
             else -> flowOf(null)
         }
-        // The tabs: a show's seasons, or a season's and its siblings.
+        // The tabs: a show's seasons, or a season's and its siblings, in the order they are listed.
         val seasons: Flow<List<ItemSummary>?> = when (shape.kind) {
-            ItemKind.Show -> data.items.children(itemId).map { it.valueOrNull }
-            ItemKind.Season -> shape.parentId?.let { show -> data.items.children(show).map { it.valueOrNull } } ?: flowOf(null)
-            else -> flowOf(null)
-        }
+            ItemKind.Show -> data.items.children(itemId)
+            ItemKind.Season -> shape.parentId?.let { show -> data.items.children(show) }
+            else -> null
+        }?.map { load -> load.valueOrNull?.let(::seasonOrder) } ?: flowOf(null)
         val selected: Flow<Long?> = when (shape.kind) {
             ItemKind.Show -> combine(chosenSeason, seasons, onDeck) { chosen, list, next ->
                 chosen ?: when {
@@ -171,13 +220,25 @@ class ItemViewModel(
             ItemKind.Episode -> flowOf(shape.parentId)
             else -> flowOf(null)
         }.distinctUntilChanged()
-        val episodes: Flow<Pair<Long?, List<ItemSummary>?>> = selected.flatMapLatest { season ->
+        val shownEpisodes: Flow<Pair<Long?, List<ItemSummary>?>> = selected.flatMapLatest { season ->
             if (season == null) flowOf(null to null) else data.items.children(season).map { season to it.valueOrNull }
         }
+        // The seasons beside the one shown have their episodes asked for ahead, while the page is
+        // shown: moving along the seasons, each has its episodes when focus rests on it.
+        val warming = flow<Nothing> {
+            combine(selected, seasons) { season, list -> season to list }.collectLatest { (season, list) -> warmBeside(season, list) }
+        }
+        val episodes = merge(shownEpisodes, warming)
         val beside = combine(onDeck, seasons, episodes, related, partOf) { next, list, (season, eps), rel, part ->
             Beside(next, list, season, eps, rel, part)
         }
-        return combine(detail, origin, pick, beside) { load, server, picked, b ->
+        // The device's capabilities can come after the page, and a download end while it shows: the
+        // version shown follows them, not each step of a download's progress.
+        val downloaded = downloads.entries
+            .map { all -> all.filter { it.state == DownloadState.Done }.mapTo(HashSet()) { it.fileId } }
+            .distinctUntilChanged()
+        val choices = combine(pick, caps.capabilities.snapshot, downloaded) { picked, snapshot, _ -> picked to snapshot }
+        return combine(detail, origin, choices, beside, AppLanguage.shown) { load, server, (picked, snapshot), b, _ ->
             val d = load.valueOrNull ?: return@combine withoutDetail(load)
             shown = d
             val page = itemPage(
@@ -185,13 +246,15 @@ class ItemViewModel(
                     detail = d,
                     origin = server,
                     pick = picked,
+                    bestFile = bestFile(d, snapshot),
                     onDeck = b.onDeck,
                     seasons = b.seasons,
                     selectedSeason = b.season,
                     episodes = b.episodes,
                     related = b.related,
                     partOf = b.partOf,
-                    locale = locale,
+                    locale = AppLanguage.locale,
+                    words = AppLanguage.formatWords(),
                 ),
             )
             ItemUiState.Ready(page, load.map { })
@@ -308,19 +371,23 @@ class ItemViewModel(
 
     /**
      * The request for [target]: this item's own choices when it is the item
-     * played. The audio only when picked here: otherwise the server picks
-     * the track this device plays best.
+     * played. Of several versions, the one picked here, with its subtitles;
+     * none picked, the player picks the version as for Home, with the
+     * profile's tracks for it. The audio only when picked here: otherwise the
+     * server picks the track this device plays best.
      */
     private fun request(d: ItemDetail, target: PlayTarget.Video, fromStart: Boolean): PlayRequest {
         if (target.itemId != d.id) return PlayRequest(itemId = target.itemId, startMs = target.startMs, fromStart = fromStart)
-        val playing = playing(d, pick.value)
+        val picked = pick.value
+        val playing = playing(d, picked, bestFile(d))
+        val named = d.files.size < 2 || picked.fileId != null
         return PlayRequest(
             itemId = d.id,
-            fileId = playing.file?.id?.takeIf { d.files.size > 1 },
+            fileId = playing.file?.id?.takeIf { d.files.size > 1 && named },
             startMs = target.startMs,
             fromStart = fromStart,
             audioIndex = playing.pickedAudio?.toLong(),
-            subtitleIndex = playing.subtitleIndex?.toLong(),
+            subtitleIndex = playing.subtitleIndex?.toLong()?.takeIf { named },
         )
     }
 
@@ -365,9 +432,11 @@ class ItemViewModel(
      */
     fun chooseAudio(index: Int?) {
         val d = shown ?: return
-        val file = playing(d, pick.value).file ?: return
-        pick.update { it.copy(audioFile = file.id, audio = index) }
-        remember(d, file.id, index, playing(d, pick.value).subtitleIndex, automaticAudio = index == null)
+        val best = bestFile(d)
+        val file = playing(d, pick.value, best).file ?: return
+        // A track is its version's: the page keeps that version, and Play names it.
+        pick.update { it.copy(fileId = it.fileId ?: file.id, audioFile = file.id, audio = index) }
+        remember(d, file.id, index, playing(d, pick.value, best).subtitleIndex, automaticAudio = index == null)
     }
 
     /**
@@ -376,11 +445,20 @@ class ItemViewModel(
      */
     fun chooseSubtitle(index: Int?) {
         val d = shown ?: return
-        val playing = playing(d, pick.value)
+        val playing = playing(d, pick.value, bestFile(d))
         val file = playing.file ?: return
-        pick.update { it.copy(subtitleFile = file.id, subtitle = index) }
+        pick.update { it.copy(fileId = it.fileId ?: file.id, subtitleFile = file.id, subtitle = index) }
         remember(d, file.id, playing.pickedAudio, index)
     }
+
+    /**
+     * The version of [d] the player picks when none is asked for (Home's
+     * Play): a downloaded one, else the one this device plays best; `null`
+     * while the device's capabilities aren't known.
+     */
+    private fun bestFile(d: ItemDetail, snapshot: CapsSnapshot? = caps.capabilities.snapshot.value): Long? =
+        d.files.firstOrNull { downloads.file(it.id) != null }?.id
+            ?: snapshot?.let { PlaybackPlan.file(d, null, it, caps.policy)?.id }
 
     private fun remember(d: ItemDetail, fileId: Long, audio: Int?, subtitle: Int?, automaticAudio: Boolean = false) {
         viewModelScope.launch { attempt { data.watchState.chooseStreams(d.id, fileId, audio, subtitle, automaticAudio) } }
@@ -399,6 +477,25 @@ class ItemViewModel(
     /** Shows [seasonId]'s episodes. */
     fun selectSeason(seasonId: Long) {
         chosenSeason.value = seasonId
+    }
+
+    /**
+     * Asks for the episodes of the seasons beside [season] ahead, the
+     * nearest first, one at a time. Only those: each is an answer kept, and
+     * the next ones are asked for when focus gets to this one's neighbour.
+     */
+    private suspend fun warmBeside(season: Long?, seasons: List<ItemSummary>?) {
+        val at = seasons?.indexOfFirst { it.id == season }?.takeIf { it >= 0 } ?: return
+        for (by in WARM_BESIDE) {
+            val beside = seasons.getOrNull(at + by) ?: continue
+            try {
+                data.items.warmChildren(beside.id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Asked again when shown.
+            }
+        }
     }
 
     override fun onCleared() {
@@ -420,6 +517,9 @@ class ItemViewModel(
         /** Keeps loading this long after the page stops showing (rotation, a quick look elsewhere). */
         const val STOP_MS = 5_000L
 
+        /** The seasons whose episodes are asked for ahead, from the one shown: the next ones first. */
+        private val WARM_BESIDE = intArrayOf(1, -1, 2, -2)
+
         /** Request events gathered before the item's request is read again. */
         const val REQUEST_CHANGES_MS = 500L
 
@@ -433,7 +533,7 @@ class ItemViewModel(
         fun factory(itemId: Long): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val graph = screensGraph()
-                ItemViewModel(graph.data, graph.playerLauncher, itemId)
+                ItemViewModel(graph.data, graph.playerLauncher, graph.caps, itemId, graph.downloads)
             }
         }
     }

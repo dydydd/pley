@@ -9,8 +9,9 @@ import androidx.browser.customtabs.CustomTabsClient
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.net.toUri
 import app.pley.android.common.Addresses
+import app.pley.android.common.UiText
 import app.pley.android.common.UserAgent
-import app.pley.android.common.describe
+import app.pley.android.common.errorText
 import java.io.IOException
 import java.net.URI
 import java.net.URISyntaxException
@@ -35,6 +36,9 @@ import org.json.JSONObject
  */
 const val CLIENT_ID = "https://pley-media-server.github.io/pley/oauth/android.json"
 
+/** Why a sign-in in the browser can't start: no browser opens the page. */
+val NO_BROWSER: UiText = UiText.res(R.string.auth_no_browser)
+
 /** Where the browser comes back: the app id as a private-use scheme (RFC 8252 §7.1). */
 const val REDIRECT_SCHEME = "app.pley.android"
 const val REDIRECT_PATH = "/oauth/callback"
@@ -45,11 +49,18 @@ val SCOPES = listOf("library", "play", "playlists", "profiles")
 
 /**
  * What the app asks for too, only where the server lists it in
- * `scopes_supported`: asking for movies and shows, and approving them on
- * an administrator's account. A server that doesn't know a scope refuses
- * the whole sign-in for it.
+ * `scopes_supported`: asking for movies and shows, and on an
+ * administrator's account approving them and managing the server. A server
+ * that doesn't know a scope refuses the whole sign-in for it.
  */
-val LISTED_SCOPES = listOf("requests", "approvals")
+val LISTED_SCOPES = listOf("requests", "approvals", "server")
+
+/**
+ * What only the browser's sign-in asks for: managing the server, which the
+ * server never allows with a code (anyone in front of a TV could pass its
+ * code to an administrator).
+ */
+val BROWSER_SCOPES = setOf("server")
 
 /** The extension grant for switching profiles (pley servers with profiles). */
 const val SWITCH_PROFILE_GRANT = "urn:pley:params:oauth:grant-type:switch-profile"
@@ -144,7 +155,8 @@ sealed interface SignInState {
 
     data class SignedIn(val issuer: String) : SignInState
 
-    data class Failed(val message: String) : SignInState
+    /** It didn't go through, for the reason in [text]. */
+    data class Failed(val text: UiText) : SignInState
 }
 
 /** What a callback leads to. */
@@ -152,7 +164,7 @@ sealed interface CallbackOutcome {
     /** Not for a waiting sign-in (another one, an old one, or a second answer): nothing happens. */
     data object Ignored : CallbackOutcome
 
-    data class Failed(val flow: PendingFlow, val message: String) : CallbackOutcome
+    data class Failed(val flow: PendingFlow, val text: UiText) : CallbackOutcome
 
     data class Exchange(val flow: PendingFlow, val code: String) : CallbackOutcome
 }
@@ -176,7 +188,7 @@ class SignIn(
      * the address of its sign-in page.
      */
     suspend fun start(server: String, returnTo: String? = null): String {
-        val home = Addresses.origin(server) ?: throw AuthException("that isn't a server address")
+        val home = Addresses.origin(server) ?: throw AuthException(NOT_AN_ADDRESS)
         Transport.checkAddress(home)
         val metadata = ServerMetadata.fetch(http, home)
         val flow = PendingFlow(
@@ -200,17 +212,17 @@ class SignIn(
         val flow = store.takeFlow(state, clock(), FLOW_LIFETIME_MS) ?: return CallbackOutcome.Ignored
         // RFC 9207: the answer must come from the server the sign-in went to.
         if (callback.iss == null || callback.iss != flow.issuer) {
-            return CallbackOutcome.Failed(flow, "the answer came from another server than the one you signed in to: try again")
+            return CallbackOutcome.Failed(flow, UiText.res(R.string.auth_other_server))
         }
         if (callback.error != null) {
-            val message = when (callback.error) {
-                "access_denied" -> "you didn't allow the app"
-                else -> callback.errorDescription?.let { "the server refused: ${plain(it)}" }
-                    ?: "the server refused (${plain(callback.error)})"
+            val text = when (callback.error) {
+                "access_denied" -> UiText.res(R.string.auth_denied)
+                else -> callback.errorDescription?.let { UiText.res(R.string.auth_refused_said, plain(it)) }
+                    ?: UiText.res(R.string.auth_refused_code, plain(callback.error))
             }
-            return CallbackOutcome.Failed(flow, message)
+            return CallbackOutcome.Failed(flow, text)
         }
-        val code = callback.code ?: return CallbackOutcome.Failed(flow, "the server sent no code: try again")
+        val code = callback.code ?: return CallbackOutcome.Failed(flow, UiText.res(R.string.auth_no_code))
         return CallbackOutcome.Exchange(flow, code)
     }
 
@@ -242,15 +254,15 @@ class SignIn(
         SignInState.SignedIn(exchange(outcome.flow, outcome.code).issuer)
     } catch (e: TokenException) {
         // A code works once, for a minute.
-        SignInState.Failed(if (e.oauth?.error == "invalid_grant") "the sign-in took too long: try again" else e.message.orEmpty())
+        SignInState.Failed(if (e.oauth?.error == "invalid_grant") UiText.res(R.string.auth_too_long) else e.text)
     } catch (e: IOException) {
-        SignInState.Failed(describe(e))
+        SignInState.Failed(errorText(e))
     }
 
     /** Handles [callback] to the end: what to show, or `null` when it answers no waiting sign-in. */
     suspend fun finish(callback: Callback): SignInState? = when (val outcome = handle(callback)) {
         CallbackOutcome.Ignored -> null
-        is CallbackOutcome.Failed -> SignInState.Failed(outcome.message)
+        is CallbackOutcome.Failed -> SignInState.Failed(outcome.text)
         is CallbackOutcome.Exchange -> complete(outcome)
     }
 
@@ -260,14 +272,16 @@ class SignIn(
 
         /**
          * The scopes to ask [metadata]'s server for: all of [SCOPES] it
-         * offers, and those of [LISTED_SCOPES] it lists. Servers without
+         * offers, and those of [LISTED_SCOPES] it lists, but for
+         * [BROWSER_SCOPES] when signing in [withCode]. Servers without
          * profile switching don't know "profiles", nor older ones
          * "requests", and would refuse the whole sign-in for them.
          */
-        fun scopeFor(metadata: ServerMetadata): String {
+        fun scopeFor(metadata: ServerMetadata, withCode: Boolean = false): String {
             val offered = metadata.scopesSupported
             val base = SCOPES.filter { offered == null || it in offered }.ifEmpty { listOf("library") }
-            return (base + LISTED_SCOPES.filter { offered != null && it in offered }).joinToString(" ")
+            val listed = LISTED_SCOPES.filter { offered != null && it in offered && !(withCode && it in BROWSER_SCOPES) }
+            return (base + listed).joinToString(" ")
         }
 
         /** The sign-in page's address for [flow] (OAuth 2.1 §4.1.1). */
@@ -326,7 +340,7 @@ class SignIn(
                     context.startActivity(view)
                 }
             } catch (_: ActivityNotFoundException) {
-                throw AuthException("there's no browser on this device to sign in with")
+                throw AuthException(NO_BROWSER)
             }
         }
     }
@@ -418,7 +432,7 @@ object Auth {
         return when (val outcome = signIn.handle(callback)) {
             CallbackOutcome.Ignored -> null
             is CallbackOutcome.Failed -> {
-                _state.value = SignInState.Failed(outcome.message)
+                _state.value = SignInState.Failed(outcome.text)
                 outcome.flow
             }
             is CallbackOutcome.Exchange -> {
@@ -430,7 +444,7 @@ object Auth {
                         throw e
                     } catch (_: Exception) {
                         // Anything complete doesn't word itself fails the sign-in, never the app.
-                        SignInState.Failed("the sign-in couldn't be finished: try again")
+                        SignInState.Failed(UiText.res(R.string.auth_not_finished))
                     }
                 }
                 outcome.flow

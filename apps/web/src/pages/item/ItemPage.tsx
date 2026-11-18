@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { Navigate, useLocation, useParams } from "react-router";
 import { errorMessage, isApiError } from "@/api/client";
 import { useItem } from "@/api/hooks";
@@ -6,6 +7,7 @@ import { fullTitle } from "@/lib/format";
 import { useDocumentTitle } from "@/lib/hooks";
 import { NotFoundPage } from "../NotFoundPage";
 import { AlbumView, ArtistView } from "./MusicViews";
+import { BookView } from "./BookView";
 import { SeasonView } from "./SeasonView";
 import { ShowView } from "./ShowView";
 import { VideoItemView } from "./VideoItemView";
@@ -32,6 +34,7 @@ function ItemSkeleton() {
 }
 
 export function ItemPage() {
+  const { t } = useTranslation(["item", "common"]);
   const { id } = useParams();
   const location = useLocation();
   const highlight = (location.state as { highlight?: number } | null)?.highlight;
@@ -48,9 +51,9 @@ export function ItemPage() {
     return (
       <EmptyState
         className="min-h-[60vh]"
-        title="Couldn't load this item"
+        title={t("loadError")}
         description={errorMessage(item.error)}
-        action={<Button onClick={() => void item.refetch()}>Retry</Button>}
+        action={<Button onClick={() => void item.refetch()}>{t("common:actions.retry")}</Button>}
       />
     );
   }
@@ -69,6 +72,10 @@ export function ItemPage() {
       return <ArtistView key={data.id} item={data} />;
     case "album":
       return <AlbumView key={data.id} item={data} highlightId={highlight} />;
+    case "audiobook":
+      return <BookView key={data.id} item={data} />;
+    case "part":
+      return data.parent_id ? <Navigate to={itemUrl(data.parent_id)} replace /> : <NotFoundPage />;
     case "extra":
       return data.parent_id ? <Navigate to={itemUrl(data.parent_id)} replace /> : <NotFoundPage />;
     case "track":

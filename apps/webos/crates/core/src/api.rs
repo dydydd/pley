@@ -156,6 +156,12 @@ impl Api {
         self.json(Method::Put, "/api/me/track-defaults", defaults)
     }
 
+    /// The account's language (`en`, `fr`, `es`, or none for Automatic) on all its devices (scope
+    /// `play`); the profile as it is now. A server before it answers 404 or 405.
+    pub fn set_language(&self, language: Option<&str>) -> Result<Me, ApiError> {
+        self.json(Method::Put, "/api/me/language", &serde_json::json!({ "language": language }))
+    }
+
     // Browsing.
 
     /// Home's rows.
@@ -206,6 +212,17 @@ impl Api {
     /// A collection and its items, in its order.
     pub fn collection(&self, id: i64) -> Result<CollectionDetail, ApiError> {
         self.get(&id_path("/api/collections/{id}", id))
+    }
+
+    /// Several libraries' same-titled collections as one: a Home row's.
+    pub fn merged_collection(&self, ids: &[i64]) -> Result<MergedCollection, ApiError> {
+        let ids = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        self.get_query("/api/collections/merged", &[("ids", Some(ids))])
+    }
+
+    /// The categories of collections, in their order.
+    pub fn collection_categories(&self) -> Result<CollectionCategories, ApiError> {
+        self.get("/api/collection-categories")
     }
 
     /// An item with everything the server knows. For a movie or episode it
@@ -625,7 +642,8 @@ impl Api {
     /// (this TV's id with `-stream` after it, so the HLS session beside it stays) for as long as
     /// it runs: the answer once its headers are in, its body read as it comes, until `cancel`.
     /// It takes the token, which goes, as every request's, only once the server has proved
-    /// itself at its address. Uncompressed: a live stream isn't held back to be packed.
+    /// itself at its address. Uncompressed: a live stream isn't held back to be packed. It says it
+    /// plays on a TV (`device_kind`), for remotes; a reader of its own obeys none.
     pub fn live_stream(
         &self,
         channel: i64,
@@ -634,7 +652,7 @@ impl Api {
     ) -> Result<crate::http::Streamed, ApiError> {
         let path = with_query(
             &id_path("/api/live/channels/{id}/stream.ts", channel),
-            &[("client_id", Some(client_id.to_string()))],
+            &[("client_id", Some(client_id.to_string())), ("device_kind", Some(DeviceKind::Tv.to_string()))],
         );
         let req = Request::new(Method::Get, self.url(&path))
             .header("Accept", "video/mp2t, */*")

@@ -6,7 +6,7 @@ use pley_ui::theme;
 use pley_ui::{Easing, Id, Motion, Ui};
 
 use crate::cx::ToastRequest;
-use crate::state::OFFLINE_TEXT;
+use crate::state::offline_text;
 
 /// How long a toast shows (`kit/toast.tsx`; Android's "Saved" pill).
 pub const TOAST_SECONDS: f64 = 3.5;
@@ -59,7 +59,7 @@ impl Toasts {
     pub fn show(&mut self, req: ToastRequest, now: f64) {
         let fades_in = self.current.as_ref().is_none_or(|t| now >= t.until);
         self.next += 1;
-        let seconds = if req.error { ERROR_TOAST_SECONDS } else { TOAST_SECONDS };
+        let seconds = req.seconds.unwrap_or(if req.error { ERROR_TOAST_SECONDS } else { TOAST_SECONDS });
         self.current = Some(Toast { id: self.next, text: req.text, error: req.error, until: now + seconds, fades_in });
     }
 
@@ -104,14 +104,14 @@ impl Toasts {
     }
 }
 
-/// Draws "Showing what Pley had saved. Reconnecting…" at the top right while `showing`, fading
-/// in and out; never focusable. Returns the bottom of what it drew (`top` when nothing shows).
+/// Draws "Pley is offline" at the top right while `showing`, fading in and out; never
+/// focusable. Returns the bottom of what it drew (`top` when nothing shows).
 pub fn offline_notice(ui: &mut Ui, showing: bool, top: f32) -> f32 {
     let a = ui.animate(Id::new("pley.offline-notice"), if showing { 1.0 } else { 0.0 }, Motion::REVEAL);
     if a <= 0.0 {
         return top;
     }
-    let text = ui.layout(OFFLINE_TEXT, &theme::LABEL, &TextOpts::line(TOAST_MAX_WIDTH));
+    let text = ui.layout(offline_text(), &theme::LABEL, &TextOpts::line(TOAST_MAX_WIDTH));
     let inner = text.size.h.max(NOTICE_ICON);
     let width = 2.0 * PAD_X + NOTICE_ICON + NOTICE_GAP + text.size.w;
     let rect = Rect::new(TOAST_RIGHT - width, top, width, inner + 2.0 * PAD_Y);

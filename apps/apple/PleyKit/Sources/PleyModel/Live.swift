@@ -96,8 +96,8 @@ public struct LiveProgram: Codable, Hashable, Sendable {
     /// "S2 E14", or "E14", when the guide numbers the episode.
     public var episodeLabel: String? {
         switch (season, episode) {
-        case (let s?, let e?): "S\(s) E\(e)"
-        case (nil, let e?): "E\(e)"
+        case (let s?, let e?): localized("S\(s) E\(e)")
+        case (nil, let e?): localized("E\(e)")
         default: nil
         }
     }
@@ -318,11 +318,18 @@ public struct LiveWatchRequest: Codable, Hashable, Sendable {
     public var clientId: String
     public var keyedUrls: Bool
     public var takeOver: Int?
+    /// The remote's commands the live player obeys, as a play request's.
+    public var controls: [Control]?
+    /// What remotes call this device; `nil`: the server names it from the User-Agent.
+    public var deviceName: String?
 
-    public init(clientId: String, keyedUrls: Bool = true, takeOver: Int? = nil) {
+    public init(clientId: String, keyedUrls: Bool = true, takeOver: Int? = nil, controls: [Control]? = nil,
+                deviceName: String? = nil) {
         self.clientId = clientId
         self.keyedUrls = keyedUrls
         self.takeOver = takeOver
+        self.controls = controls
+        self.deviceName = deviceName
     }
 }
 

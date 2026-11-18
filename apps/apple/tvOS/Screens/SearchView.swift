@@ -4,8 +4,12 @@ import SwiftUI
 
 /// Search on Apple TV: the system's keyboard and field at the top, the
 /// profile's recent searches while nothing is typed, then the results in
-/// rows the focus moves down through: People, Movies, Shows, Seasons,
-/// Episodes, Artists, Albums, Tracks, with their counts.
+/// rows the focus moves down through: Movies, Shows, Seasons, Episodes,
+/// Artists, Albums, Tracks, Live TV and People, with their counts. Where
+/// the account may ask for titles, TMDB's titles the libraries don't have
+/// come last, in a Discover row with See all ("Nothing in your libraries
+/// matches" above it when that is all there is). Before anything is typed
+/// there is no way into Discover here: its tab is the way in.
 struct SearchView: View {
     @ObservedObject private var app: AppModel
     @StateObject private var model: SearchModel
@@ -48,12 +52,22 @@ struct SearchView: View {
                     }
                 }
             }
+            TVSearchDiscover(app: app, model: model)
         case .empty(let query):
-            message(SearchModel.noResults(query))
-                .accessibilityIdentifier("search.empty")
+            if model.nothingInLibraries {
+                Text(RequestWords.nothingInLibraries)
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, Metrics.gutter)
+                    .accessibilityIdentifier("search.empty")
+                TVSearchDiscover(app: app, model: model)
+            } else {
+                message(SearchModel.noResults(query))
+                    .accessibilityIdentifier("search.empty")
+            }
         case .failed(_, let why):
             VStack(spacing: 24) {
-                message("Search failed. \(asSentence(why))")
+                message(localized("Search failed. \(asSentence(why))"))
                 Button("Try again") { model.retry() }
                     .accessibilityIdentifier("state.retry")
             }
@@ -65,7 +79,7 @@ struct SearchView: View {
     /// The recent searches, newest first, then Clear.
     @ViewBuilder private var recent: some View {
         if model.recent.isEmpty {
-            message("Search for movies, shows, people and music.")
+            message(localized("Search for movies, shows, people and music."))
         } else {
             VStack(alignment: .leading, spacing: 20) {
                 Text("Recent searches")
@@ -95,6 +109,7 @@ struct SearchView: View {
         }
     }
 
+    /// `text`, in the language shown.
     private func message(_ text: String) -> some View {
         Text(text)
             .font(.title3)
@@ -107,7 +122,7 @@ struct SearchView: View {
     /// People found: round photos (or initials) with their names.
     private func peopleRow(_ group: SearchModel.Group) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("\(group.kind.title) (\(group.count))")
+            Text(verbatim: "\(group.kind.title) (\(group.count))")
                 .font(.headline)
                 .accessibilityAddTraits(.isHeader)
                 .padding(.horizontal, Metrics.gutter)
@@ -145,6 +160,74 @@ struct SearchView: View {
     }
 }
 
+/// TMDB's titles for the query the libraries don't have, in a row with
+/// See all (the grid of every title found); empty tiles while they are
+/// read, and why with Retry when TMDB couldn't be searched.
+private struct TVSearchDiscover: View {
+    let app: AppModel
+    @ObservedObject var model: SearchModel
+
+    var body: some View {
+        switch model.discover {
+        case .hidden:
+            EmptyView()
+        case .ready(_, let cards) where cards.isEmpty:
+            EmptyView()
+        case .ready(_, let cards):
+            CardRow(identifier: "search.discover.row", title: RequestWords.discover, items: cards,
+                    seeAll: model.discoverAll.map { all in { app.shell.open(all) } }) { card, focus in
+                DiscoverCardView(app: app, card: card, identifier: "search.discover.card.\(card.key)",
+                                 rowFocus: focus)
+            }
+        case .loading:
+            VStack(alignment: .leading, spacing: 0) {
+                heading
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: Metrics.tileSpacing) {
+                        ForEach(0..<6, id: \.self) { _ in
+                            PlaceholderTile(shape: .poster, width: Metrics.tileWidth(.poster))
+                        }
+                    }
+                    .padding(.horizontal, Metrics.gutter)
+                    .padding(.vertical, 32)
+                }
+                .scrollClipDisabled()
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("\(RequestWords.discover), loading")
+            .accessibilityIdentifier("search.discover.row")
+        case .failed(let words):
+            VStack(alignment: .leading, spacing: 20) {
+                heading
+                HStack(spacing: 40) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(words.title).font(.headline)
+                        if let body = words.body {
+                            Text(body).font(.callout).foregroundStyle(.secondary)
+                        }
+                    }
+                    if words.retry {
+                        Button(RequestWords.retry, action: model.retryDiscover)
+                            .accessibilityIdentifier("search.discover.retry")
+                    }
+                }
+                .padding(.horizontal, Metrics.gutter)
+            }
+            .focusSection()
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("search.discover.row")
+            .task(id: words) { announce(words.title) }
+        }
+    }
+
+    private var heading: some View {
+        Text(RequestWords.discover)
+            .font(.headline)
+            .accessibilityAddTraits(.isHeader)
+            .padding(.horizontal, Metrics.gutter)
+    }
+}
+
 /// Live TV's channels found, in a row: each plays in All channels.
 private struct TVSearchChannels: View {
     let app: AppModel
@@ -152,7 +235,7 @@ private struct TVSearchChannels: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("\(group.kind.title) (\(group.count))")
+            Text(verbatim: "\(group.kind.title) (\(group.count))")
                 .font(.title3.bold())
                 .accessibilityAddTraits(.isHeader)
                 .padding(.horizontal, Metrics.gutter)

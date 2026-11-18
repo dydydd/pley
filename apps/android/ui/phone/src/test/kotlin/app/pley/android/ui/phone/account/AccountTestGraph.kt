@@ -22,6 +22,7 @@ import app.pley.android.data.PlayItem
 import app.pley.android.data.PlayTarget
 import app.pley.android.data.PlaylistsRepository
 import app.pley.android.data.SearchRepository
+import app.pley.android.data.ServerAdmin
 import app.pley.android.data.ServersRepository
 import app.pley.android.data.Session
 import app.pley.android.data.SessionRepository
@@ -82,6 +83,9 @@ class AccountTestGraph : ScreensGraph {
     val music = RecordingMusic()
     val history = MutableStateFlow<Loadable<HistoryPage>>(Loadable.Ready(HistoryPage(20, (1..15L).map(::play)), fresh = true))
     val removed = mutableListOf<Long>()
+
+    /** The server Manage server's pages manage, and whether Me's row shows: none unless a test gives one. */
+    var admin: ServerAdmin = ServerAdmin.None
 
     override val device = DeviceProfile(FormFactor.Phone, fireTv = false, tier = Tier.T2, model = "test", totalRamBytes = 8L shl 30, lowRam = false)
     override val auth: AuthGraph = FakeAuthGraph()
@@ -177,6 +181,7 @@ class AccountTestGraph : ScreensGraph {
         override val people: PeopleRepository get() = unused()
         override val collections: CollectionsRepository get() = unused()
         override val playlists: PlaylistsRepository get() = unused()
+        override val admin: ServerAdmin get() = this@AccountTestGraph.admin
     }
 
     private fun unused(): Nothing = error("the account and music screens don't use this")

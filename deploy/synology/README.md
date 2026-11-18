@@ -19,7 +19,7 @@ doesn't run on DSM, whose C library is older than theirs.
    `https://packages.synocommunity.com`. Under **General**, set **Trust
    Level** to **Any publisher**: SynoCommunity's packages and Pley's aren't
    signed by Synology.
-2. **Install FFmpeg** from the Community tab: **ffmpeg7** (or **ffmpeg8**).
+2. **Install FFmpeg** from the Community tab: **ffmpeg8** (or **ffmpeg7**).
    For hardware transcoding on an Intel NAS, install **SynoCli Video
    Driver** too.
 3. **Install Pley.** Download `pley-server-<version>-synology-x86_64.spk`
@@ -35,9 +35,12 @@ doesn't run on DSM, whose C library is older than theirs.
    Shared Folder**, edit the folder that holds your media, and under
    **Permissions** choose **System internal user**, then give `pley`
    **Read only**. Do the same for each media folder.
-6. **Add your libraries.** Open Pley from the DSM desktop (or
-   `http://<your NAS>:7539`), go to **Settings → Libraries → Add**, and pick
-   a folder under `/volume1`, such as `/volume1/video/Movies`.
+6. **Add your libraries.** After the account, setup asks about your
+   server, then whether to bring over a Plex server or add your libraries
+   ([First start](../../docs/CONFIGURATION.md#first-start); later, open
+   Pley from the DSM desktop, or `http://<your NAS>:7539`, and go to
+   **Settings → Libraries → Add**). Libraries are folders under
+   `/volume1`, such as `/volume1/video/Movies`.
    [Naming your media](../docker/media/README.md) shows how Pley expects
    files to be named.
 

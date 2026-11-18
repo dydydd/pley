@@ -2,12 +2,15 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useQueryClient } from "@tanstack/react-query";
 import type HlsType from "hls.js";
 import type { ErrorData } from "hls.js";
-import type { ItemSummary, PlaybackMethod, PlaybackMode, ServerEvent } from "@/api/types";
+import type { Control, ItemSummary, PlaybackMethod, PlaybackMode, PlaybackState, ServerEvent } from "@/api/types";
 import { errorMessage } from "@/api/client";
 import { onServerEvent } from "@/api/events";
 import { invalidateWatchState } from "@/api/hooks";
+import { t } from "@/i18n";
 import { audioCaps, canPlayNativeHls } from "@/lib/caps";
+import { deviceFields } from "@/lib/castReceiver";
 import { loadHls } from "@/lib/hls";
+import { playingHere } from "@/lib/playingHere";
 import { getStored, writeStorage } from "@/lib/hooks";
 import {
   endSession,
@@ -25,23 +28,47 @@ export interface AudioPlayerApi {
   index: number;
   current: ItemSummary | null;
   playing: boolean;
+  /**
+   * The current track was heard to its end and nothing came after it: the
+   * queue ran out, or a sleep timer stopped the book at the end of a part.
+   */
+  ended: boolean;
   loading: boolean;
   volume: number;
   muted: boolean;
   shuffle: boolean;
   error: string | null;
-  playQueue: (tracks: ItemSummary[], startIndex?: number, opts?: { shuffle?: boolean }) => void;
+  /** Whether what plays is an audiobook's part: speed, skips and the sleep timer apply. */
+  book: boolean;
+  /** An audiobook's speed (music always plays at 1). */
+  rate: number;
+  sleep: SleepTimer | null;
+  /** `startAtMs`: where the first part starts (an audiobook taken up where it was left). */
+  playQueue: (tracks: ItemSummary[], startIndex?: number, opts?: { shuffle?: boolean; startAtMs?: number }) => void;
   toggle: () => void;
   pause: () => void;
   next: () => void;
   prev: () => void;
   jumpTo: (index: number) => void;
   seek: (seconds: number) => void;
+  /** Back (negative) or forward by `seconds`, within the part. */
+  skipBy: (seconds: number) => void;
+  setRate: (rate: number) => void;
+  setSleep: (sleep: SleepTimer | null) => void;
   setVolume: (v: number) => void;
   toggleMute: () => void;
   toggleShuffle: () => void;
   close: () => void;
 }
+
+/**
+ * Pauses an audiobook: at a time (`until`, ms since the epoch), or when
+ * `itemId` reaches `atMs` (the end of a chapter or of the part).
+ */
+export type SleepTimer = { until: number } | { itemId: number; atMs: number };
+
+/** An audiobook's speeds. */
+export const BOOK_RATES = [0.75, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
 
 export interface AudioTime {
   position: number;
@@ -53,7 +80,12 @@ const AudioContext = createContext<AudioPlayerApi | null>(null);
 const AudioTimeContext = createContext<AudioTime>({ position: 0, duration: 0, buffered: 0 });
 
 const PROGRESS_INTERVAL = 10_000;
+// While paused, a report now and then keeps the session listed: the server
+// counts a player it hasn't heard from in 90 s as gone, and remotes drop it.
+const PAUSED_HEARTBEAT = 30_000;
 
+/** The remote's commands music obeys. */
+const MUSIC_CONTROLS: Control[] = ["play", "pause", "seek", "skip", "next", "previous"];
 
 interface Session {
   sessionId: string;
@@ -64,10 +96,13 @@ interface Session {
   url: string;
   /** Last known playhead (ms); the element reads 0 while it is reset. */
   positionMs: number;
+  /** No longer this tab's (the remote lists it again as another device's, if it is still there). */
+  leave: () => void;
 }
 
 /** Report the final position of `s` and release it on the server. */
 function release(s: Session, keepalive = false, positionMs = s.positionMs): Promise<void> {
+  s.leave();
   return endSession(s.itemId, { session_id: s.sessionId, duration_ms: s.durationMs }, positionMs, keepalive);
 }
 
@@ -91,17 +126,26 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   // Bumped whenever playback of the current index must (re)start.
   const [playToken, setPlayToken] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [ended, setEnded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [shuffle, setShuffle] = useState(false);
   const [volume, setVolumeState] = useState(() => getStored("pley.audio.volume", 1));
   const [muted, setMuted] = useState(() => getStored("pley.audio.muted", false));
+  const [rate, setRateState] = useState(() => {
+    const stored = getStored("pley.audiobook.rate", 1);
+    return BOOK_RATES.includes(stored) ? stored : 1;
+  });
+  const [sleep, setSleepState] = useState<SleepTimer | null>(null);
   const [time, setTime] = useState<AudioTime>({ position: 0, duration: 0, buffered: 0 });
 
   const queueRef = useLatest(queue);
   const indexRef = useLatest(index);
+  const sleepRef = useLatest(sleep);
+  const endedRef = useLatest(ended);
 
   const current = queue[index] ?? null;
+  const book = current?.kind === "part";
 
   const destroyHls = () => {
     hlsRef.current?.destroy();
@@ -120,6 +164,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     startAtRef.current = 0;
     fallbackRef.current = null;
     recoveries.current.recreate = 0;
+    setEnded(false);
     setIndex(i);
     setPlayToken((t) => t + 1);
   }, []);
@@ -137,6 +182,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const stopPlayback = useCallback(
     (by: StoppedBy) => {
       // Nothing to release: the server has ended it.
+      sessionRef.current?.leave();
       sessionRef.current = null;
       hlsRef.current?.destroy();
       hlsRef.current = null;
@@ -150,8 +196,8 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       setLoading(false);
       const what =
         by.byAdmin === false
-          ? "Playback was stopped from another device."
-          : "Playback was stopped by the server's administrator.";
+          ? t("music.stoppedElsewhere", { ns: "player" })
+          : t("music.stoppedByAdmin", { ns: "player" });
       setError(by.message ? `${what} ${by.message}` : what);
       invalidateWatchState(qc);
     },
@@ -177,7 +223,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         else if (recoveries.current.recreate < 3) {
           recoveries.current.recreate += 1;
           restartAt(s.positionMs);
-        } else setError("Playback failed");
+        } else setError(t("music.failed", { ns: "player" }));
       });
     },
     [restartAt, stopPlayback],
@@ -212,7 +258,14 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     const acquired = (async () => {
       await Promise.all([released, previousStart]);
       if (cancelled) return null;
-      const info = await startPlayback({ item_id: itemId, caps: audioCaps(), start_ms: startMs, mode });
+      const info = await startPlayback({
+        item_id: itemId,
+        caps: audioCaps(),
+        start_ms: startMs,
+        mode,
+        controls: MUSIC_CONTROLS,
+        ...deviceFields(),
+      });
       if (cancelled) {
         await stopSession(info.session_id);
         return null;
@@ -224,6 +277,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         method: info.method,
         url: info.url,
         positionMs: startMs,
+        leave: playingHere(info.session_id),
       };
       return info;
     })();
@@ -242,7 +296,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         if (info.hls && !canPlayNativeHls(audio)) {
           const Hls = await loadHls();
           if (cancelled) return;
-          if (!Hls.isSupported()) throw new Error("This browser can't play HLS streams");
+          if (!Hls.isSupported()) throw new Error(t("music.noHls", { ns: "player" }));
           const hls = new Hls({ enableWorker: true, maxBufferLength: 60, startPosition: startMs / 1000 });
           hlsRef.current = hls;
           hls.on(Hls.Events.ERROR, (_e, data: ErrorData) => {
@@ -278,7 +332,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
               hls.recoverMediaError();
               return;
             }
-            setError("Playback failed");
+            setError(t("music.failed", { ns: "player" }));
           });
           hls.on(Hls.Events.FRAG_LOADED, () => {
             recoveries.current.recreate = 0;
@@ -319,7 +373,10 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     if (!audio) return;
     // The element reads 0 while a session (re)starts: only trust it once it has media.
     const hasMedia = () => !!sessionRef.current && audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
-    const onPlay = () => setPlaying(true);
+    const onPlay = () => {
+      setPlaying(true);
+      setEnded(false);
+    };
     const onPause = () => {
       setPlaying(false);
       const s = sessionRef.current;
@@ -357,8 +414,21 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         void release(s, false, dur).then(() => invalidateWatchState(qc));
       }
       const i = indexRef.current;
+      // A sleep timer due by now, or waiting for a point in the part that
+      // just ended, stops here: its check runs a few times a second, less
+      // in a hidden tab, and may not have come round before the end.
+      const timer = sleepRef.current;
+      if (timer && ("until" in timer ? Date.now() >= timer.until : timer.itemId === queueRef.current[i]?.id)) {
+        setSleepState(null);
+        setPlaying(false);
+        setEnded(true);
+        return;
+      }
       if (i + 1 < queueRef.current.length) goTo(i + 1);
-      else setPlaying(false);
+      else {
+        setPlaying(false);
+        setEnded(true);
+      }
     };
     const onError = () => {
       // hls.js reports its own errors; a reset element has no src.
@@ -369,7 +439,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         // Firefox without a sound output (none there, or it went away)
         // says it can't decode, and plays on in silence: another session
         // or a transcode wouldn't help.
-        setError("No sound output: check the speakers or headphones");
+        setError(t("music.noSound", { ns: "player" }));
         return;
       }
       const undecodable = code === MediaError.MEDIA_ERR_DECODE || code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED;
@@ -385,7 +455,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         recreateUnlessStopped(s);
         return;
       }
-      setError("Playback failed");
+      setError(t("music.failed", { ns: "player" }));
     };
     audio.addEventListener("play", onPlay);
     audio.addEventListener("pause", onPause);
@@ -405,22 +475,21 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("error", onError);
     };
-  }, [qc, goTo, restartAt, recreateUnlessStopped, indexRef, queueRef]);
+  }, [qc, goTo, restartAt, recreateUnlessStopped, indexRef, queueRef, sleepRef]);
 
-  // Periodic progress while playing. One answered 410 was stopped on the
-  // server, heard without the event stream (for a direct play, the only
-  // request that can tell).
+  // Periodic progress while playing, and now and then while paused. One
+  // answered 410 was stopped on the server, heard without the event stream
+  // (for a direct play, the only request that can tell).
   useEffect(() => {
-    if (!playing) return;
     const timer = window.setInterval(() => {
       const s = sessionRef.current;
-      if (!s) return;
+      if (!s || (!playing && audioRef.current?.ended)) return;
       void reportProgress(
         s.itemId,
         {
           position_ms: s.positionMs,
           duration_ms: s.durationMs || undefined,
-          state: "playing",
+          state: playing ? "playing" : "paused",
           session_id: s.sessionId,
         },
         false,
@@ -428,7 +497,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
           if (sessionRef.current === s) stopPlayback({ message: null, byAdmin: null });
         },
       );
-    }, PROGRESS_INTERVAL);
+    }, playing ? PROGRESS_INTERVAL : PAUSED_HEARTBEAT);
     return () => window.clearInterval(timer);
   }, [playing, stopPlayback]);
 
@@ -439,6 +508,38 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     audio.volume = volume;
     audio.muted = muted;
   }, [volume, muted]);
+
+  // Speed: an audiobook's, music at its own. Set as the default too, which
+  // a new source starts at (loading one resets the speed to it).
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const r = book ? rate : 1;
+    audio.defaultPlaybackRate = r;
+    audio.playbackRate = r;
+  }, [book, rate, current?.id, playToken]);
+
+  // The sleep timer: at its time, or near the point it waits for (a
+  // little before, as the element tells the time only a few times a
+  // second), the book pauses and the timer is done.
+  useEffect(() => {
+    if (!sleep) return;
+    const audio = audioRef.current;
+    const check = () => {
+      if (!audio || audio.paused) return;
+      const due =
+        "until" in sleep
+          ? Date.now() >= sleep.until
+          : queueRef.current[indexRef.current]?.id === sleep.itemId &&
+            audio.currentTime * 1000 >= sleep.atMs - (200 + 300 * audio.playbackRate);
+      if (due) {
+        audio.pause();
+        setSleepState(null);
+      }
+    };
+    const timer = window.setInterval(check, 250);
+    return () => window.clearInterval(timer);
+  }, [sleep, indexRef, queueRef]);
 
   // Report "stopped" when the tab goes away (keepalive requests, sent in parallel).
   useEffect(() => {
@@ -457,10 +558,14 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   }, [endCurrent]);
 
   const playQueue = useCallback(
-    (tracks: ItemSummary[], startIndex = 0, opts?: { shuffle?: boolean }) => {
+    (tracks: ItemSummary[], startIndex = 0, opts?: { shuffle?: boolean; startAtMs?: number }) => {
       if (tracks.length === 0) return;
       const start = Math.min(Math.max(startIndex, 0), tracks.length - 1);
       setOriginal(tracks);
+      // A new book's timer isn't the last one's.
+      if (tracks[start]?.kind !== "part" || tracks[start]?.parent_id !== queueRef.current[indexRef.current]?.parent_id) {
+        setSleepState(null);
+      }
       if (opts?.shuffle) {
         setQueue(shuffled(tracks));
         setShuffle(true);
@@ -469,17 +574,26 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         setQueue(tracks);
         setShuffle(false);
         goTo(start);
+        startAtRef.current = Math.max(0, Math.round(opts?.startAtMs ?? 0));
       }
     },
-    [goTo],
+    [goTo, indexRef, queueRef],
   );
 
   const toggle = useCallback(() => {
     const audio = audioRef.current;
     if (!audio || !queueRef.current.length) return;
+    // Ended (a sleep timer stopped it at the end of a part, or the queue
+    // ran out), its session is over: Play goes on to the next one, or
+    // starts the last again, with a session of its own.
+    if (audio.ended) {
+      const i = indexRef.current;
+      goTo(i + 1 < queueRef.current.length ? i + 1 : i);
+      return;
+    }
     if (audio.paused) void audio.play().catch(() => undefined);
     else audio.pause();
-  }, [queueRef]);
+  }, [goTo, indexRef, queueRef]);
 
   const pause = useCallback(() => {
     audioRef.current?.pause();
@@ -490,15 +604,40 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     if (i + 1 < queueRef.current.length) goTo(i + 1);
   }, [goTo, indexRef, queueRef]);
 
-  const prev = useCallback(() => {
+  const seek = useCallback(
+    (seconds: number) => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      const target = Math.max(0, seconds);
+      if (endedRef.current) {
+        // Heard to its end, the track's session is over: it starts again
+        // there, with one of its own (a chapter chosen, the seek bar, back),
+        // unless that is its end still (skipped forward), where it would
+        // only end again.
+        if (Number.isFinite(audio.duration) && target >= audio.duration - 1) return;
+        setTime((t) => ({ ...t, position: target }));
+        goTo(indexRef.current);
+        startAtRef.current = Math.round(target * 1000);
+        return;
+      }
+      setTime((t) => ({ ...t, position: target }));
+      audio.currentTime = target;
+      if (sessionRef.current) sessionRef.current.positionMs = Math.round(target * 1000);
+    },
+    [goTo, endedRef, indexRef],
+  );
+
+  /** The track before, or this one from its start a few seconds in (true: it started over). */
+  const prev = useCallback((): boolean => {
     const audio = audioRef.current;
     const i = indexRef.current;
     if ((audio && audio.currentTime > 3) || i === 0) {
-      if (audio) audio.currentTime = 0;
-      return;
+      seek(0);
+      return true;
     }
     goTo(i - 1);
-  }, [goTo, indexRef]);
+    return false;
+  }, [goTo, seek, indexRef]);
 
   const jumpTo = useCallback(
     (i: number) => {
@@ -508,14 +647,77 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     [goTo, queueRef],
   );
 
-  const seek = useCallback((seconds: number) => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    const target = Math.max(0, seconds);
-    audio.currentTime = target;
-    if (sessionRef.current) sessionRef.current.positionMs = Math.round(target * 1000);
-    setTime((t) => ({ ...t, position: target }));
+  // The user's remote, on another device: the queue acts on commands for
+  // the track it plays now, and reports at once, so the remote sees it. A
+  // new track reports as it starts.
+  useEffect(() => {
+    const reportNow = (s: Session, state: PlaybackState) => {
+      if (sessionRef.current !== s) return;
+      void reportProgress(s.itemId, {
+        position_ms: s.positionMs,
+        duration_ms: s.durationMs || undefined,
+        state,
+        session_id: s.sessionId,
+      });
+    };
+    return onServerEvent((ev: ServerEvent) => {
+      const audio = audioRef.current;
+      const s = sessionRef.current;
+      if (ev.type !== "player_command" || !audio || !s || ev.session_id !== s.sessionId) return;
+      const state = () => (audio.paused ? "paused" : "playing");
+      switch (ev.command) {
+        case "play":
+          if (audio.paused) {
+            void audio.play().then(
+              () => reportNow(s, "playing"),
+              () => undefined,
+            );
+          } else {
+            // Playing already: said again, so a remote a little behind settles.
+            reportNow(s, "playing");
+          }
+          break;
+        case "pause":
+          // Its pause event reports; paused already, it is said again.
+          if (!audio.paused) audio.pause();
+          else reportNow(s, "paused");
+          break;
+        case "seek":
+        case "skip": {
+          const ms = ev.command === "seek" ? ev.position_ms : ev.offset_ms === null ? null : s.positionMs + ev.offset_ms;
+          if (ms === null) break;
+          const end = s.durationMs || (Number.isFinite(audio.duration) ? audio.duration * 1000 : Number.POSITIVE_INFINITY);
+          seek(Math.min(Math.max(0, ms), end) / 1000);
+          reportNow(s, state());
+          break;
+        }
+        case "next":
+          next();
+          break;
+        case "previous":
+          if (prev()) reportNow(s, state());
+          break;
+      }
+    });
+  }, [next, prev, seek]);
+
+  const skipBy = useCallback(
+    (seconds: number) => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      const end = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : Number.POSITIVE_INFINITY;
+      seek(Math.min(Math.max(0, audio.currentTime + seconds), end));
+    },
+    [seek],
+  );
+
+  const setRate = useCallback((r: number) => {
+    if (!BOOK_RATES.includes(r)) return;
+    setRateState(r);
+    writeStorage("pley.audiobook.rate", r);
   }, []);
+
+  const setSleep = useCallback((s: SleepTimer | null) => setSleepState(s), []);
 
   const setVolume = useCallback((v: number) => {
     const clamped = Math.max(0, Math.min(1, v));
@@ -568,7 +770,9 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     setOriginal([]);
     setIndex(0);
     setPlaying(false);
+    setEnded(false);
     setError(null);
+    setSleepState(null);
     invalidateWatchState(qc);
   }, [endCurrent, qc]);
 
@@ -578,11 +782,15 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       index,
       current,
       playing,
+      ended,
       loading,
       volume,
       muted,
       shuffle,
       error,
+      book,
+      rate,
+      sleep,
       playQueue,
       toggle,
       pause,
@@ -590,16 +798,26 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       prev,
       jumpTo,
       seek,
+      skipBy,
+      setRate,
+      setSleep,
       setVolume,
       toggleMute,
       toggleShuffle,
       close,
     }),
     [
+      book,
+      rate,
+      sleep,
+      skipBy,
+      setRate,
+      setSleep,
       queue,
       index,
       current,
       playing,
+      ended,
       loading,
       volume,
       muted,

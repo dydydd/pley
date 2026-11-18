@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.height
@@ -31,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.pley.android.designsystem.PleyColors
@@ -42,7 +44,8 @@ import app.pley.android.designsystem.icon.PleyIcon
  * The primary action (design spec §3.3): Play, Resume, Continue in
  * browser. 48 dp tall, a pill in [accent][PleyColors.Accent] with
  * labelLarge in [onAccent][PleyColors.OnAccent], and an optional 20 dp
- * [icon]. Full width on compact item pages: pass `Modifier.fillMaxWidth()`.
+ * [icon] before the text or [trailingIcon] after it (Continue in browser's
+ * arrow out of a box). Full width on compact item pages: pass `Modifier.fillMaxWidth()`.
  */
 @Composable
 fun PrimaryButton(
@@ -51,6 +54,7 @@ fun PrimaryButton(
     modifier: Modifier = Modifier,
     icon: PleyIcon? = null,
     enabled: Boolean = true,
+    trailingIcon: PleyIcon? = null,
 ) {
     Button(
         onClick = onClick,
@@ -60,7 +64,7 @@ fun PrimaryButton(
         colors = ButtonDefaults.buttonColors(containerColor = PleyColors.Accent, contentColor = PleyColors.OnAccent),
         contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp),
     ) {
-        ButtonContent(text, icon)
+        ButtonContent(text, icon, trailingIcon)
     }
 }
 
@@ -76,6 +80,7 @@ fun TonalButton(
     modifier: Modifier = Modifier,
     icon: PleyIcon? = null,
     enabled: Boolean = true,
+    trailingIcon: PleyIcon? = null,
 ) {
     FilledTonalButton(
         onClick = onClick,
@@ -85,7 +90,7 @@ fun TonalButton(
         colors = ButtonDefaults.filledTonalButtonColors(containerColor = PleyColors.Surface3, contentColor = PleyColors.Fg),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
     ) {
-        ButtonContent(text, icon)
+        ButtonContent(text, icon, trailingIcon)
     }
 }
 
@@ -129,9 +134,10 @@ fun PleyIconButton(
 
 /**
  * One of the item page's actions (design spec §3.3): From start, Watched,
- * Playlist, Trailer. A column 72 dp wide at least (the page gives it its
- * slot), a 24 dp [icon] over a labelMedium [label] that shrinks rather than
- * break a word ([FittedLabel]), no container; pressed, a [surface3][PleyColors.Surface3]
+ * Playlist, Download, Trailer. A column 72 dp wide at least (the page gives it its
+ * slot), a 24 dp [icon] over a [label] in [labelStyle] (labelMedium, or the
+ * size its row shares) that shrinks rather than break a word
+ * ([FittedLabel]), no container; pressed, a [surface3][PleyColors.Surface3]
  * circle shows behind the icon. The touch target is 72 by 56 at least. [selected]
  * draws the icon in [accentBright][PleyColors.AccentBright] (watched).
  */
@@ -143,6 +149,27 @@ fun ActionButton(
     modifier: Modifier = Modifier,
     selected: Boolean = false,
     enabled: Boolean = true,
+    labelStyle: TextStyle = MaterialTheme.typography.labelMedium,
+) {
+    ActionButton(label, onClick, modifier, enabled, labelStyle) {
+        val tint = when {
+            !enabled -> PleyColors.Disabled
+            selected -> PleyColors.AccentBright
+            else -> PleyColors.Fg
+        }
+        Icon(icon, contentDescription = null, size = 24.dp, tint = tint)
+    }
+}
+
+/** An action whose [glyph], 24 dp, is drawn by the caller: Download's ring. */
+@Composable
+fun ActionButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    labelStyle: TextStyle = MaterialTheme.typography.labelMedium,
+    glyph: @Composable () -> Unit,
 ) {
     val interactions = remember { MutableInteractionSource() }
     val pressed by interactions.collectIsPressedAsState()
@@ -160,27 +187,27 @@ fun ActionButton(
                 .drawBehind { if (pressed) drawCircle(PleyColors.Surface3) },
             contentAlignment = Alignment.Center,
         ) {
-            val tint = when {
-                !enabled -> PleyColors.Disabled
-                selected -> PleyColors.AccentBright
-                else -> PleyColors.Fg
-            }
-            Icon(icon, contentDescription = null, size = 24.dp, tint = tint)
+            glyph()
         }
         Spacer(Modifier.height(2.dp))
         FittedLabel(
             label,
-            style = MaterialTheme.typography.labelMedium,
+            style = labelStyle,
             color = if (enabled) PleyColors.Fg else PleyColors.Disabled,
         )
     }
 }
 
 @Composable
-private fun ButtonContent(text: String, icon: PleyIcon?) {
+private fun RowScope.ButtonContent(text: String, icon: PleyIcon?, trailingIcon: PleyIcon? = null) {
     if (icon != null) {
         Icon(icon, contentDescription = null, size = 20.dp, tint = LocalContentColor.current)
         Spacer(Modifier.width(8.dp))
     }
-    Text(text, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    // Text first, so it shrinks before the icon after it does.
+    Text(text, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+    if (trailingIcon != null) {
+        Spacer(Modifier.width(8.dp))
+        Icon(trailingIcon, contentDescription = null, size = 20.dp, tint = LocalContentColor.current)
+    }
 }

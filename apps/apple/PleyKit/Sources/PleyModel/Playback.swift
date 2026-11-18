@@ -52,13 +52,17 @@ public struct PlaybackRequest: Codable, Hashable, Sendable {
     public var keepPrevious: Bool?
     /// The player can't send the Authorization header: its addresses carry a key.
     public var keyedUrls: Bool?
+    /// The remote's commands this player obeys (Remote control); `nil`: none.
+    public var controls: [Control]?
+    /// What remotes call this device; `nil`: the server names it from the User-Agent.
+    public var deviceName: String?
     /// What this device plays.
     public var caps: ClientCaps
 
     public init(itemId: Int, fileId: Int? = nil, audioIndex: Int? = nil, subtitleIndex: Int? = nil,
                 maxBitrate: Int? = nil, maxHeight: Int? = nil, startMs: Int? = nil, mode: PlaybackMode = .auto,
                 clientId: String? = nil, keepPrevious: Bool? = nil, keyedUrls: Bool? = nil,
-                caps: ClientCaps = ClientCaps()) {
+                controls: [Control]? = nil, deviceName: String? = nil, caps: ClientCaps = ClientCaps()) {
         self.itemId = itemId
         self.fileId = fileId
         self.audioIndex = audioIndex
@@ -70,6 +74,8 @@ public struct PlaybackRequest: Codable, Hashable, Sendable {
         self.clientId = clientId
         self.keepPrevious = keepPrevious
         self.keyedUrls = keyedUrls
+        self.controls = controls
+        self.deviceName = deviceName
         self.caps = caps
     }
 
@@ -86,6 +92,8 @@ public struct PlaybackRequest: Codable, Hashable, Sendable {
         clientId = try c.decodeIfPresent(String.self, forKey: .clientId)
         keepPrevious = try c.decodeIfPresent(Bool.self, forKey: .keepPrevious)
         keyedUrls = try c.decodeIfPresent(Bool.self, forKey: .keyedUrls)
+        controls = try c.decodeIfPresent([Control].self, forKey: .controls)
+        deviceName = try c.decodeIfPresent(String.self, forKey: .deviceName)
         caps = try c.value(.caps, or: ClientCaps())
     }
 }
@@ -167,6 +175,9 @@ public struct PlaybackInfo: Codable, Hashable, Sendable {
     /// How much later than the file's times the stream's timestamps are;
     /// `nil` when the file plays as it is.
     public var ptsOffsetMs: Int?
+    /// The server converts no video: the Quality menu offers the original
+    /// alone, and Automatic stays there.
+    public var originalOnly: Bool
 
     public init(sessionId: String, method: PlaybackMethod, url: String, hls: Bool, fileId: Int, durationMs: Int = 0) {
         self.sessionId = sessionId
@@ -181,6 +192,7 @@ public struct PlaybackInfo: Codable, Hashable, Sendable {
         reasons = []
         adaptive = false
         liveBitrate = false
+        originalOnly = false
     }
 
     public init(from decoder: any Decoder) throws {
@@ -203,6 +215,7 @@ public struct PlaybackInfo: Codable, Hashable, Sendable {
         adaptive = try c.value(.adaptive, or: false)
         liveBitrate = try c.value(.liveBitrate, or: false)
         ptsOffsetMs = try c.decodeIfPresent(Int.self, forKey: .ptsOffsetMs)
+        originalOnly = try c.value(.originalOnly, or: false)
     }
 }
 
@@ -297,14 +310,25 @@ public struct ProgressReport: Codable, Hashable, Sendable {
     /// How long ago the report was made, for one sent late: the server
     /// keeps whatever happened to the item since.
     public var ageMs: Int?
+    /// The tracks the player plays now, by stream index (`subtitleIndex`
+    /// `SessionTracks.off`: none), kept on the session for the profile's
+    /// remotes; `nil` leaves out what it doesn't say (music, a download).
+    public var audioIndex: Int?
+    public var subtitleIndex: Int?
+    /// The Quality menu's pick, by id ("auto", "8m"), kept on the session
+    /// for the profile's remotes; `nil` for music and a download.
+    public var quality: String?
 
     public init(positionMs: Int, durationMs: Int? = nil, state: ProgressState = .playing, sessionId: String? = nil,
-                ageMs: Int? = nil) {
+                ageMs: Int? = nil, audioIndex: Int? = nil, subtitleIndex: Int? = nil, quality: String? = nil) {
         self.positionMs = positionMs
         self.durationMs = durationMs
         self.state = state
         self.sessionId = sessionId
         self.ageMs = ageMs
+        self.audioIndex = audioIndex
+        self.subtitleIndex = subtitleIndex
+        self.quality = quality
     }
 }
 

@@ -7,7 +7,7 @@ use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
 use futures::FutureExt;
@@ -21,16 +21,16 @@ use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
 use super::items::item_or_404;
-use crate::auth::{AuthUser, SourceIp};
+use crate::auth::{AuthUser, CurrentToken, SourceIp};
 use crate::bandwidth::{self, Answer, Report, valid_kbps};
 use crate::catalog::{self, ItemRow};
 use crate::error::{ApiResult, AppError};
 use crate::events::ServerEvent;
 use crate::library::sidecar::EXTERNAL_INDEX_BASE;
 use crate::playback::{
-    Decision, Delivery, HLS_PTS_OFFSET_MS, Method, PlaybackInfo, PlaybackRequest, Session, SessionStatus,
-    TranscodeInfo, TranscodeSpec, decide, decide_with_audio, may_draw_pictures, new_media_key, picture_to_prepare,
-    sentence, subtitle_tracks, transcode_info, video_range_shown,
+    Decision, Delivery, Full, HLS_PTS_OFFSET_MS, Method, NOT_CONVERTED, PlaybackInfo, PlaybackRequest, Pool, Session,
+    SessionStatus, TranscodeInfo, TranscodeSpec, decide, decide_with_audio, may_draw_pictures, new_media_key,
+    picture_to_prepare, sentence, subtitle_tracks, transcode_info, video_range_shown,
 };
 use crate::state::AppState;
 use crate::streams;
@@ -57,6 +57,7 @@ fn label(row: &ItemRow) -> String {
             row.title
         ),
         "track" => format!("{} — {}", row.grandparent_title.as_deref().unwrap_or("?"), row.title),
+        "part" => format!("{} — {}", row.parent_title.as_deref().unwrap_or("?"), row.title),
         _ => match row.year {
             Some(y) => format!("{} ({y})", row.title),
             None => row.title.clone(),
@@ -97,11 +98,86 @@ async fn decide_picked(
     Ok(decision)
 }
 
+/// What a player gets when a file needs its video converted to play there
+/// and the server converts none (`transcode_video` is off): why it does,
+/// as the play's reasons or the transcoder's warnings have it.
+fn video_not_converted(why: impl Iterator<Item = String>) -> AppError {
+    let why: Vec<String> = why.filter(|reason| reason != NOT_CONVERTED).collect();
+    let needs = "video transcoding is off on this server, and this file needs it to play on this device";
+    AppError::ConflictAs(
+        "video_not_converted",
+        if why.is_empty() { needs.to_owned() } else { format!("{needs}. {}", why.join(" ")) },
+    )
+}
+
+/// Why `decision` needs its video converted, on a server that converts
+/// none: its own reasons, or the transcoder's, which makes new frames of a
+/// picture turned on its side rather than copy it (what it writes can't
+/// say the turn). `None` when the video is copied, or there is none.
+fn unwanted_conversion(req: &PlaybackRequest, decision: &Decision, info: Option<&MediaInfo>) -> Option<Vec<String>> {
+    let video = decision.video.as_ref().filter(|_| req.copy_video_only)?;
+    if video.mode == VideoMode::Transcode {
+        return Some(decision.reasons.clone());
+    }
+    let turned = info.and_then(|i| i.video()).is_some_and(|v| v.rotation_degrees() != 0);
+    turned.then(|| {
+        let mut reasons = decision.reasons.clone();
+        reasons.push("The picture is turned, which a copy can't say.".into());
+        reasons
+    })
+}
+
+/// What a play gets past a limit on streams (Settings → Transcoder), its
+/// stream needing a slot of `pool`.
+fn too_many_streams(pool: Pool, full: Full, total: u32, video: u32) -> AppError {
+    let (max, made) = match full {
+        Full::Total => (total, "transcodes"),
+        Full::Video => (video, "video transcodes"),
+    };
+    AppError::StreamsFull(pool, format!("the server is already running its maximum of {max} {made}"))
+}
+
+/// The subtitles a play starts with, as the user's remotes show them until
+/// its player says: those burned in, else those the user's choices pick
+/// (the item's `selected_subtitle`, which players start with), `-1` for
+/// none. `None` for a file without subtitles.
+async fn subtitles_shown(
+    state: &AppState,
+    user_id: i64,
+    row: &ItemRow,
+    streams: &[MediaStream],
+    decision: &Decision,
+) -> ApiResult<Option<i64>> {
+    if decision.burn_index.is_some() {
+        return Ok(decision.burn_index);
+    }
+    if !streams.iter().any(|s| s.kind == StreamKind::Subtitle) {
+        return Ok(None);
+    }
+    Ok(Some(subtitles_picked(state, user_id, row, streams).await?.unwrap_or(-1)))
+}
+
+/// The subtitles of `streams` that the user's choices pick for `row`
+/// (players start with them), `None` for none.
+pub(crate) async fn subtitles_picked(
+    state: &AppState,
+    user_id: i64,
+    row: &ItemRow,
+    streams: &[MediaStream],
+) -> ApiResult<Option<i64>> {
+    let pref = streams::load(&state.db, user_id, streams::scope(row)).await?;
+    let defaults = streams::defaults(&state.db, user_id).await?;
+    Ok(streams::resolve(pref.as_ref(), &defaults, streams, None).subtitle)
+}
+
 pub async fn start(
     State(state): State<AppState>,
     user: AuthUser,
+    headers: HeaderMap,
+    CurrentToken(token): CurrentToken,
     Json(mut req): Json<PlaybackRequest>,
 ) -> ApiResult<Json<PlaybackInfo>> {
+    let began = Instant::now();
     let row = item_or_404(&state, user.id, req.item_id).await?;
     // A transcoder older than master playlists can't name Dolby Vision
     // (or anything else) in one: the player gets what older servers gave.
@@ -113,7 +189,12 @@ pub async fn start(
     req.hdr_transcodes = state.transcoder.info().is_some_and(|info| info.capabilities.hdr_transcode);
     // fMP4 segments only from a transcoder that makes them.
     req.fmp4_segments = state.transcoder.info().is_some_and(|info| info.capabilities.fmp4_segments);
-    if !matches!(row.kind.as_str(), "movie" | "episode" | "track" | "extra") {
+    let settings = state.settings.get();
+    // Music and audiobooks have no video: a track or part is converted as
+    // ever, also one never analysed, whose streams aren't known to be sound
+    // alone.
+    req.copy_video_only = !settings.transcode_video && !matches!(row.kind.as_str(), "track" | "part");
+    if !matches!(row.kind.as_str(), "movie" | "episode" | "track" | "part" | "extra") {
         return Err(AppError::bad_request("this item cannot be played directly"));
     }
     let files = catalog::files_for_item(&state.db, row.id).await?;
@@ -125,6 +206,8 @@ pub async fn start(
     // and the network from here on: creating a transcode reads the file too,
     // before the session exists.
     let _starting = state.sessions.begin_start();
+    // A `.strm` file's media is looked at the first time it is played.
+    let file = crate::strm::ready(&state, file).await?;
     let info = file.media_info();
     let streams = file.streams();
     // No audio track named: the one the user's choices pick, not just the
@@ -133,17 +216,17 @@ pub async fn start(
     // sounds on its output), or for a file that streams anyway the one its
     // stream copies. `PlaybackInfo.audio_index` tells the player.
     let decision = decide_picked(&state, user.id, &row, &file, info.as_ref(), &streams, &mut req).await?;
+    // Before what the client plays now is ended: it goes on.
+    if let Some(why) = unwanted_conversion(&req, &decision, info.as_ref()) {
+        return Err(video_not_converted(why.into_iter()));
+    }
     // Picture subtitles the player draws from their own file beside a
     // stream: copied out of the media file from now on, rather than once
     // the player asks.
     let picture = if decision.method != Method::Direct && may_draw_pictures(&streams, &req.caps) {
         let chosen = match req.subtitle_index {
             Some(_) => None,
-            None => {
-                let pref = streams::load(&state.db, user.id, streams::scope(&row)).await?;
-                let defaults = streams::defaults(&state.db, user.id).await?;
-                streams::resolve(pref.as_ref(), &defaults, &streams, None).subtitle
-            }
+            None => subtitles_picked(&state, user.id, &row, &streams).await?,
         };
         picture_to_prepare(&streams, &req, &decision, chosen)
     } else {
@@ -158,6 +241,10 @@ pub async fn start(
     }
     let start_ms = req.start_ms.unwrap_or(0).max(0);
     let client_id = req.client_id.clone().filter(|c| !c.is_empty() && c.len() <= 128);
+    let device = super::remote::device_name(req.device_name.as_deref(), &headers);
+    let device_id = req.device_id.clone().or_else(|| super::remote::device_id_of(&user, token.as_deref()));
+    let device_kind = super::remote::device_kind_of(req.device_kind, &user, super::remote::user_agent(&headers));
+    let subtitles_at_start = subtitles_shown(&state, user.id, &row, &streams, &decision).await?;
 
     // A client plays one thing at a time: end what it played before (a
     // quality or audio switch, the next episode) so its transcode slot is
@@ -187,6 +274,11 @@ pub async fn start(
         session.app_grant = user.app.as_ref().map(|app| app.grant_id);
         session.compatibility_token = user.compatibility.map(|c| c.token_id);
         session.media_key = req.keyed_urls.then(new_media_key);
+        session.controls = req.controls.clone();
+        session.api = req.api;
+        session.device = device;
+        session.on_device(device_id, device_kind);
+        session.picked_tracks(decision.audio_index, subtitles_at_start);
         // The transcoder doesn't see direct plays: its background work waits
         // for the player's first reads too.
         if state.transcoder.is_available() {
@@ -196,12 +288,13 @@ pub async fn start(
             });
         }
         let session = state.sessions.insert(session);
-        state.events.send(ServerEvent::SessionsChanged);
+        state.events.send(ServerEvent::SessionsChanged { user_id: session.user_id });
         let url = match &session.media_key {
             // Named for its container: some players go by the extension.
             Some(key) => format!("/api/media/{key}/file.{}", container_extension(file.container.as_deref())),
             None => format!("/api/files/{}/stream", file.id),
         };
+        tracing::info!("playback of item {} starts directly, answered in {} ms", row.id, began.elapsed().as_millis());
         return Ok(Json(PlaybackInfo {
             session_id: session.id.clone(),
             method: Method::Direct,
@@ -221,20 +314,21 @@ pub async fn start(
             adaptive: false,
             live_bitrate: false,
             pts_offset_ms: None,
+            original_only: req.copy_video_only,
         }));
     }
 
-    let settings = state.settings.get();
     // Taken before the job is created (that takes seconds) and handed to the
     // session; given back if this request fails or the client goes away.
-    let Some(slot) = state.sessions.reserve_transcode(settings.max_transcodes as usize) else {
-        return Err(AppError::Unavailable(format!(
-            "the server is already running its maximum of {} transcodes",
-            settings.max_transcodes
-        )));
-    };
+    // Video transcodes are some of the streams: never more than all of them.
+    let (total, video) = (settings.max_transcodes, settings.max_video_transcodes.min(settings.max_transcodes));
+    let pool = Pool::of(decision.video.as_ref());
+    let mut slot = state
+        .sessions
+        .reserve_transcode(pool, total as usize, video as usize)
+        .map_err(|full| too_many_streams(pool, full, total, video))?;
     let job_request = JobRequest {
-        input: file.path.clone(),
+        input: crate::strm::input(&state, &file).await?,
         media: info,
         label: Some(label(&row)),
         owner: Some(user.username.clone()),
@@ -254,6 +348,25 @@ pub async fn start(
         segment_format: decision.segment_format,
     };
     let created = state.transcoder.create_job(&job_request).await.map_err(|err| for_viewer(&user, err))?;
+    // A copy the transcoder can only make by converting (a file whose
+    // keyframes it doesn't know yet): not on a server that converts no
+    // video, and elsewhere as one of the video transcodes, while there is
+    // room for one.
+    if created.video.as_ref().is_some_and(|v| v.mode == VideoMode::Transcode) {
+        let refused = if req.copy_video_only {
+            Some(video_not_converted(created.warnings.iter().map(|w| sentence(w))))
+        } else {
+            state
+                .sessions
+                .transcodes_video(&mut slot, video as usize)
+                .err()
+                .map(|full| too_many_streams(Pool::Video, full, total, video))
+        };
+        if let Some(refused) = refused {
+            let _ = state.transcoder.delete_job(&created.id).await;
+            return Err(refused);
+        }
+    }
     // Once the transcoder knows a playback starts: the copy waits for it.
     if let Some(index) = picture {
         prepare_picture_track(&state, &file, index, start_ms);
@@ -289,8 +402,13 @@ pub async fn start(
     session.app_grant = user.app.as_ref().map(|app| app.grant_id);
     session.compatibility_token = user.compatibility.map(|c| c.token_id);
     session.media_key = req.keyed_urls.then(new_media_key);
+    session.controls = req.controls.clone();
+    session.api = req.api;
+    session.device = device;
+    session.on_device(device_id, device_kind);
+    session.picked_tracks(decision.audio_index, subtitles_at_start);
     let session = state.sessions.insert_transcode(session, slot);
-    state.events.send(ServerEvent::SessionsChanged);
+    state.events.send(ServerEvent::SessionsChanged { user_id: session.user_id });
     // Players that read multivariant playlists learn the codecs (Dolby
     // Vision, above all) before the first segment; one that moves between
     // sizes learns them there.
@@ -302,6 +420,12 @@ pub async fn start(
         Some(key) => format!("/api/media/{key}/{playlist}"),
         None => format!("/api/playback/{}/{playlist}", session.id),
     };
+    tracing::info!(
+        "playback of item {} starts by {method:?} (job {}), answered in {} ms",
+        row.id,
+        created.id,
+        began.elapsed().as_millis()
+    );
     Ok(Json(PlaybackInfo {
         session_id: session.id.clone(),
         method,
@@ -328,6 +452,7 @@ pub async fn start(
         live_bitrate: method == Method::Transcode && state.transcoder.live_bitrate() && created.segment_format.is_ts(),
         // The MP4 muxer keeps the file's times as they are.
         pts_offset_ms: Some(if created.segment_format.is_ts() { HLS_PTS_OFFSET_MS } else { 0 }),
+        original_only: req.copy_video_only,
     }))
 }
 
@@ -386,7 +511,7 @@ pub async fn status(
 /// last words name the media file, an administrator's (as in `for_viewer`).
 pub(super) fn transcode_seen_by(user: &AuthUser, job: &JobStatus) -> TranscodeInfo {
     let mut info = transcode_info(job);
-    if !user.is_admin && info.last_error.is_some() {
+    if !user.administers() && info.last_error.is_some() {
         info.last_error = Some("the conversion failed".to_owned());
     }
     info
@@ -543,7 +668,8 @@ pub struct StopSession {
 
 /// `DELETE /api/sessions/{id}` with an optional `{ message }`: ends a
 /// playback session at once, from elsewhere than its player (the dashboard,
-/// another device). Administrators stop any session, others their own.
+/// another device). Administrators stop any session, as do pley's own apps
+/// allowed `activity` on their accounts; others their own.
 pub async fn stop_session(
     State(state): State<AppState>,
     user: AuthUser,
@@ -563,18 +689,22 @@ pub async fn stop_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Stops session `id` for `user` (an administrator: any session; anyone
-/// else: their own): its transcode ends, its player hears `session_stopped`
-/// and its next requests answer `410`. A session stopped already is fine.
+/// Stops session `id` for `user` (who oversees playback, see
+/// [`AuthUser::oversees_playback`]: any session; anyone else: their own):
+/// its transcode ends, its player hears `session_stopped` and its next
+/// requests answer `410`. A session stopped already is fine. A Live TV
+/// viewer's session is ended the same way.
 pub(crate) fn stop_by(state: &AppState, user: &AuthUser, id: &str, message: Option<String>) -> ApiResult<()> {
     let Some(session) = state.sessions.get(id) else {
         return match state.sessions.stopped(id) {
-            Some(stopped) if stopped.user_id == user.id || user.is_admin => Ok(()),
+            Some(stopped) if stopped.user_id == user.id || user.oversees_playback() => Ok(()),
             Some(_) => Err(AppError::forbidden("not your session")),
-            None => Err(AppError::not_found("no such session")),
+            None => {
+                state.live.tuners.stop(id, user, message).unwrap_or_else(|| Err(AppError::not_found("no such session")))
+            }
         };
     };
-    if session.user_id != user.id && !user.is_admin {
+    if session.user_id != user.id && !user.oversees_playback() {
         return Err(AppError::forbidden("not your session"));
     }
     let Some(session) = state.sessions.stop(id, message.clone()) else { return Ok(()) };
@@ -600,7 +730,7 @@ fn end_sessions(state: &AppState, sessions: Vec<Arc<Session>>) {
             }
         });
     }
-    state.events.send(ServerEvent::SessionsChanged);
+    state.events.sessions_changed(sessions.iter().map(|s| s.user_id));
 }
 
 /// The transcoder forgot the job (restart, expiry): create it again with the
@@ -737,11 +867,13 @@ pub async fn convert(
     let transcoder = state.transcoder.info();
     req.hdr_transcodes = transcoder.as_ref().is_some_and(|info| info.capabilities.hdr_transcode);
     req.download = true;
+    req.copy_video_only = !state.settings.get().transcode_video;
     let files = catalog::files_for_item(&state.db, row.id).await?;
     let file = match req.file_id {
         Some(id) => files.into_iter().find(|f| f.id == id).ok_or_else(|| AppError::not_found("file not found"))?,
         None => files.into_iter().next().ok_or_else(|| AppError::not_found("this item has no media file"))?,
     };
+    let file = crate::strm::ready(&state, file).await?;
     let info = file.media_info();
     let streams = file.streams();
     let decision = decide_picked(&state, user.id, &row, &file, info.as_ref(), &streams, &mut req).await?;
@@ -754,6 +886,9 @@ pub async fn convert(
             error: None,
             url: format!("/api/files/{}/stream", file.id),
         }));
+    }
+    if let Some(why) = unwanted_conversion(&req, &decision, info.as_ref()) {
+        return Err(video_not_converted(why.into_iter()));
     }
     // A player that opens no Matroska (QuickTime) gets MP4.
     let container = req.caps.download_container();
@@ -774,7 +909,7 @@ pub async fn convert(
         Some(_) => {}
     }
     let job = JobRequest {
-        input: file.path.clone(),
+        input: crate::strm::input(&state, &file).await?,
         media: info,
         label: Some(label(&row)),
         owner: Some(user.username.clone()),
@@ -873,7 +1008,7 @@ pub async fn hls_file(
 /// `init.mp4`, `{n}.ts`, `{n}.m4s`) of a transcode session, for `user`.
 async fn session_hls(state: &AppState, user: &AuthUser, session: &Arc<Session>, file: &str) -> ApiResult<Response> {
     if session.touch() {
-        state.events.send(ServerEvent::SessionsChanged);
+        state.events.send(ServerEvent::SessionsChanged { user_id: session.user_id });
     }
     if session.transcode.is_none() {
         return Err(AppError::not_found("not a transcode session"));
@@ -1013,11 +1148,56 @@ pub async fn keyed_media(
         )
             .into_response());
     }
-    // PGS subtitles as pictures, for a player that can't decode them
-    // (Roku's), which fetches them itself too.
     if let Some(name) = file.strip_prefix("subtitles-") {
         let row = visible_file(&state, &user, session.file_id).await?;
+        // A text track as WebVTT, for a player outside Pley (a Cast
+        // receiver) that fetches it itself, once.
+        if let Some(name) = name.strip_suffix(".vtt") {
+            // A segment of a stream's subtitle playlist (below).
+            if let Some((index, n)) = name.split_once('-') {
+                let number = |s: &str| s.parse::<i64>().ok().filter(|n| *n >= 0);
+                let (Some(index), Some(n)) = (number(index), number(n)) else {
+                    return Err(AppError::not_found("unknown file"));
+                };
+                text_stream_track(&row, &session, index)?;
+                if n.checked_mul(SUBTITLE_SEGMENT_MS).is_none_or(|from| from >= session.duration_ms.max(1)) {
+                    return Err(AppError::not_found("past the end"));
+                }
+                return text_segment(&state, &user, &row, index, n, stream_start_mpegts(&session)).await;
+            }
+            let index: i64 = name.parse().map_err(|_| AppError::not_found("unknown file"))?;
+            let text = row
+                .streams()
+                .iter()
+                .any(|s| s.index == index && s.kind == StreamKind::Subtitle && s.text_based != Some(false));
+            if !text {
+                return Err(AppError::not_found("no text subtitle track has this index"));
+            }
+            return text_track(&state, &user, &row, index, query.offset_ms.unwrap_or(0), KEYED_VTT_WAIT).await;
+        }
+        // The track as an HLS subtitle playlist, for a player that only
+        // shows subtitles named in the stream's playlist (an AirPlay
+        // device's).
+        if let Some(index) = name.strip_suffix(".m3u8") {
+            let index: i64 = index.parse().map_err(|_| AppError::not_found("unknown file"))?;
+            text_stream_track(&row, &session, index)?;
+            return Ok(playlist_response(subtitle_playlist(index, session.duration_ms)));
+        }
+        // PGS subtitles as pictures, for a player that can't decode them
+        // (Roku's), which fetches them itself too.
         return keyed_pictures(&state, &user, row, name, query.at()).await;
+    }
+    // The stream's playlist with text track `index` beside it, for a
+    // player that shows only subtitles a stream's playlist names.
+    if let Some(index) = file.strip_prefix("subtitled-").and_then(|name| name.strip_suffix(".m3u8")) {
+        let index: i64 = index.parse().map_err(|_| AppError::not_found("unknown file"))?;
+        let row = visible_file(&state, &user, session.file_id).await?;
+        let track = text_stream_track(&row, &session, index)?;
+        let name = track.title.clone().or_else(|| track.language.clone()).unwrap_or_else(|| format!("{index}"));
+        let language = track.language.as_deref().and_then(crate::languages::language).map(|(_, two, _)| two);
+        let bandwidth = row.bitrate.filter(|b| *b > 0).unwrap_or(DEFAULT_BANDWIDTH);
+        let fmp4 = stream_start_mpegts(&session) == 0;
+        return Ok(playlist_response(subtitled_master(index, &name, language, bandwidth, fmp4)));
     }
     if session.transcode.is_some() {
         return session_hls(&state, &user, &session, &file).await;
@@ -1027,13 +1207,84 @@ pub async fn keyed_media(
         return Err(AppError::not_found("unknown file"));
     }
     if session.touch() {
-        state.events.send(ServerEvent::SessionsChanged);
+        state.events.send(ServerEvent::SessionsChanged { user_id: session.user_id });
     }
     let row = visible_file(&state, &user, session.file_id).await?;
+    if row.is_strm() {
+        return crate::strm::serve(&state, &row, request.method(), request.headers()).await;
+    }
     let mut response = serve_library_file(&row.path, request.method(), request.headers()).await?;
     // Never cached anywhere: the address carries a key.
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
     Ok(response)
+}
+
+/// What a stream's playlist says it carries when the file's bit rate isn't
+/// known: a player that has only one stream to pick plays it whatever this
+/// says.
+const DEFAULT_BANDWIDTH: i64 = 20_000_000;
+
+/// Where a transcode session's stream starts, in the 90 kHz time HLS
+/// subtitles are matched by: FFmpeg's MPEG-TS muxer puts every timestamp
+/// 1.4 s past the file's time (its default delay), and fMP4 segments are on
+/// the file's time.
+fn stream_start_mpegts(session: &Session) -> u64 {
+    let ts = session.transcode.as_ref().is_none_or(|spec| spec.request.segment_format.is_ts());
+    if ts { 126_000 } else { 0 }
+}
+
+/// Text subtitle track `index` of `row`, which `session` streams: an HLS
+/// subtitle playlist needs a stream's playlist beside it.
+fn text_stream_track(row: &catalog::FileRow, session: &Session, index: i64) -> ApiResult<MediaStream> {
+    if session.transcode.is_none() {
+        return Err(AppError::not_found("not a stream"));
+    }
+    row.streams()
+        .into_iter()
+        .find(|s| s.index == index && s.kind == StreamKind::Subtitle && s.text_based != Some(false))
+        .ok_or_else(|| AppError::not_found("no text subtitle track has this index"))
+}
+
+/// A playlist as the stream's are answered.
+fn playlist_response(text: String) -> Response {
+    ([(header::CONTENT_TYPE, HlsFile::Playlist.content_type()), (header::CACHE_CONTROL, "no-cache")], text)
+        .into_response()
+}
+
+/// The text track `index` of a title `duration_ms` long, as an HLS subtitle
+/// playlist of [`SUBTITLE_SEGMENT_MS`] segments of WebVTT, timed to the
+/// stream.
+fn subtitle_playlist(index: i64, duration_ms: i64) -> String {
+    let duration_ms = duration_ms.max(1);
+    let mut out = format!(
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n",
+        SUBTITLE_SEGMENT_MS / 1000
+    );
+    let mut n = 0;
+    while n * SUBTITLE_SEGMENT_MS < duration_ms {
+        let length = (duration_ms - n * SUBTITLE_SEGMENT_MS).min(SUBTITLE_SEGMENT_MS);
+        out.push_str(&format!("#EXTINF:{:.3},\nsubtitles-{index}-{n}.vtt\n", length as f64 / 1000.0));
+        n += 1;
+    }
+    out.push_str("#EXT-X-ENDLIST\n");
+    out
+}
+
+/// A stream (`fmp4`: of fMP4 segments) with text track `index` beside it,
+/// shown at once: named `name`, in `language` (ISO 639-1), and
+/// `bandwidth` bits a second for the stream.
+fn subtitled_master(index: i64, name: &str, language: Option<&str>, bandwidth: i64, fmp4: bool) -> String {
+    // Quoted strings in a playlist can't hold quotes or line breaks.
+    let name: String = name.chars().filter(|c| *c != '"' && !c.is_control()).collect();
+    let language = language.map(|l| format!("LANGUAGE=\"{l}\",")).unwrap_or_default();
+    // fMP4 segments need version 7.
+    let version = if fmp4 { 7 } else { 3 };
+    format!(
+        "#EXTM3U\n#EXT-X-VERSION:{version}\n#EXT-X-INDEPENDENT-SEGMENTS\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subtitles\",NAME=\"{name}\",{language}DEFAULT=YES,AUTOSELECT=YES,\
+         URI=\"subtitles-{index}.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH={bandwidth},SUBTITLES=\"subtitles\"\nindex.m3u8\n"
+    )
 }
 
 /// What a keyed session's file's PGS track `index` shows, for a player that
@@ -1361,6 +1612,9 @@ pub async fn stream_file(
     request: Request,
 ) -> ApiResult<Response> {
     let file = visible_file(&state, &user, id).await?;
+    if file.is_strm() {
+        return crate::strm::serve(&state, &file, request.method(), request.headers()).await;
+    }
     let mut response = serve_library_file(&file.path, request.method(), request.headers()).await?;
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=3600"));
     Ok(response)
@@ -1424,7 +1678,7 @@ pub(crate) async fn serve_library_file(
     };
     let mut response = Response::new(body);
     *response.status_mut() = status;
-    let content_type = mime_guess::from_path(path).first_raw().unwrap_or("application/octet-stream");
+    let content_type = stream_type(std::path::Path::new(path));
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(count));
@@ -1490,9 +1744,70 @@ pub async fn subtitles(
         .and_then(|n| n.parse().ok())
         .ok_or_else(|| AppError::not_found("unknown subtitle file"))?;
     let file = visible_file(&state, &user, id).await?;
-    let (sidecar, version) = subtitle_source(&state, &file, index).await?;
-    let offset = query.offset_ms.unwrap_or(0).clamp(-webvtt::MAX_OFFSET_MS, webvtt::MAX_OFFSET_MS);
+    text_track(&state, &user, &file, index, query.offset_ms.unwrap_or(0), Duration::ZERO).await
+}
+
+/// Reads text track `index` of `file` whole ahead of a player outside Pley
+/// asking for it (a cast), waiting up to `wait`: whether it is whole.
+pub(crate) async fn prepare_text_track(
+    state: &AppState,
+    user: &AuthUser,
+    file_id: i64,
+    index: i64,
+    wait: Duration,
+) -> bool {
+    let Ok(Some(file)) = catalog::file(&state.db, file_id).await else { return false };
+    let answer = text_track(state, user, &file, index, 0, wait).await;
+    answer.is_ok_and(|r| r.headers().get("x-pley-complete").is_none_or(|v| v != "0"))
+}
+
+/// How long a keyed `.vtt` answer waits for its whole track: a player
+/// outside Pley (a Cast receiver) reads a text track once, as it turns it
+/// on, and never asks again for the rest.
+const KEYED_VTT_WAIT: Duration = Duration::from_secs(8);
+
+/// Text track `index` of `file` (in it, next to it or added) as WebVTT,
+/// moved by `offset_ms`. An embedded track still being read out of a big
+/// file comes as far as it is read, with `X-Pley-Complete: 0`, after
+/// waiting up to `wait` for the rest; the player asks again.
+async fn text_track(
+    state: &AppState,
+    user: &AuthUser,
+    file: &catalog::FileRow,
+    index: i64,
+    offset_ms: i64,
+    wait: Duration,
+) -> ApiResult<Response> {
+    let offset = offset_ms.clamp(-webvtt::MAX_OFFSET_MS, webvtt::MAX_OFFSET_MS);
     let moved = |text: String| if offset == 0 { text } else { webvtt::shift(&text, offset) };
+    let (text, complete) = track_text(state, user, file, index, wait, |_| false).await?;
+    if complete {
+        return Ok(vtt(moved(text)));
+    }
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/vtt; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::HeaderName::from_static(SUBTITLES_COMPLETE_HEADER), "0"),
+        ],
+        moved(text),
+    )
+        .into_response())
+}
+
+/// Text track `index` of `file` as WebVTT, and whether it is whole. An
+/// embedded track still being read out of a big file (minutes for a big
+/// one on a network share) comes as far as it is read once that is
+/// `enough`, or after waiting up to `wait` for the rest.
+async fn track_text(
+    state: &AppState,
+    user: &AuthUser,
+    file: &catalog::FileRow,
+    index: i64,
+    wait: Duration,
+    enough: impl Fn(&str) -> bool,
+) -> ApiResult<(String, bool)> {
+    let (sidecar, version) = subtitle_source(state, file, index).await?;
     let cache =
         state.config.cache_dir().join("subtitles").join(format!("{}_{}_{}{version}.vtt", file.id, index, file.mtime));
     // Anything but WebVTT is a file cut short by an earlier version (written
@@ -1500,33 +1815,58 @@ pub async fn subtitles(
     if let Ok(text) = tokio::fs::read_to_string(&cache).await
         && text.starts_with("WEBVTT")
     {
-        return Ok(vtt(moved(text)));
+        return Ok((text, true));
     }
     let Some(path) = sidecar else {
-        // An embedded track: the cues found so far, at once, while the rest
-        // of the file is read (minutes for a big one on a network share).
-        // The player asks again until it has them all.
-        let (text, complete) =
-            state.transcoder.subtitles_so_far(&file.path, index).await.map_err(|err| for_viewer(&user, err))?;
+        let input = crate::strm::input(state, file).await?;
+        let started = Instant::now();
+        let (text, complete) = loop {
+            let (text, complete) =
+                state.transcoder.subtitles_so_far(&input, index).await.map_err(|err| for_viewer(user, err))?;
+            if complete || enough(&text) || started.elapsed() >= wait {
+                break (text, complete);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        };
         if complete {
             cache_subtitles(&cache, text.as_bytes()).await;
-            return Ok(vtt(moved(text)));
         }
-        return Ok((
-            [
-                (header::CONTENT_TYPE, "text/vtt; charset=utf-8"),
-                (header::CACHE_CONTROL, "no-store"),
-                (header::HeaderName::from_static(SUBTITLES_COMPLETE_HEADER), "0"),
-            ],
-            moved(text),
-        )
-            .into_response());
+        return Ok((text, complete));
     };
     let transcoder = state.transcoder.clone();
     let made = extract_once(cache, async move { Ok(transcoder.subtitles(&path, None).await?.into_bytes()) })
         .await
-        .map_err(|err| for_viewer(&user, err))?;
-    Ok(vtt(moved(String::from_utf8_lossy(&made).into_owned())))
+        .map_err(|err| for_viewer(user, err))?;
+    Ok((String::from_utf8_lossy(&made).into_owned(), true))
+}
+
+/// How long a stream's subtitle segment is (`subtitles-{index}-{n}.vtt`).
+const SUBTITLE_SEGMENT_MS: i64 = 30_000;
+/// How long a subtitle segment waits for the track to be read past it: a
+/// cast resumed far into a big file asks for its first segments before
+/// the read gets there (which reads from the start), and never again.
+/// Later segments are asked for ahead of time, so the wait doesn't hold
+/// the picture up.
+const SEGMENT_WAIT: Duration = Duration::from_secs(20);
+
+/// Segment `n` of text track `index` of `file`, for a stream's subtitle
+/// playlist: its cues within the segment's time, timed to the stream by
+/// `mpegts`. A track still being read waits until it is read past the
+/// segment, up to [`SEGMENT_WAIT`]: the player fetches each segment once,
+/// those it reaches first first, while the rest of the file is read.
+async fn text_segment(
+    state: &AppState,
+    user: &AuthUser,
+    file: &catalog::FileRow,
+    index: i64,
+    n: i64,
+    mpegts: u64,
+) -> ApiResult<Response> {
+    // `n` is checked against the length already: no overflow.
+    let (from, to) = (n * SUBTITLE_SEGMENT_MS, (n + 1) * SUBTITLE_SEGMENT_MS);
+    let read_past = |text: &str| webvtt::last_start_ms(text).is_some_and(|last| last >= to);
+    let (text, _) = track_text(state, user, file, index, SEGMENT_WAIT, read_past).await?;
+    Ok(vtt(webvtt::with_timestamp_map(&webvtt::between(&text, from, to), mpegts)))
 }
 
 /// Where subtitle `index` of `file` comes from: a sidecar's path (`None`:
@@ -1712,7 +2052,7 @@ async fn picture_source(
         state.config.cache_dir().join("subtitles").join(format!("{}_{}_{}{version}.mks", file.id, index, file.mtime));
     Ok(match sidecar {
         Some(path) => (cache, path, None),
-        None => (cache, file.path.clone(), Some(index)),
+        None => (cache, crate::strm::input(state, file).await?, Some(index)),
     })
 }
 
@@ -1908,6 +2248,15 @@ async fn cache_subtitles(path: &std::path::Path, data: &[u8]) {
     }
 }
 
+/// The type a file is sent as. `.m4b` audiobooks are sent as the MP4
+/// audio they are: browsers play `audio/mp4`, and don't know `audio/m4b`.
+fn stream_type(path: &std::path::Path) -> &'static str {
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("m4b")) {
+        return "audio/mp4";
+    }
+    mime_guess::from_path(path).first_raw().unwrap_or("application/octet-stream")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1988,6 +2337,26 @@ mod tests {
         assert_eq!(none.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(none.headers()[header::CONTENT_RANGE], "bytes */10");
         assert_eq!(none.headers()[SUBTITLES_COMPLETE_HEADER], "0");
+    }
+
+    #[test]
+    fn a_text_track_goes_beside_a_stream_in_its_playlist() {
+        let master = subtitled_master(3, "English \"SDH\"\n", Some("en"), 8_000_000, false);
+        assert_eq!(
+            master,
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-INDEPENDENT-SEGMENTS\n\
+             #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subtitles\",NAME=\"English SDH\",LANGUAGE=\"en\",DEFAULT=YES,\
+             AUTOSELECT=YES,URI=\"subtitles-3.m3u8\"\n\
+             #EXT-X-STREAM-INF:BANDWIDTH=8000000,SUBTITLES=\"subtitles\"\nindex.m3u8\n"
+        );
+        assert!(subtitled_master(3, "3", None, 1, true).starts_with("#EXTM3U\n#EXT-X-VERSION:7\n"));
+        assert!(!subtitled_master(3, "3", None, 1, true).contains("LANGUAGE"));
+        assert_eq!(
+            subtitle_playlist(3, 75_500),
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:30\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n\
+             #EXTINF:30.000,\nsubtitles-3-0.vtt\n#EXTINF:30.000,\nsubtitles-3-1.vtt\n#EXTINF:15.500,\nsubtitles-3-2.vtt\n\
+             #EXT-X-ENDLIST\n"
+        );
     }
 
     #[test]

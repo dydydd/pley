@@ -3,6 +3,7 @@ package app.pley.android.player.queue
 import app.pley.android.data.LocalMedia
 import app.pley.android.model.ItemKind
 import app.pley.android.model.ItemSummary
+import app.pley.android.model.format.FormatWords
 import app.pley.android.model.format.episodeLabel
 import app.pley.android.model.format.isPlayableVideo
 import app.pley.android.network.PleyApi
@@ -30,6 +31,7 @@ class NextUp(private val api: PleyApi, private val local: LocalMedia = LocalMedi
     suspend fun after(itemId: Long, kind: ItemKind, queue: PlayQueue?, fromDownload: Boolean = false): ItemSummary? = when (queue) {
         is PlayQueue.Playlist -> nextIn(api.playlist(queue.playlistId).entries.map { it.item }, itemId)
         is PlayQueue.Collection -> nextIn(api.collection(queue.collectionId).items, itemId)
+        is PlayQueue.MergedCollection -> nextIn(api.mergedCollection(queue.collectionIds).items, itemId)
         null -> when {
             kind != ItemKind.Episode -> null
             fromDownload -> nextAway(itemId)
@@ -63,7 +65,8 @@ class NextUp(private val api: PleyApi, private val local: LocalMedia = LocalMedi
         /** Where [next] starts: from the start when watched, else its resume point. */
         fun startOf(next: ItemSummary): Long = if (next.userState.watched) 0 else next.userState.positionMs
 
-        /** "S1 E2" for an episode, `null` otherwise. */
-        fun labelOf(next: ItemSummary): String? = if (next.kind == ItemKind.Episode) episodeLabel(next).ifEmpty { null } else null
+        /** "S1 · E2" for an episode, in [words]; `null` otherwise. */
+        fun labelOf(next: ItemSummary, words: FormatWords): String? =
+            if (next.kind == ItemKind.Episode) episodeLabel(next, words).ifEmpty { null } else null
     }
 }

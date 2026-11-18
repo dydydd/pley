@@ -24,7 +24,7 @@ data class Library(
     val id: Long,
     val name: String,
     val kind: LibraryKind,
-    /** Where the server keeps the media: always empty for an app's token. */
+    /** Where the server keeps the media: empty for an app's token, but for one that manages the server; never saved on the device. */
     val paths: List<String> = emptyList(),
     /** Top-level items: movies, shows or artists. */
     val itemCount: Int = 0,
@@ -97,7 +97,8 @@ enum class ResolutionFilter(override val wire: String, val label: String) : Wire
  * The `dynamic_range` of GET /api/libraries/{id}/items: a title's best
  * file's (a show's best episode's). [Hdr] is any but SDR. [label] is how
  * every app names it: HDR10 and HDR10+ as plain "HDR" and "HDR+", as on
- * the posters.
+ * the posters; [Hdr]'s in English (dynamicRangeFilterLabel words it in
+ * the language shown).
  */
 enum class DynamicRangeFilter(override val wire: String, val label: String) : WireEnum {
     Hdr("hdr", "Any HDR"),

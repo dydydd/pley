@@ -17,6 +17,10 @@ public enum ShellSection: Hashable, Codable, Sendable {
     /// Apple TV's Now Playing tab, while music has a queue. iPhone, iPad
     /// and the Mac show a mini player instead.
     case nowPlaying
+    /// Apple TV's way into requests, after Home: Discover where the account
+    /// may ask, else Your requests (Requests for managers). iPhone, iPad
+    /// and the Mac have them under Me.
+    case requests
 
     /// How the section is kept between launches: `home`, `library:3`.
     public var key: String {
@@ -29,6 +33,7 @@ public enum ShellSection: Hashable, Codable, Sendable {
         case .settings: "settings"
         case .liveTv: "liveTv"
         case .nowPlaying: "nowPlaying"
+        case .requests: "requests"
         case .library(let id): "library:\(id)"
         }
     }
@@ -44,6 +49,7 @@ public enum ShellSection: Hashable, Codable, Sendable {
         case "settings": self = .settings
         case "liveTv": self = .liveTv
         case "nowPlaying": self = .nowPlaying
+        case "requests": self = .requests
         default:
             guard key.hasPrefix("library:"), let id = Int(key.dropFirst("library:".count)) else { return nil }
             self = .library(id)
@@ -59,6 +65,8 @@ public enum Screen: Hashable, Codable, Sendable {
     case libraries
     case collections(libraryId: Int)
     case collection(Int)
+    /// A Home row of several libraries' collections of one title, opened together.
+    case mergedCollection([Int])
     case person(Int)
     case artist(Int)
     /// An album, with the track it was opened from.
@@ -69,6 +77,15 @@ public enum Screen: Hashable, Codable, Sendable {
     case downloads, downloadSettings
     /// Live TV, opened from Libraries on iPhone.
     case liveTv
+    /// Requests: Discover's page, TMDB's titles matching a search (See
+    /// all), one of Discover's lists whole (a row's See all, on Apple TV),
+    /// a title's page (its season picker open with `pick`), and the list of
+    /// requests (everyone's, for managers).
+    case discover
+    case discoverResults(query: String)
+    case discoverList(DiscoverList)
+    case discoverTitle(TitleKind, tmdbId: Int, pick: Bool = false)
+    case requests
 
     /// The page `item` opens: music has its own pages; a track opens its
     /// album, an extra its movie's or show's page.
@@ -92,16 +109,42 @@ public enum Sheet: Hashable, Identifiable, Sendable {
     public var id: Self { self }
 }
 
+/// A toast's one button: Undo, Open, Sign in.
+public struct ToastAction {
+    public let label: String
+    /// The button's accessibility identifier.
+    public let identifier: String
+    public let run: @MainActor () -> Void
+
+    public init(_ label: String, identifier: String = "toast.action", run: @escaping @MainActor () -> Void) {
+        self.label = label
+        self.identifier = identifier
+        self.run = run
+    }
+
+    public static func undo(_ run: @escaping @MainActor () -> Void) -> ToastAction {
+        ToastAction(localized("Undo"), identifier: "toast.undo", run: run)
+    }
+}
+
 /// A short message at the bottom of the screen (top trailing on Apple TV),
-/// with an Undo while it shows.
+/// with a button while it shows; `error` ones say something went wrong.
 public struct Toast: Identifiable, Equatable {
+    public enum Style: Sendable { case plain, error }
+
     public let id = UUID()
     public let text: String
-    public let undo: (@MainActor () -> Void)?
+    public let action: ToastAction?
+    public let style: Style
 
-    public init(_ text: String, undo: (@MainActor () -> Void)? = nil) {
+    public init(_ text: String, action: ToastAction? = nil, style: Style = .plain) {
         self.text = text
-        self.undo = undo
+        self.action = action
+        self.style = style
+    }
+
+    public init(_ text: String, undo: (@MainActor () -> Void)?) {
+        self.init(text, action: undo.map(ToastAction.undo))
     }
 
     public static func == (a: Toast, b: Toast) -> Bool { a.id == b.id }
@@ -130,6 +173,11 @@ public final class ShellModel: ObservableObject {
     /// Live TV on the open server for this profile (`GET /api/live`);
     /// `nil` while not known. It shows when it is `available`.
     @Published public private(set) var liveTv: LiveSummary?
+    /// The ways into requests (Discover, and Your requests or Requests with
+    /// its number), from the summary; `none` while not known.
+    @Published public private(set) var requestsEntry = RequestsEntry.none
+    /// Requests' summary was read: Apple TV knows whether its tab shows.
+    private var requestsKnown = false
     /// Music has a queue: Apple TV shows its Now Playing tab.
     @Published public private(set) var nowPlaying = false
     /// iPhone and iPad: Now Playing shows, in a sheet over the shell.
@@ -166,11 +214,11 @@ public final class ShellModel: ObservableObject {
         self.tv = tv
         sections = Self.sections(tv: tv, libraries: [])
         let last = settings.lastSection.flatMap(ShellSection.init(key:))
-        // A library's section, and Live TV's, wait for the libraries and Live TV to be known, on Home.
+        // A library's section, Live TV's and requests', wait on Home for what decides whether they show.
         if case .library = last {
             restoring = last
             section = .home
-        } else if last == .liveTv {
+        } else if last == .liveTv || last == .requests {
             restoring = last
             section = .home
         } else {
@@ -187,23 +235,27 @@ public final class ShellModel: ObservableObject {
         #endif
     }
 
-    /// The tabs of a shell, with `libraries`, Live TV when it shows and
-    /// Now Playing while music has a queue. On Apple TV, at most
-    /// `maxTabs` (Android's rail rule), within `tabRoom` across the
-    /// screen: Search, Home, Live TV, the libraries, Playlists, Now Playing
-    /// and Settings. While they all fit each library has a tab; otherwise
-    /// the first that fit keep theirs and a Libraries tab takes the rest's
-    /// place.
-    public static func sections(tv: Bool, libraries: [Library], liveTv: Bool = false,
-                                nowPlaying: Bool = false) -> [ShellSection] {
+    /// The tabs of a shell, with `libraries`, Live TV when it shows, the
+    /// way into requests (`requests`) and Now Playing while music has a
+    /// queue. On Apple TV, at most `maxTabs` (Android's rail rule), within
+    /// `tabRoom` across the screen: Search, Home, Discover or the requests,
+    /// Live TV, the libraries, Playlists, Now Playing and Settings. While
+    /// they all fit each library has a tab; otherwise the first that fit
+    /// keep theirs and a Libraries tab takes the rest's place. With Live
+    /// TV, Now Playing and the way into requests all showing, nothing
+    /// gives way: Libraries is an eighth tab, and the bar scrolls (as
+    /// Android TV's rail does).
+    public static func sections(tv: Bool, libraries: [Library], liveTv: Bool = false, nowPlaying: Bool = false,
+                                requests: RequestsEntry = .none) -> [ShellSection] {
         guard tv else { return [.home, .libraries, .search, .playlists, .me] }
         // Search first, where tvOS puts it.
-        let start: [ShellSection] = [.search, .home] + (liveTv ? [.liveTv] : [])
+        let start: [ShellSection] = [.search, .home] + (requests.shows ? [.requests] : []) + (liveTv ? [.liveTv] : [])
         let end: [ShellSection] = [.playlists] + (nowPlaying ? [.nowPlaying] : []) + [.settings]
         let room = maxTabs - start.count - end.count
-        let taken = (start + end).reduce(0) { $0 + tabWidth($1, libraries: libraries) }
+        func width(_ section: ShellSection) -> Int { tabWidth(section, libraries: libraries, requests: requests) }
+        let taken = (start + end).reduce(0) { $0 + width($1) }
         func fits(_ middle: [ShellSection]) -> Bool {
-            middle.count <= room && taken + middle.reduce(0) { $0 + tabWidth($1, libraries: libraries) } <= tabRoom
+            middle.count <= room && taken + middle.reduce(0) { $0 + width($1) } <= tabRoom
         }
         let tabs = libraries.map { ShellSection.library($0.id) }
         if fits(tabs) { return start + tabs + end }
@@ -213,17 +265,24 @@ public final class ShellModel: ObservableObject {
     }
 
     /// How much of the bar `section`'s tab takes (`tabRoom`).
-    static func tabWidth(_ section: ShellSection, libraries: [Library]) -> Int {
+    static func tabWidth(_ section: ShellSection, libraries: [Library], requests: RequestsEntry = .none) -> Int {
         if symbolTabs.contains(section) { return tabPadding }
         let title = switch section {
-        case .home: "Home"
-        case .libraries: "Libraries"
-        case .playlists: "Playlists"
-        case .liveTv: "Live TV"
-        case .library(let id): libraries.first { $0.id == id }?.name ?? "Library"
-        default: "Settings"
+        case .home: localized("Home")
+        case .libraries: localized("Libraries")
+        case .playlists: localized("Playlists")
+        case .liveTv: localized("Live TV")
+        case .requests: requestsTitle(requests)
+        case .library(let id): libraries.first { $0.id == id }?.name ?? localized("Library")
+        default: localized("Settings")
         }
         return title.count + tabPadding
+    }
+
+    /// Apple TV's tab into requests: "Discover" where the account may ask,
+    /// else "Your requests" ("Requests" for managers).
+    public nonisolated static func requestsTitle(_ entry: RequestsEntry) -> String {
+        entry.discover ? RequestWords.discover : entry.requestsTitle
     }
 
     /// The sidebar's rows on iPad and Mac: Home, Live TV when it shows,
@@ -252,6 +311,21 @@ public final class ShellModel: ObservableObject {
         refreshSections()
     }
 
+    /// The ways into requests, as the summary last said; `known`, the
+    /// summary was read (Apple TV's requests tab, shown last, waits for it).
+    public func setRequestsEntry(_ entry: RequestsEntry, known: Bool = true) {
+        if known { requestsKnown = true }
+        guard entry != requestsEntry || restoring == .requests else { return }
+        let before = requestsEntry
+        requestsEntry = entry
+        // Apple TV's tab comes or goes, and its title and number take room in the bar.
+        if tv && (before.shows != entry.shows || before.discover != entry.discover
+                  || before.manage != entry.manage
+                  || restoring == .requests) {
+            refreshSections()
+        }
+    }
+
     /// The libraries, as last read: the sections follow them. A library
     /// section that went away goes back to Home.
     public func setLibraries(_ libraries: [Library]) {
@@ -270,9 +344,10 @@ public final class ShellModel: ObservableObject {
     }
 
     private func refreshSections() {
-        sections = Self.sections(tv: tv, libraries: libraries, liveTv: showsLiveTv, nowPlaying: nowPlaying)
-        // Waiting for what it needs: the libraries, or Live TV.
-        if let restoring, restoring == .liveTv ? liveTv == nil : libraries.isEmpty { return }
+        sections = Self.sections(tv: tv, libraries: libraries, liveTv: showsLiveTv, nowPlaying: nowPlaying,
+                                 requests: requestsEntry)
+        // Waiting for what it needs: the libraries, Live TV, or requests' summary.
+        if let restoring, waiting(for: restoring) { return }
         if let restoring {
             self.restoring = nil
             if shows(restoring) {
@@ -286,9 +361,18 @@ public final class ShellModel: ObservableObject {
         }
     }
 
+    /// Whether `section`, shown last, waits for what decides if it shows.
+    private func waiting(for section: ShellSection) -> Bool {
+        switch section {
+        case .liveTv: liveTv == nil
+        case .requests: !requestsKnown
+        default: libraries.isEmpty
+        }
+    }
+
     /// A library's name, for its tab or row.
     public func libraryName(_ id: Int) -> String {
-        libraries.first { $0.id == id }?.name ?? "Library"
+        libraries.first { $0.id == id }?.name ?? localized("Library")
     }
 
     /// The pages on top of `section`'s start.
@@ -322,8 +406,9 @@ public final class ShellModel: ObservableObject {
         open(Screen.page(of: item))
     }
 
-    /// The library page a row's See all goes to: the row's library, listed
-    /// as the row is; nothing for a row without one.
+    /// Where a row's title and See all go: its collection, or the merged
+    /// page of several; else the row's library, listed as the row is;
+    /// nothing for a row without one.
     public func seeAll(_ hub: Hub) {
         guard let screen = Self.seeAll(hub) else { return }
         open(screen)
@@ -331,6 +416,8 @@ public final class ShellModel: ObservableObject {
 
     /// Where `hub`'s See all goes, `nil` for a row without one.
     public nonisolated static func seeAll(_ hub: Hub) -> Screen? {
+        if hub.collectionIds.count == 1 { return .collection(hub.collectionIds[0]) }
+        if hub.collectionIds.count > 1 { return .mergedCollection(hub.collectionIds) }
         guard let library = hub.libraryId, let view = seeAllView(hub.key) else { return nil }
         return .library(library, view: view)
     }
@@ -361,6 +448,8 @@ public final class ShellModel: ObservableObject {
         paths = [:]
         libraries = []
         liveTv = nil
+        requestsEntry = .none
+        requestsKnown = false
         nowPlaying = false
         nowPlayingOpen = false
         sections = Self.sections(tv: tv, libraries: [])
@@ -384,9 +473,9 @@ public final class ShellModel: ObservableObject {
     /// TV ⌘L when it shows, Playlists ⌘2, then the libraries in the
     /// profile's order, the first seven ⌘3 to ⌘9. Search has ⌘F of its own.
     public var viewMenu: [MenuEntry] {
-        let fixed = [MenuEntry(title: "Home", section: .home, key: "1")]
-            + (showsLiveTv ? [MenuEntry(title: "Live TV", section: .liveTv, key: "l")] : [])
-            + [MenuEntry(title: "Playlists", section: .playlists, key: "2")]
+        let fixed = [MenuEntry(title: localized("Home"), section: .home, key: "1")]
+            + (showsLiveTv ? [MenuEntry(title: localized("Live TV"), section: .liveTv, key: "l")] : [])
+            + [MenuEntry(title: localized("Playlists"), section: .playlists, key: "2")]
         let libraries = libraries.enumerated().map { index, library in
             MenuEntry(title: library.name, section: .library(library.id),
                       key: index < 7 ? Character(String(index + 3)) : nil)
@@ -436,7 +525,15 @@ public final class ShellModel: ObservableObject {
 
     /// Shows `text` for 5 seconds, with Undo when `undo` is given.
     public func show(_ text: String, undo: (@MainActor () -> Void)? = nil) {
-        let toast = Toast(text, undo: undo)
+        show(Toast(text, undo: undo))
+    }
+
+    /// Shows `text` for 5 seconds, with `action`'s button; `error` says something went wrong.
+    public func show(_ text: String, action: ToastAction?, error: Bool = false) {
+        show(Toast(text, action: action, style: error ? .error : .plain))
+    }
+
+    public func show(_ toast: Toast) {
         self.toast = toast
         toastTask?.cancel()
         toastTask = Task { [weak self] in
@@ -446,11 +543,11 @@ public final class ShellModel: ObservableObject {
         }
     }
 
-    /// The toast's Undo.
-    public func undoToast() {
-        let undo = toast?.undo
+    /// The toast's button: Undo, Open.
+    public func runToastAction() {
+        let action = toast?.action
         dismissToast()
-        undo?()
+        action?.run()
     }
 
     public func dismissToast() {

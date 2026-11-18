@@ -47,17 +47,42 @@ pub enum LibraryWork {
 #[serde(default)]
 pub struct Settings {
     pub server_name: String,
+    /// The server language (an ISO 639-1 code of [`crate::i18n::LANGUAGES`]):
+    /// the server's own words, and devices in a language Pley doesn't have
+    /// (see [`crate::i18n`]). Empty: not chosen, which reads as English.
+    pub language: String,
     pub tmdb_api_key: String,
     pub metadata_language: String,
+    /// The country whose ratings Pley reads (ISO 3166-1 alpha-2, "NZ"):
+    /// which rating is taken from TMDB, how one without a country is read,
+    /// and the systems profiles' age limits are chosen from. Empty: the
+    /// metadata language's ([`crate::ratings::region_in`]).
+    pub country: String,
     pub tv_metadata: TvMetadata,
     pub tvdb_api_key: String,
     /// Subscriber PIN, for TheTVDB keys that need one.
     pub tvdb_pin: String,
     /// Look artists and albums up on MusicBrainz (covers from the Cover Art Archive).
     pub music_metadata: bool,
+    /// Read the NFO files Kodi, Jellyfin and the like keep next to titles:
+    /// their ids decide the match and their fields win over the online
+    /// source's (see [`crate::library::nfo`]).
+    pub read_nfo: bool,
     pub hwaccel: HwAccel,
     pub hardware_decoding: bool,
     pub tonemapping: TonemapMode,
+    /// Transcode video for a player that can't play a file's as it is, or
+    /// that asks for a lower quality. Off: video is only ever copied, with
+    /// the sound transcoded where the player needs it, a quality asked for
+    /// plays the original, and a file whose video the player can't play
+    /// isn't played there ([`crate::playback::PlaybackRequest::copy_video_only`]).
+    pub transcode_video: bool,
+    /// Streams that transcode video, at once: counted within
+    /// `max_transcodes` and never more than it, so a lower number leaves
+    /// room for streams that only need their sound transcoded.
+    pub max_video_transcodes: u32,
+    /// Streams the transcoder makes at once, of every kind (video
+    /// transcodes, remuxes, sound transcodes, music).
     pub max_transcodes: u32,
     pub transcode_preset: String,
     pub throttle_transcodes: bool,
@@ -91,6 +116,12 @@ pub struct Settings {
     /// and is signed out everywhere until then. Off by default; only an
     /// administrator who uses it may turn it on.
     pub require_two_step: bool,
+    /// Pley looks for Google Cast and AirPlay devices on its network, lists
+    /// them in the household's Play on…, and plays casts on them (see
+    /// [`crate::nearby`]). Off by default: with it off, no device is
+    /// listed, cast to or paired with, and Pley doesn't look for any. Casts
+    /// already playing when it is turned off go on until they end.
+    pub cast_devices: bool,
     /// Addresses with a port that pley is reached at through a reverse
     /// proxy which leaves the port out of `Host` (nginx's `$host`, Nginx
     /// Proxy Manager's default): `https://media.example.com:9999`. A request
@@ -185,15 +216,20 @@ impl Default for Settings {
         let host = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_default();
         Self {
             server_name: if host.is_empty() { "Pley".into() } else { host },
+            language: String::new(),
             tmdb_api_key: String::new(),
             metadata_language: "en-US".into(),
+            country: String::new(),
             tv_metadata: TvMetadata::Auto,
             tvdb_api_key: String::new(),
             tvdb_pin: String::new(),
             music_metadata: true,
+            read_nfo: true,
             hwaccel: HwAccel::Auto,
             hardware_decoding: true,
             tonemapping: TonemapMode::Auto,
+            transcode_video: true,
+            max_video_transcodes: 4,
             max_transcodes: 4,
             // Chosen by the transcoder from its load and lead (crate::transcoder).
             transcode_preset: "auto".into(),
@@ -210,6 +246,7 @@ impl Default for Settings {
             library_work_max_cpu: 50,
             third_party_apps: false,
             require_two_step: false,
+            cast_devices: false,
             proxy_addresses: Vec::new(),
             opensubtitles_api_key: String::new(),
             opensubtitles_username: String::new(),
@@ -298,6 +335,18 @@ pub(crate) fn arr_url(value: &str) -> Result<String, AppError> {
 }
 
 impl Settings {
+    /// Settings as they were saved. Ones saved before video transcodes had
+    /// a limit of their own take the limit of every stream for it, so
+    /// nothing changes on those servers.
+    fn saved(json: &str) -> Option<Settings> {
+        let mut settings: Settings = serde_json::from_str(json).ok()?;
+        let written: serde_json::Value = serde_json::from_str(json).ok()?;
+        if written.get("max_video_transcodes").is_none() {
+            settings.max_video_transcodes = settings.max_transcodes;
+        }
+        Some(settings)
+    }
+
     pub fn transcode_options(&self) -> TranscodeOptions {
         TranscodeOptions {
             hwaccel: self.hwaccel,
@@ -360,20 +409,18 @@ pub fn hwaccel_problem(hwaccel: HwAccel, os: Option<&str>, caps: Option<&Capabil
 /// (or nobody can tell). Without it, the transcoder tone maps as Automatic
 /// does.
 pub fn tonemap_problem(mode: TonemapMode, caps: Option<&Capabilities>) -> Option<String> {
-    let wanted = match mode {
-        TonemapMode::Libplacebo => Tonemapper::Libplacebo,
-        TonemapMode::Opencl => Tonemapper::Opencl,
-        TonemapMode::Zscale => Tonemapper::Zscale,
+    let (wanted, why) = match mode {
+        TonemapMode::Libplacebo => (
+            Tonemapper::Libplacebo,
+            "libplacebo isn't available here: it needs an FFmpeg with libplacebo and a GPU it reaches through Vulkan",
+        ),
+        TonemapMode::Opencl => {
+            (Tonemapper::Opencl, "OpenCL tone mapping isn't available here: it needs a GPU with OpenCL drivers")
+        }
+        TonemapMode::Zscale => (Tonemapper::Zscale, "zscale isn't available here: this FFmpeg was built without zimg"),
         TonemapMode::Auto | TonemapMode::None => return None,
     };
     let caps = caps.filter(|caps| caps.ffmpeg_available)?;
-    let why = match wanted {
-        Tonemapper::Libplacebo => {
-            "libplacebo isn't available here: it needs an FFmpeg with libplacebo and a GPU it reaches through Vulkan"
-        }
-        Tonemapper::Opencl => "OpenCL tone mapping isn't available here: it needs a GPU with OpenCL drivers",
-        Tonemapper::Zscale => "zscale isn't available here: this FFmpeg was built without zimg",
-    };
     (!caps.tonemappers.contains(&wanted)).then(|| why.to_owned())
 }
 
@@ -544,15 +591,22 @@ pub fn fit_to_accel(before: &Settings, patch: &mut SettingsPatch) -> Result<(), 
 #[derive(Debug, Default, Deserialize)]
 pub struct SettingsPatch {
     pub server_name: Option<String>,
+    /// Empty: not chosen (English).
+    pub language: Option<String>,
     pub tmdb_api_key: Option<String>,
     pub metadata_language: Option<String>,
+    /// Empty: the metadata language's.
+    pub country: Option<String>,
     pub tv_metadata: Option<TvMetadata>,
     pub tvdb_api_key: Option<String>,
     pub tvdb_pin: Option<String>,
     pub music_metadata: Option<bool>,
+    pub read_nfo: Option<bool>,
     pub hwaccel: Option<HwAccel>,
     pub hardware_decoding: Option<bool>,
     pub tonemapping: Option<TonemapMode>,
+    pub transcode_video: Option<bool>,
+    pub max_video_transcodes: Option<u32>,
     pub max_transcodes: Option<u32>,
     pub transcode_preset: Option<String>,
     pub throttle_transcodes: Option<bool>,
@@ -568,6 +622,7 @@ pub struct SettingsPatch {
     pub library_work_max_cpu: Option<u8>,
     pub third_party_apps: Option<bool>,
     pub require_two_step: Option<bool>,
+    pub cast_devices: Option<bool>,
     pub proxy_addresses: Option<Vec<String>>,
     pub opensubtitles_api_key: Option<String>,
     pub opensubtitles_username: Option<String>,
@@ -605,7 +660,7 @@ impl SettingsStore {
     pub async fn load(db: &Db) -> anyhow::Result<Self> {
         let stored: Option<String> =
             sqlx::query_scalar("SELECT value FROM settings WHERE key = ?").bind(KEY).fetch_optional(&db.read).await?;
-        let settings = stored.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default();
+        let settings = stored.and_then(|json| Settings::saved(&json)).unwrap_or_default();
         Ok(Self { current: watch::Sender::new(Arc::new(settings)) })
     }
 
@@ -620,13 +675,26 @@ impl SettingsStore {
     }
 
     pub async fn update(&self, db: &Db, patch: SettingsPatch) -> Result<Arc<Settings>, AppError> {
-        let mut next = (*self.get()).clone();
+        let current = self.get();
+        let mut next = (*current).clone();
         if let Some(v) = patch.server_name {
             let v = v.trim().to_owned();
             if v.is_empty() || v.chars().count() > 64 {
                 return Err(AppError::bad_request("server name must be 1-64 characters"));
             }
             next.server_name = v;
+        }
+        if let Some(v) = patch.language {
+            next.language = match v.trim() {
+                "" => String::new(),
+                code => crate::i18n::LANGUAGES
+                    .into_iter()
+                    .find(|language| *language == code)
+                    .ok_or_else(|| {
+                        AppError::bad_request(format!("language is one of {}", crate::i18n::LANGUAGES.join(", ")))
+                    })?
+                    .to_owned(),
+            };
         }
         if let Some(v) = patch.tmdb_api_key {
             next.tmdb_api_key = v.trim().to_owned();
@@ -637,6 +705,13 @@ impl SettingsStore {
                 return Err(AppError::bad_request("metadata language must look like 'en-US'"));
             }
             next.metadata_language = v;
+        }
+        if let Some(v) = patch.country {
+            let v = v.trim().to_ascii_uppercase();
+            if !(v.is_empty() || (v.len() == 2 && v.chars().all(|c| c.is_ascii_alphabetic()))) {
+                return Err(AppError::bad_request("country must be a two-letter code, like 'NZ'"));
+            }
+            next.country = v;
         }
         if let Some(v) = patch.tv_metadata {
             next.tv_metadata = v;
@@ -649,6 +724,9 @@ impl SettingsStore {
         }
         if let Some(v) = patch.music_metadata {
             next.music_metadata = v;
+        }
+        if let Some(v) = patch.read_nfo {
+            next.read_nfo = v;
         }
         match next.tv_metadata {
             TvMetadata::Tmdb if next.tmdb_api_key.is_empty() => {
@@ -673,6 +751,17 @@ impl SettingsStore {
                 return Err(AppError::bad_request("max transcodes must be between 1 and 64"));
             }
             next.max_transcodes = v;
+        }
+        if let Some(v) = patch.max_video_transcodes {
+            if !(1..=64).contains(&v) {
+                return Err(AppError::bad_request("max video transcodes must be between 1 and 64"));
+            }
+            next.max_video_transcodes = v;
+        }
+        // Video transcodes are some of the streams: never more than all of them.
+        next.max_video_transcodes = next.max_video_transcodes.min(next.max_transcodes);
+        if let Some(v) = patch.transcode_video {
+            next.transcode_video = v;
         }
         if let Some(v) = patch.transcode_preset {
             if !matches!(v.as_str(), "auto" | "ultrafast" | "superfast" | "veryfast" | "faster" | "fast" | "medium") {
@@ -725,6 +814,9 @@ impl SettingsStore {
         }
         if let Some(v) = patch.require_two_step {
             next.require_two_step = v;
+        }
+        if let Some(v) = patch.cast_devices {
+            next.cast_devices = v;
         }
         if let Some(v) = patch.proxy_addresses {
             let mut addresses: Vec<String> = Vec::new();
@@ -867,6 +959,11 @@ impl SettingsStore {
         .bind(json)
         .execute(&db.write)
         .await?;
+        // Ratings without a country of their own are read as the server's
+        // country's: a new country can change their ages.
+        if crate::ratings::region_in(&next) != crate::ratings::region_in(&current) {
+            crate::ratings::backfill(db).await?;
+        }
         let next = Arc::new(next);
         self.current.send_replace(next.clone());
         Ok(next)
@@ -915,8 +1012,14 @@ mod tests {
         assert!(bad(serde_json::json!({"server_name": "x".repeat(65)})).await);
         assert!(bad(serde_json::json!({"metadata_language": "e"})).await);
         assert!(bad(serde_json::json!({"metadata_language": "en-US-x-twelve"})).await);
+        assert!(bad(serde_json::json!({"country": "NZL"})).await);
+        assert!(bad(serde_json::json!({"country": "N1"})).await);
+        assert!(bad(serde_json::json!({"language": "de"})).await);
+        assert!(bad(serde_json::json!({"language": "fr-FR"})).await);
         assert!(bad(serde_json::json!({"max_transcodes": 0})).await);
         assert!(bad(serde_json::json!({"max_transcodes": 65})).await);
+        assert!(bad(serde_json::json!({"max_video_transcodes": 0})).await);
+        assert!(bad(serde_json::json!({"max_video_transcodes": 65})).await);
         assert!(bad(serde_json::json!({"transcode_preset": "placebo"})).await);
         assert!(bad(serde_json::json!({"library_work_from": 24})).await);
         assert!(bad(serde_json::json!({"library_work_max_cpu": 5})).await);
@@ -927,9 +1030,13 @@ mod tests {
                 &db,
                 patch(serde_json::json!({
                     "server_name": "  Den  ",
+                    "language": " fr ",
                     "tmdb_api_key": "  abc  ",
                     "metadata_language": " fr-FR ",
+                    "country": " nz ",
                     "max_transcodes": 64,
+                    "max_video_transcodes": 2,
+                    "transcode_video": false,
                     "transcode_preset": "medium",
                     "scan_interval_minutes": 1_000_000,
                     "seek_previews": false,
@@ -938,9 +1045,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.server_name, "Den");
+        assert_eq!(s.language, "fr");
         assert_eq!(s.tmdb_api_key, "abc");
         assert_eq!(s.metadata_language, "fr-FR");
+        assert_eq!((s.country.as_str(), crate::ratings::region_in(&s).as_str()), ("NZ", "NZ"));
+        let s = store.update(&db, patch(serde_json::json!({"country": ""}))).await.unwrap();
+        assert_eq!(crate::ratings::region_in(&s), "FR", "the metadata language's again");
         assert_eq!((s.max_transcodes, s.transcode_preset.as_str()), (64, "medium"));
+        assert_eq!((s.max_video_transcodes, s.transcode_video), (2, false));
+        let unset = Settings::default();
+        assert_eq!((unset.max_video_transcodes, unset.max_transcodes), (4, 4), "four streams of any kind, as ever");
+        assert!(unset.transcode_video, "video is transcoded unless turned off");
+        assert!(!unset.cast_devices, "no Cast or AirPlay device until turned on");
+        // Video transcodes are never more than all the streams: a limit above the total comes down to it.
+        let both = serde_json::json!({"max_transcodes": 3, "max_video_transcodes": 5});
+        let lowered = store.update(&db, patch(both)).await.unwrap();
+        assert_eq!((lowered.max_video_transcodes, lowered.max_transcodes), (3, 3));
+        let lowered = store.update(&db, patch(serde_json::json!({"max_transcodes": 2}))).await.unwrap();
+        assert_eq!(
+            (lowered.max_video_transcodes, lowered.max_transcodes),
+            (2, 2),
+            "also when only the total is lowered"
+        );
+        let s = store.update(&db, patch(serde_json::json!({"max_transcodes": 64}))).await.unwrap();
         assert_eq!(s.scan_interval_minutes, 7 * 24 * 60, "at most a week");
         assert_eq!(Settings::default().transcode_preset, "auto", "the transcoder chooses by default");
         assert!(!s.seek_previews);
@@ -1000,8 +1127,9 @@ mod tests {
             .unwrap();
         let s = SettingsStore::load(&db).await.unwrap().get();
         assert_eq!((s.server_name.as_str(), s.max_transcodes, s.hwaccel), ("Attic", 2, HwAccel::Nvenc));
+        assert_eq!(s.max_video_transcodes, 2, "saved before video had a limit of its own: the one it had");
         assert_eq!(s.tv_metadata, TvMetadata::Auto);
-        assert!(s.music_metadata && s.seek_previews && s.previews_in_background && s.detect_markers);
+        assert!(s.music_metadata && s.read_nfo && s.seek_previews && s.previews_in_background && s.detect_markers);
         assert_eq!((s.library_work, s.library_work_max_cpu), (LibraryWork::Auto, 50));
 
         // Unreadable settings fall back to the defaults instead of failing start-up.
@@ -1053,6 +1181,7 @@ mod tests {
             hardware: accel != HwAccel::None,
             accel,
             main10: false,
+            low_power: false,
         }
     }
 

@@ -10,6 +10,7 @@
 
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -23,6 +24,8 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub struct Db {
     pub read: SqlitePool,
     pub write: SqlitePool,
+    /// What search keeps in memory of the library (see [`crate::search`]).
+    pub search: Arc<crate::search::Index>,
 }
 
 impl Db {
@@ -53,7 +56,7 @@ impl Db {
             .acquire_timeout(Duration::from_secs(30))
             .connect_with(base.read_only(true))
             .await?;
-        Ok(Self { read, write })
+        Ok(Self { read, write, search: Arc::default() })
     }
 
     /// Refresh query planner statistics (cheap; run after large scans).
@@ -163,6 +166,105 @@ mod tests {
         let pool = SqlitePool::connect_with(options).await.unwrap();
         Migrator::new(older.as_path()).await.unwrap().run(&pool).await.unwrap();
         pool
+    }
+
+    /// Audiobook libraries come with a table of libraries made again: what
+    /// every library holds stays, and so does a library's id after it is
+    /// deleted (`library_ids`).
+    #[tokio::test]
+    async fn libraries_and_what_they_hold_stay_through_the_audiobooks_upgrade() {
+        let dir = crate::testing::tempdir();
+        let path = dir.path().join("pley.db");
+        let pool = database_before(55, &path).await;
+        sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await.unwrap();
+        for sql in [
+            "INSERT INTO libraries (id, name, kind, paths, created_at, scanned_at, position, labels_pending)
+             VALUES (3, 'Music', 'music', '[\"/m\"]', 10, 20, 1, 0), (5, 'Films', 'movies', '[]', 11, NULL, 0, 1)",
+            "INSERT INTO items (id, library_id, kind, key, title, sort_title, added_at, updated_at)
+             VALUES (7, 5, 'movie', 'movie:a film:2001', 'A Film', 'film', 0, 0)",
+            "INSERT INTO media_files (id, item_id, library_id, path, size, mtime, added_at, updated_at)
+             VALUES (9, 7, 5, '/films/A Film.mkv', 1, 0, 0, 0)",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(sql)).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+
+        let db = Db::open(&path).await.unwrap();
+        // A book's writers, narrators and series have their columns.
+        sqlx::query("SELECT authors, narrators, series, series_index FROM items").fetch_all(&db.read).await.unwrap();
+        type Library = (i64, String, String, String, i64, Option<i64>, i64, bool);
+        let libraries: Vec<Library> = sqlx::query_as(
+            "SELECT id, name, kind, paths, created_at, scanned_at, position, labels_pending FROM libraries ORDER BY id",
+        )
+        .fetch_all(&db.read)
+        .await
+        .unwrap();
+        assert_eq!(
+            libraries,
+            [
+                (3, "Music".into(), "music".into(), r#"["/m"]"#.into(), 10, Some(20), 1, false),
+                (5, "Films".into(), "movies".into(), "[]".into(), 11, None, 0, true),
+            ]
+        );
+        let held: (i64, i64) =
+            sqlx::query_as("SELECT (SELECT COUNT(*) FROM items), (SELECT COUNT(*) FROM media_files)")
+                .fetch_one(&db.read)
+                .await
+                .unwrap();
+        assert_eq!(held, (1, 1), "nothing went with the old table");
+        let broken: Vec<(String,)> = sqlx::query_as("PRAGMA foreign_key_check").fetch_all(&db.write).await.unwrap();
+        assert!(broken.is_empty(), "{broken:?}");
+
+        // The new kind is taken, an unknown one still isn't, and the
+        // libraries' foreign keys still hold: a deleted library takes what
+        // it held, and its id isn't given again.
+        sqlx::query("INSERT INTO libraries (name, kind, created_at) VALUES ('Books', 'audiobooks', 0)")
+            .execute(&db.write)
+            .await
+            .unwrap();
+        assert!(
+            sqlx::query("INSERT INTO libraries (name, kind, created_at) VALUES ('Pics', 'photos', 0)")
+                .execute(&db.write)
+                .await
+                .is_err()
+        );
+        sqlx::query("DELETE FROM libraries WHERE id IN (5, 6)").execute(&db.write).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items").fetch_one(&db.read).await.unwrap();
+        assert_eq!(left, 0);
+        let last: i64 = sqlx::query_scalar("SELECT last FROM library_ids").fetch_one(&db.read).await.unwrap();
+        assert_eq!(last, 6);
+        db.close().await;
+    }
+
+    /// The audiobooks migration runs outside sqlx's transaction, which
+    /// records it only after it ran: a server stopped in between runs it
+    /// again as it starts, and starts.
+    #[tokio::test]
+    async fn the_audiobooks_upgrade_runs_again_after_a_crash() {
+        let dir = crate::testing::tempdir();
+        let path = dir.path().join("pley.db");
+        let pool = database_before(56, &path).await;
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 55").execute(&pool).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await.unwrap();
+        for sql in [
+            "INSERT INTO libraries (id, name, kind, created_at) VALUES (4, 'Books', 'audiobooks', 0)",
+            "INSERT INTO items (id, library_id, kind, key, title, sort_title, added_at, updated_at)
+             VALUES (8, 4, 'audiobook', 'audiobook:a book', 'A Book', 'book', 0, 0)",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(sql)).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+
+        let db = Db::open(&path).await.unwrap();
+        let latest: Vec<i64> = MIGRATOR.iter().map(|m| m.version).collect();
+        assert_eq!(versions(&path).await, latest);
+        let held: (i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM libraries), (SELECT COUNT(*) FROM items)")
+            .fetch_one(&db.read)
+            .await
+            .unwrap();
+        assert_eq!(held, (1, 1));
+        sqlx::query("UPDATE items SET authors = '[\"A Writer\"]' WHERE id = 8").execute(&db.write).await.unwrap();
+        db.close().await;
     }
 
     async fn server_settings(db: &Db) -> String {
@@ -331,6 +433,65 @@ mod tests {
             again,
             ["/m/hdr10.mkv", "/m/hdr10plus.mkv", "/m/hlg.mkv", "/m/sdr 10-bit.mkv", "/m/no range or depth.mkv"]
         );
+        db.close().await;
+    }
+
+    /// Home's and Recommended's built-in rows become collections Pley makes
+    /// in each movie and TV library, in the order Home showed the libraries;
+    /// TMDB's collections are Franchises.
+    #[tokio::test]
+    async fn the_built_in_rows_become_collections() {
+        let dir = crate::testing::tempdir();
+        let path = dir.path().join("pley.db");
+        let pool = database_before(57, &path).await;
+        for sql in [
+            "INSERT INTO libraries (id, name, kind, paths, created_at, position, labels_pending)
+             VALUES (3, 'Music', 'music', '[]', 0, 0, 0), (5, 'Films', 'movies', '[]', 0, 1, 0),
+                    (6, 'Shows', 'shows', '[]', 0, 1, 0)",
+            "INSERT INTO collections (id, library_id, title, sort_title, tmdb_id, created_at, updated_at)
+             VALUES (1, 5, 'Alien Collection', 'alien collection', 8091, 0, 0),
+                    (2, 5, 'Mine', 'mine', NULL, 0, 0)",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(sql)).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+
+        let db = Db::open(&path).await.unwrap();
+        type Made = (i64, String, Option<String>, Option<String>, Option<i64>, Option<i64>);
+        let made: Vec<Made> = sqlx::query_as(
+            "SELECT c.library_id, c.title, c.builtin, k.key, c.home_position, c.recommended_position
+             FROM collections c LEFT JOIN collection_categories k ON k.id = c.category_id
+             ORDER BY c.library_id, c.recommended_position IS NULL, c.recommended_position, c.id",
+        )
+        .fetch_all(&db.read)
+        .await
+        .unwrap();
+        let highlights = Some("highlights".to_owned());
+        let row = |library: i64, title: &str, builtin: &str, home: Option<i64>, at: i64| {
+            (library, title.to_owned(), Some(builtin.to_owned()), highlights.clone(), home, Some(at))
+        };
+        // Not a Recommended row: it would repeat Top Rated.
+        let unwatched = |library: i64| {
+            (library, "Top Unwatched".to_owned(), Some("top_unwatched".to_owned()), highlights.clone(), None, None)
+        };
+        assert_eq!(
+            made,
+            [
+                row(5, "Recently Added", "recently_added", Some(1), 0),
+                row(5, "Recently Released", "recently_released", None, 1),
+                row(5, "Top Rated", "top_rated", None, 2),
+                (5, "Alien Collection".into(), None, Some("franchises".into()), None, None),
+                (5, "Mine".into(), None, None, None, None),
+                unwatched(5),
+                row(6, "Recently Added Shows", "recently_added", Some(2), 0),
+                row(6, "Recently Released", "recently_released", None, 1),
+                row(6, "Top Rated", "top_rated", None, 2),
+                unwatched(6),
+            ]
+        );
+        let music: Option<i64> =
+            sqlx::query_scalar("SELECT home_position FROM libraries WHERE id = 3").fetch_one(&db.read).await.unwrap();
+        assert_eq!(music, Some(0));
         db.close().await;
     }
 }

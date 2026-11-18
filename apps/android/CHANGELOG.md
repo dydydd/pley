@@ -8,6 +8,411 @@ describes how they are made.
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-11-18
+
+### Added
+
+- Play on… lists Google Cast and AirPlay devices for Live TV channels too.
+- A library's Collections are grouped by category, and can be narrowed
+  to one category; a collection's page shows its category.
+- A row's See all opens the collection it shows, and a Home row of
+  collections of the same title in several libraries opens them together.
+
+### Changed
+
+- The home banner's More info button reads Más info in Spanish.
+- Recommended no longer ends with a row of every collection: it shows
+  the rows administrators chose.
+
+## [0.1.14] - 2026-11-16
+
+### Added
+
+- Administrators manage the server's dashboard, libraries, users and
+  invitations from a phone or tablet, in Me → Manage server, once they
+  tick Manage the server as the phone signs in. A phone signed in before,
+  or without it ticked, asks to sign in again for it in the browser; one
+  with no browser says it needs one, as a code never allows it. Another
+  administrator's account is only shown there: the web app changes it.
+  Disabling an account and removing a PIN ask first; the dashboard says
+  when its numbers stopped updating, and a page says so when the phone can
+  no longer manage the server.
+- Play on… lists Google Cast and AirPlay devices for movies and episodes.
+  An AirPlay device asks once for the code it shows; on an Apple TV the
+  code goes as its fourth digit is typed.
+- The remote has a volume slider for a Google Cast device.
+- Live TV goes into picture in picture on phones and tablets, as videos
+  do, with Channel down and Channel up in its small window.
+
+### Fixed
+
+- Sign in again, offered where the app's sign-in didn't allow something
+  (managing the server, asking for movies and shows), opens the server's
+  sign-in page instead of going back to Home.
+- Live TV goes quiet while another app plays, a call included, instead of
+  playing over it or taking the sound back. Its sound comes back once the
+  other app is done, or with the next channel after music or a video.
+- A movie or episode with several versions plays the same version from
+  its page as from Home and Continue Watching: the one downloaded, else
+  the one this device plays best, unless you pick another. The page's
+  badges and tracks are that version's.
+
+## [0.1.13] - 2026-11-14
+
+### Changed
+
+- On phones and tablets, Download on a movie's or an episode's page is
+  one of the actions under Play, beside Playlist, instead of a wide
+  button. Its ring fills as the download comes, and its label says how
+  far it is or what it waits for.
+- The actions under Play share one label size. With the system's largest
+  text they go on two or three rows instead of breaking words in two.
+- With the system's largest text, labels under icons and titles under
+  posters get smaller rather than break inside a word, and a hyphenated
+  word ("Bande-annonce") can go on two lines at its hyphen.
+
+## [0.1.12] - 2026-11-12
+
+### Added
+
+- When the server has video transcoding turned off, the Quality menu
+  offers only Original.
+
+### Changed
+
+On Android TV:
+
+- Home's banner of featured titles is off unless turned on in Settings →
+  Subtitles and display.
+
+## [0.1.11] - 2026-11-10
+
+### Fixed
+
+- Dolby Vision the server repackages (a file that also carries HDR10+,
+  profile 7 made 8.1, one whose sound or container is changed) shows as
+  Dolby Vision. Since 0.1.10 it went to the Dolby Vision decoder, but
+  without its Dolby Vision metadata, so the screen still showed HDR10.
+
+## [0.1.10] - 2026-11-10
+
+### Added
+
+On Android TV:
+
+- A show whose seasons have posters of their own shows them as a row of
+  posters over its episodes, each with the season's name and episode
+  count under it, as the web app does. A season without one shows the
+  show's poster. Resting on a season shows its episodes, Down from the
+  buttons comes to the seasons, and Select on a season goes down into
+  its episodes, on the one to watch.
+- Home's banner shows a dash for each title it turns through, at the top
+  right: the one on is longer and fills as its time runs. Up from the
+  banner's buttons reaches the dashes, where Left and Right turn to the
+  title before or after.
+- An episode's page marks its own episode in its season's row, with a
+  thin ring and its title in bold, so it is found among the others
+  before focus is on it.
+
+### Changed
+
+- Home's banner mixes in top rated titles you haven't watched: one in
+  three, among the newest, with "Top rated in Movies" over its name. They
+  are the same all day and others the next day.
+- A show with more than 12 seasons lists them newest first, with Specials
+  last, so the seasons still coming out are the first ones.
+- A show you haven't started, or have watched to its end, opens on the
+  first season listed: the newest of a show with more than 12, which
+  opened on Season 1, at the far end of its seasons. A show you are
+  part-way through still opens on the season of the next episode.
+- A title's page that is already held in memory (seen before, or asked
+  for ahead) opens whole at once, where it showed an empty outline for a
+  moment first.
+- The seasons beside the one shown have their episodes loaded ahead, so
+  moving along a show's seasons keeps up.
+
+On Android TV:
+
+- A title's page starts higher and gives its title and its description
+  more of the screen's width, a long title up to three lines. What
+  follows the buttons shows whole where the screen's edge cut it: a
+  show's season posters with their names and episode counts, its
+  episodes with their titles, a movie's Cast & Crew with their names. For
+  that the room under the buttons closes up first, then the description
+  gives up a line, and the line of who made it goes before the
+  description's second. A movie's page leaves "Directed by" and
+  "Starring" to that row.
+- Who made a title and its facts (director, writers, release, studio or
+  network) sit under the cast, each a small label over its value, where
+  they were in Details at the end of the page.
+- The title and the picture behind the page change as soon as focus
+  moves to another tile, on Home, Discover and a show's episodes, where
+  they waited for focus to rest. Under a held key they change where it
+  lands. The words at the top of a show's page no longer show an episode
+  of another season, or the show's description, while focus is on the
+  seasons.
+- Home's banner sits higher and is shorter: the line over its title (New
+  in Movies) is level with the dashes at the top right, and Continue
+  Watching shows whole under it, its pictures and the titles under them,
+  where the screen's edge cut them. A title and its description have
+  more of the screen's width there too, so a long title seldom takes two
+  lines; when one does, the description keeps two of its three lines,
+  where it kept one. The banner's words fade in as it turns to the next
+  title.
+- Coming down from Home's banner to the rows, the words at the top are
+  the focused title's at once. They used to stay the banner's title for a
+  moment first. Going back up, and each time the banner turns, its
+  picture changes with its words, where the last picture stayed under
+  them for a moment.
+- Right on the last button of Home's banner (My List) stays there. It
+  used to turn to the next title, which the dashes at the top right and
+  the banner's own time still do.
+- A library opens on Recommended the first time; after that, on the tab
+  it was left on, as before. A library left on its Library tab before
+  this version, with no sort or filter of its own, opens on Recommended
+  once more.
+- Buttons are a little smaller, those of Home's banner smaller again.
+  Chips and tabs are smaller too, as tall as the buttons: a show's
+  season tabs, the tabs at the top of a library (Recommended, Library,
+  Collections), of Live TV and of Requests, and the chips over a
+  library's grid (the sort, Filter, Unwatched, Genre, Year), Discover's
+  and Search's. The player's Skip and Play now, History's Remove and the
+  music player's Play are smaller with them.
+- Posters in a row are a little larger: seven fill the row to the
+  screen's edge, where a sliver of an eighth showed beside them.
+- The rail's icons sit in the middle of its dark strip, with the same
+  room at either side, where they stood nearer the page. Open, the
+  current entry and the focused one are as wide as each other and as far
+  from the panel's edge as from the screen's, and the panel is narrower,
+  widening only for a name that needs it. The focused entry grows from
+  its icon, so the icons stay in line, and it no longer reaches the edge
+  of the screen or of the panel. The dark under the closed rail thins
+  out softly into the page, where it ended in a hard edge.
+- A show's seasons open at the one shown, wherever it is in the row.
+  Resting on a season shows its episodes sooner, and the episodes sit
+  further below the season tabs, so the focused episode no longer crowds
+  them.
+- Search's empty page no longer explains how to type.
+
+### Fixed
+
+- Dolby Vision the server repackages stays Dolby Vision: a file that also
+  carries HDR10+, profile 7 made 8.1, a file that doesn't name its Dolby
+  Vision or overstates its level, or one whose sound or container is
+  changed. On a Dolby Vision screen these played as their HDR10 or HLG
+  base layer, and profile 5, which has none, in wrong colours; only files
+  played as they are came out as Dolby Vision.
+
+On Android TV:
+
+- A show with more seasons than fit across the screen showed its later
+  season tabs squeezed into a thin column that pushed the episodes'
+  lengths off the bottom, and the seasons after it couldn't be chosen.
+  The tabs now keep their size and slide along as focus moves, so every
+  season can be chosen.
+- Back from an episode's page returns to the episode it was opened from,
+  in its season. Focus used to land on the season's first episode, or
+  the one to watch.
+- On an episode's page, Select on that episode in its season's row plays
+  it, where it did nothing and took a second Back to leave; Select on
+  another episode shows that one in the page's place, so Back still
+  returns to the show.
+- The line over a title in Home's banner (New in Movies) reached the top
+  of the screen when the title took two lines. It now keeps its place
+  and the title grows down.
+
+## [0.1.9] - 2026-11-08
+
+### Added
+
+- Home opens on the newest movies and shows you haven't watched, as the
+  web does: on phones a banner under a clear top bar, with the title's
+  plot, Play, More info and My List, swiped between; on Android TV and
+  Fire TV the hero, where Right from its last button goes to the next
+  title. Both turn to the next by themselves every few seconds, holding
+  still while you use them. Continue Watching is the first row under them.
+
+## [0.1.8] - 2026-11-06
+
+### Added
+
+- Pley is in English, French and Spanish: your account's language, else
+  this device's, else your server's, and Settings has a Language row on
+  phones and TVs that sets it for your account on every device. Before you
+  sign in, a globe on the screens that choose a server and sign in (at the
+  top left on phones, in a corner on TVs) picks this device's language.
+  Every screen on phones, tablets and TVs is in it; dates, times,
+  runtimes, counts, the names of audio and subtitle languages and
+  connection errors follow it, and a download that failed says why in it. On Android 13 and later the system's settings list
+  Pley's languages, and one picked there is your account's, as in
+  Settings, or before you sign in this device's, as with the globe. On a
+  server from before languages, which can't keep your account's, the
+  Language row keeps your choice on this device.
+- The phone's remote offers Skip Intro and Skip Credits while what a TV
+  plays is in an intro or the credits, as the TV's own player does.
+- The phone's remote and Play on… list the devices of everyone in your
+  household too, each saying whose profile it is on ("On Sam's
+  profile"), never what it plays. Sending something there ends what
+  plays on that phone or TV, its place kept for its own profile, and
+  switches it to your profile before it plays, after your PIN when your
+  profile has one; one that can't says "Couldn't switch to the remote's
+  profile" and plays nothing. A phone or TV showing "Who's watching?"
+  ignores what is sent to it meanwhile: whoever is there is choosing.
+
+### Changed
+
+- On phones the player's Downloaded badge is green, as on TVs: the file
+  plays as it is.
+- After Play on…, one bar above the tabs says it is starting on the
+  device, then what plays there, where a toast and the remote's sheet came
+  and went over each other. The remote's back button goes 30 seconds, as
+  far as forward.
+- The phone's remote opens from a button in Home's top bar, beside your
+  picture, while another of your devices is on. The bar above the tabs
+  shows only while the phone controls what one plays (it sent it a
+  command, or something with Play on…), says where and what, Playing or
+  Paused, and opens its controls. A command shows at once what it asks
+  (the place a seek goes, playing or paused, the track picked), and what
+  plays stays while a next starts the one after. A device ready to play is
+  only listed, without controls to open.
+- A command from your remote doesn't bring up the video player's controls
+  on the device it plays on: a toast says for a moment what it did
+  ("Paused", "Playing", "+30 s", "Jumped to 12:34", "Audio: …",
+  "Subtitles off", "Quality: …"). Controls already up as the remote pauses
+  hide as they do while it plays, until you press a key or touch the
+  screen there.
+- Android TV and Fire TV start straight into Home as the profile they were
+  left on when it has no PIN, where a household of several profiles was
+  asked "Who's watching?" each time. A profile with a PIN still asks
+  first, and Switch profile still shows every profile. Settings' Always
+  start as calls this Profile used last, where it said Ask who's watching.
+
+### Fixed
+
+- On phones and tablets, the player's controls are at the screen's edges
+  again: since 0.1.7 the top row sat a status bar's height down the screen
+  and the buttons along the bottom a navigation bar's height up it, though
+  the player hides both bars.
+- On Android TV and Fire TV, a seek's preview in French or Spanish shows
+  a chapter called "Chapitre 3" or "Capítulo 3" once, not as "Chapitre 3 ·
+  Chapitre 3".
+- On Android TV and Fire TV, letting go of Left or Right held to scrub
+  while the player was busy (starting, or switching the TV's mode) no
+  longer leaves the seek waiting for OK for good: it goes by itself, as
+  after any scrub.
+
+## [0.1.7] - 2026-11-05
+
+### Added
+
+- The phone is a remote for your other devices: while something plays on
+  one of them, a bar above the tabs says where and what, and opens a
+  remote with what plays on each, how far, and the controls its player
+  obeys (play and pause, back 10 s and forward 30 s, next and previous,
+  channel up and down, a slider to seek), and Stop. A device that doesn't
+  act on a command within a few seconds is said not to have answered.
+  TVs show no remote.
+- The players obey the remote on your other devices, on phones and TVs:
+  videos play, pause, seek, skip and go to the next episode; music does
+  all that and goes back a track; Live TV changes channel, and stops with
+  a word when stopped from elsewhere. Music playing with the screen off
+  still hears it, until it has been paused for a minute and a half. Remotes show the device by its name in Android's
+  settings.
+- The video players change their audio and subtitles when your remote on
+  another device asks, as their own track menus do, and tell your remotes
+  which tracks they play.
+- The phone's remote lists your devices: every other device that is on,
+  playing or ready to play, those that play first, each with an icon for
+  its kind. Choosing one shows its controls, now with Next for every
+  episode, track and channel (dimmed where it can't go on), and Audio and
+  Subtitles menus that change what it plays.
+- Phones, tablets and TVs play what your remotes send them while Pley is
+  open: a title, a show's next episode, music, a playlist or a Live TV
+  channel plays as Play would play it there, and says for a few seconds
+  which device it came from.
+- Play on… sends a title, a show, a season, music or a playlist from the
+  phone to another of your devices, and Watch on… a Live TV channel:
+  beside Play on their pages, in an item's actions and in the live
+  player. Choose the device (an album, an artist or a playlist can go
+  shuffled), and the remote opens on it.
+- The video players change their quality when your remote on another
+  device asks, as their own Quality menu does, and tell your remotes
+  which quality they play. Phones and TVs play a title cast to them with
+  the audio and subtitles picked on the remote's page, for that play
+  only.
+- The phone's remote has a Quality menu beside Audio and Subtitles, all
+  three as icons, and Stop asks first. A Live TV channel shows its
+  programme, how far it is, its times and what's next, with a channel
+  rocker in place of the seek bar and the skips. Play on… on a title's
+  page is a square button as tall as Play, and sends the audio and
+  subtitles picked on the page.
+- Diagnostics can show the frame rate (on TVs, Settings → Diagnostics):
+  while something moves, a small box at the top gives the frames
+  drawn a second, the longest frame and how many were late, and the same
+  goes to the device's log.
+
+### Changed
+
+- Requests: a sign-in from before the app could ask says "Sign in again to ask for movies
+  and shows" without a second line, and its button reads Sign in.
+- On Android TV and Fire TV, a key held through a library's grid, along
+  Home's rows or down through them scrolls more smoothly: tiles cost far
+  less to bring in and to draw, rows are made ahead of the screen, and a
+  held step waits a frame or two for its row rather than stall the
+  picture. A show's page and the guide make their next rows ahead too.
+- On Android TV and Fire TV, a held direction key stops at the end of
+  the list it moves along, on every page: Up held through Home's rows
+  stops on the first row rather than going on to the hero, Down held
+  through a library stops on its last row. A press of its own goes on.
+- When the server can't be reached, the app says "Pley is offline", with
+  Downloads beside it on phones and tablets, where it said "Showing what
+  Pley had saved. Reconnecting…". It still shows what it saved and
+  reconnects by itself.
+- A movie or show in Discover or Search's Discover row that a library
+  has whole opens its library page, where it plays, not a page with only
+  Open on it. A show partly there still opens its Discover page, for
+  Request more seasons.
+
+### Fixed
+
+- On Fire TV, Amazon's keyboard shows what you type: its box kept the
+  words it opened with (nothing for a new playlist, the old name for a
+  rename) while each key reached the field. Its Back closes it and keeps
+  the words, as Gboard's does, where it acted as Done: it saved the
+  name, made the playlist or ran the search.
+- In Discover, a show whose request is ready but that still lacks
+  seasons nobody asked for says Partly in library, not In library.
+- On Android TV and Fire TV, a press of a direction key that lasts a
+  little long (200 or 300 ms) moves focus once, not twice: a held key
+  starts moving by itself after 400 ms, as the system's own repeats do,
+  rather than 180.
+- On Android TV and Fire TV, OK held on a tile opens its actions and leaves
+  them open: the key, still held as they came, went on to choose the first
+  of them (Resume or Play) as it came up.
+- On Android TV and Fire TV, screen readers say each card on Playlists,
+  its title and what it holds; they said nothing.
+- On phones and tablets, the player's controls are in their place as it
+  opens, rather than moving a moment later: the buttons along the bottom
+  show once the server has answered, and the controls keep clear of the
+  status and navigation bars whether they show or not.
+- On Android TV and Fire TV, a programme's details in Live TV have Watch
+  and the favourite side by side, the favourite a star as in the live
+  player, where Remove from favourites was a wide button under Watch. In
+  the live player, the star no longer shows its words under it, which ran
+  under Channels.
+
+## [0.1.6] - 2026-11-04
+
+### Changed
+
+- The banner on Android TV and Google TV's home screen shows Pley's mark
+  and name centred, larger, the name closer to the mark.
+
+### Fixed
+
+- Search no longer closes the app when a recent search is "discover" or
+  "header" on a phone, or "pley.clear" on a TV.
+
 ## [0.1.5] - 2026-11-03
 
 ### Added
@@ -476,7 +881,17 @@ describes how they are made.
 - First release with a version of its own (builds before it carried 0.2.0,
   the version every app shared).
 
-[Unreleased]: https://github.com/pley-media-server/pley/compare/release-2026-11-03...HEAD
+[Unreleased]: https://github.com/pley-media-server/pley/compare/release-2026-11-18...HEAD
+[0.1.15]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-18
+[0.1.14]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-16
+[0.1.13]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-14
+[0.1.12]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-12
+[0.1.11]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-10.2
+[0.1.10]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-10
+[0.1.9]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-08
+[0.1.8]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-06
+[0.1.7]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-05
+[0.1.6]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-04
 [0.1.5]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-03
 [0.1.4]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-02.2
 [0.1.3]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-02

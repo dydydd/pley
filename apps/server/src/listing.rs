@@ -7,6 +7,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+use crate::auth::AuthUser;
 use crate::catalog::{self, ItemRow, ItemsQuery, LibraryQuery, SqlArg};
 use crate::db::Db;
 use crate::library::{LibraryKind, LibraryRow};
@@ -62,6 +63,7 @@ pub fn kinds_of(lib: &LibraryRow) -> &'static [&'static str] {
         LibraryKind::Movies => &["movie"],
         LibraryKind::Shows => &["show", "season", "episode"],
         LibraryKind::Music => &["artist", "album", "track"],
+        LibraryKind::Audiobooks => &["audiobook", "part"],
     }
 }
 
@@ -309,6 +311,55 @@ const NOT_FILTERS: &[&str] = &[
     "asyncAugmentMetadata",
 ];
 
+/// Whether a smart filter keeps a parameter of Plex's query: its filters,
+/// what they list (`type`), their order and how many (`sort`, `limit`), but
+/// not what only shapes Plex's answer (`includeGuids`, `X-Plex-Token`).
+pub(crate) fn is_smart_filter_param(key: &str) -> bool {
+    let plex_own = key.len() > 7 && key.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("x-plex-"));
+    matches!(key, "type" | "sort" | "limit") || !(plex_own || NOT_FILTERS.contains(&key))
+}
+
+/// Fields whose filter choices are names (`/library/sections/{id}/label`)
+/// and whose values may be those choices' keys.
+const NAMED_FIELDS: &[&str] = &["genre", "label", "contentRating", "studio"];
+
+/// What a name can't hold in a filter choice's key: tools such as Kometa put
+/// the key into a query string as it is, where `+` reads as a space, `&`, `=`
+/// and `#` end the value, `%` starts an escape and `,` separates values. `~`
+/// starts a key of this kind ([`choice_key`]).
+const UNSAFE_IN_KEY: &[char] = &['+', '&', '=', '#', '%', ',', '~'];
+
+/// A filter choice's `key`: the name itself, or, when it holds a character
+/// [`UNSAFE_IN_KEY`] names, `~` and its bytes in hex, which pass through a
+/// query string whether a tool encodes the key or not. Plex's keys are tag
+/// ids; Pley keeps these names without one.
+pub(crate) fn choice_key(name: &str) -> String {
+    if !name.contains(UNSAFE_IN_KEY) {
+        return name.to_owned();
+    }
+    let mut key = String::with_capacity(1 + name.len() * 2);
+    key.push('~');
+    for byte in name.bytes() {
+        key.push_str(&format!("{byte:02x}"));
+    }
+    key
+}
+
+/// The name a filter value names: a [`choice_key`] read back, or the value as
+/// it came. Only a key [`choice_key`] would make is read back, so a name that
+/// merely looks like one (`~41`) stays itself.
+pub(crate) fn choice_name(value: &str) -> String {
+    let decoded = value.strip_prefix('~').filter(|hex| !hex.is_empty() && hex.len() % 2 == 0).and_then(|hex| {
+        let bytes: Option<Vec<u8>> =
+            (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok()).collect();
+        String::from_utf8(bytes?).ok()
+    });
+    match decoded {
+        Some(name) if choice_key(&name).eq_ignore_ascii_case(value) => name,
+        _ => value.to_owned(),
+    }
+}
+
 /// Fields of the query string Pley doesn't keep the data for or doesn't read
 /// yet. A filter on one is refused rather than ignored: a tool changing what
 /// the filter finds would otherwise change the whole library.
@@ -497,6 +548,17 @@ impl Expr {
         }
     }
 
+    /// Label filters as if no title had labels: `label=X` finds none and
+    /// `label!=X` every title, whatever labels titles carry (as a label
+    /// filter without values does, see [`Filter::tags`]).
+    fn without_labels(&mut self) {
+        match self {
+            Expr::Filter(filter) if filter.level == Level::Own && filter.field == "label" => filter.values.clear(),
+            Expr::Filter(_) => {}
+            Expr::All(terms) | Expr::Any(terms) => terms.iter_mut().for_each(Expr::without_labels),
+        }
+    }
+
     fn matches(&self, row: &ItemRow, extras: Option<&Extras>, now: i64) -> bool {
         match self {
             Expr::Filter(filter) => filter.matches(row, extras, now),
@@ -587,7 +649,12 @@ impl Filter {
             None if prefixed || op != Op::Is || UNREAD_FIELDS.contains(&field) => return Err(refused()),
             None => return Ok(None),
         }
-        let values: Vec<String> = value.split(',').map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()).collect();
+        let named = NAMED_FIELDS.contains(&field);
+        let values: Vec<String> = value
+            .split(',')
+            .map(|v| if named { choice_name(v.trim()) } else { v.trim().to_owned() })
+            .filter(|v| !v.is_empty())
+            .collect();
         if values.len() > MAX_VALUES {
             return Err(FilterError(format!("{raw_key} names {MAX_VALUES} values at most")));
         }
@@ -801,7 +868,12 @@ fn parse_date(value: &str, now: i64) -> Option<i64> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SortField {
     Title,
+    /// When the title itself was added: a show's first sighting.
     Added,
+    /// Plex's `episode.addedAt` (Last Episode Date Added), Jellyfin's
+    /// `DateLastContentAdded`: shows and seasons by their newest episode,
+    /// anything else as [`SortField::Added`].
+    EpisodeAdded,
     Released,
     Year,
     Rating,
@@ -821,15 +893,45 @@ const BITRATE_SQL: &str = "(CASE WHEN i.kind = 'show'
     THEN (SELECT AVG(f.bitrate) FROM items e JOIN media_files f ON f.item_id = e.id WHERE e.grandparent_id = i.id)
     ELSE (SELECT MAX(f.bitrate) FROM media_files f WHERE f.item_id = i.id) END)";
 
-/// The bitrates of `rows` when `spec` sorts by them (rows don't carry them).
-pub(crate) async fn bitrates_for(
-    db: &Db,
-    rows: &[ItemRow],
-    spec: &[(SortField, bool)],
-) -> sqlx::Result<HashMap<i64, f64>> {
-    if !spec.iter().any(|(field, _)| *field == SortField::Bitrate) {
-        return Ok(HashMap::new());
+/// When a title's newest episode was added, as [`SortField::EpisodeAdded`]
+/// sorts it.
+const EPISODE_ADDED_SQL: &str = "COALESCE(CASE i.kind
+    WHEN 'show' THEN (SELECT MAX(e.added_at) FROM items e WHERE e.grandparent_id = i.id AND e.kind = 'episode')
+    WHEN 'season' THEN (SELECT MAX(e.added_at) FROM items e WHERE e.parent_id = i.id AND e.kind = 'episode')
+    END, i.added_at)";
+
+/// A title's release date in unix seconds, as [`date_secs`] reads it, or
+/// NULL. Dates are written `YYYY-MM-DD`, as SQLite reads them, which also
+/// counts an impossible day (`2005-02-31`) on from the month's start as
+/// `date_secs` does; the pattern leaves out a year alone (`2010`), which
+/// SQLite would take for a day number.
+const RELEASED_SECS_SQL: &str = "(CASE WHEN i.release_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'
+    THEN unixepoch(substr(i.release_date, 1, 10)) END)";
+
+/// What [`sort_rows`] sorts by that rows don't carry, as [`sort_values`]
+/// loads it.
+#[derive(Debug, Default)]
+pub(crate) struct SortValues {
+    bitrates: HashMap<i64, f64>,
+    /// When shows' and seasons' newest episodes were added.
+    newest_episodes: HashMap<i64, i64>,
+}
+
+/// What `spec` sorts `rows` by that they don't carry.
+pub(crate) async fn sort_values(db: &Db, rows: &[ItemRow], spec: &[(SortField, bool)]) -> sqlx::Result<SortValues> {
+    let sorts_by = |field: SortField| spec.iter().any(|(f, _)| *f == field);
+    let mut values = SortValues::default();
+    if sorts_by(SortField::Bitrate) {
+        values.bitrates = bitrates(db, rows).await?;
     }
+    if sorts_by(SortField::EpisodeAdded) {
+        values.newest_episodes = catalog::newest_episodes(db, rows).await?;
+    }
+    Ok(values)
+}
+
+/// The bitrates of `rows`.
+async fn bitrates(db: &Db, rows: &[ItemRow]) -> sqlx::Result<HashMap<i64, f64>> {
     let ids = serde_json::to_string(&rows.iter().map(|r| r.id).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into());
     let found: Vec<(i64, Option<f64>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT i.id, CAST({BITRATE_SQL} AS REAL) FROM items i WHERE i.id IN (SELECT value FROM json_each(?))"
@@ -849,8 +951,13 @@ pub(crate) fn parse_sort(value: Option<&str>) -> Vec<(SortField, bool)> {
             continue;
         }
         let (field, dir) = spec.split_once(':').unwrap_or((spec, ""));
+        // Plex's `episode.addedAt` on shows is when their newest episode
+        // was added, not they; any other type named (`movie.addedAt`) is
+        // the listing's own.
+        let newest_episode = field == "episode.addedAt";
         let field = field.rsplit('.').next().unwrap_or(field);
         let field = match field {
+            "addedAt" if newest_episode => SortField::EpisodeAdded,
             "titleSort" | "title" => SortField::Title,
             "addedAt" => SortField::Added,
             "originallyAvailableAt" => SortField::Released,
@@ -874,8 +981,9 @@ pub(crate) fn parse_sort(value: Option<&str>) -> Vec<(SortField, bool)> {
     out
 }
 
-/// Sorts `rows` as `spec` says, with `bitrates` from [`bitrates_for`].
-pub(crate) fn sort_rows(rows: &mut [ItemRow], spec: &[(SortField, bool)], bitrates: &HashMap<i64, f64>) {
+/// Sorts `rows` as `spec` says, with what they don't carry from [`sort_values`].
+pub(crate) fn sort_rows(rows: &mut [ItemRow], spec: &[(SortField, bool)], values: &SortValues) {
+    let episode_added = |r: &ItemRow| values.newest_episodes.get(&r.id).copied().unwrap_or(r.added_at);
     fn cmp_opt<T: PartialOrd>(a: Option<T>, b: Option<T>, desc: bool) -> Ordering {
         match (a, b) {
             (Some(a), Some(b)) => {
@@ -893,6 +1001,7 @@ pub(crate) fn sort_rows(rows: &mut [ItemRow], spec: &[(SortField, bool)], bitrat
             let o = match field {
                 SortField::Title => cmp_opt(Some(&a.sort_title), Some(&b.sort_title), desc),
                 SortField::Added => cmp_opt(Some(a.added_at), Some(b.added_at), desc),
+                SortField::EpisodeAdded => cmp_opt(Some(episode_added(a)), Some(episode_added(b)), desc),
                 SortField::Released => cmp_opt(a.release_date.as_ref(), b.release_date.as_ref(), desc),
                 SortField::Year => cmp_opt(a.year, b.year, desc),
                 SortField::Rating => cmp_opt(a.rating, b.rating, desc),
@@ -903,7 +1012,7 @@ pub(crate) fn sort_rows(rows: &mut [ItemRow], spec: &[(SortField, bool)], bitrat
                 SortField::Index => cmp_opt(a.idx, b.idx, desc),
                 SortField::Id => cmp_opt(Some(a.id), Some(b.id), desc),
                 SortField::Updated => cmp_opt(Some(a.updated_at), Some(b.updated_at), desc),
-                SortField::Bitrate => cmp_opt(bitrates.get(&a.id), bitrates.get(&b.id), desc),
+                SortField::Bitrate => cmp_opt(values.bitrates.get(&a.id), values.bitrates.get(&b.id), desc),
             };
             if o != Ordering::Equal {
                 return o;
@@ -946,7 +1055,7 @@ enum Condition {
     All,
     /// A condition and its arguments; `state`: it reads the user's state `s`.
     Sql { sql: String, args: Vec<SqlArg>, state: bool },
-    /// Only [`Filter::matches`] can tell (Unicode case folding, calendar dates).
+    /// Only [`Filter::matches`] can tell (Unicode case folding).
     InMemory,
 }
 
@@ -1022,7 +1131,7 @@ impl Filter {
             (Level::Own, "addedAt") => self.date_sql("i.added_at", now),
             (Level::Own, "updatedAt") => self.date_sql("i.updated_at", now),
             (Level::Own, "lastViewedAt") => self.date_sql("s.last_played_at", now).reading_state(true),
-            (Level::Own, "originallyAvailableAt") => Condition::InMemory,
+            (Level::Own, "originallyAvailableAt") => self.date_sql(RELEASED_SECS_SQL, now),
             (Level::Own, "guid") => self.guid_sql(kind),
             (Level::Own, _) => Condition::none(),
         }
@@ -1217,6 +1326,7 @@ impl SortField {
         match self {
             SortField::Title => ("i.sort_title", false),
             SortField::Added => ("i.added_at", false),
+            SortField::EpisodeAdded => (EPISODE_ADDED_SQL, false),
             SortField::Released => ("i.release_date", true),
             SortField::Year => ("i.year", true),
             SortField::Rating => ("i.rating", true),
@@ -1275,14 +1385,41 @@ pub(crate) struct SectionQuery<'a> {
 
 impl<'a> SectionQuery<'a> {
     pub(crate) fn new(library_id: i64, kind: &'a str, params: &Params) -> Result<Self, FilterError> {
+        let mut sort = parse_sort(params.get("sort"));
+        // Only shows and seasons have episodes to go by; the others' own
+        // date (`episode.addedAt` on episodes) sorts as the column does.
+        if !matches!(kind, "show" | "season") {
+            for (field, _) in &mut sort {
+                if *field == SortField::EpisodeAdded {
+                    *field = SortField::Added;
+                }
+            }
+        }
         Ok(SectionQuery {
             library_id,
             kind,
             filter: Expr::parse(params, kind)?,
-            sort: parse_sort(params.get("sort")),
+            sort,
             cap: params.parse("limit"),
             now: now(),
         })
+    }
+
+    /// A listing `user` asks for with `params`. Those not told titles'
+    /// labels (see `labels::shown_to`) filter as if titles had none, so that
+    /// a label they guess finds nothing out. Smart collections and
+    /// playlists, whose filters are an administrator's, go by [`Self::new`].
+    pub(crate) fn asked_by(
+        user: &AuthUser,
+        library_id: i64,
+        kind: &'a str,
+        params: &Params,
+    ) -> Result<Self, FilterError> {
+        let mut query = Self::new(library_id, kind, params)?;
+        if !crate::labels::shown_to(user) {
+            query.filter.without_labels();
+        }
+        Ok(query)
     }
 
     /// The `page` of the items and how many there are: filtered, sorted and
@@ -1357,8 +1494,8 @@ impl<'a> SectionQuery<'a> {
         if !self.filter.is_empty() {
             rows.retain(|r| self.filter.matches(r, extras.get(&r.id), self.now));
         }
-        let bitrates = bitrates_for(db, &rows, &self.sort).await?;
-        sort_rows(&mut rows, &self.sort, &bitrates);
+        let values = sort_values(db, &rows, &self.sort).await?;
+        sort_rows(&mut rows, &self.sort, &values);
         if let Some(cap) = self.cap {
             rows.truncate(cap);
         }
@@ -1384,6 +1521,11 @@ fn filter_params(filter: &str) -> Params {
     )
 }
 
+/// How a smart filter orders what it finds.
+pub(crate) fn smart_sort(filter: &str) -> Vec<(SortField, bool)> {
+    parse_sort(filter_params(filter).get("sort"))
+}
+
 /// The kind a smart filter lists in `lib`, when the library has it.
 fn smart_kind(lib: &LibraryRow, params: &Params) -> Option<&'static str> {
     let kind = params.get("type").and_then(kind_for_number).unwrap_or(lib.kind().top_level_kind());
@@ -1400,9 +1542,24 @@ pub(crate) fn valid_smart_filter(lib: &LibraryRow, filter: &str) -> bool {
 /// What a smart collection's filter finds in `lib`, as `user_id` may see it,
 /// in its order. A filter Pley can't apply finds nothing.
 pub(crate) async fn smart_items(db: &Db, user_id: i64, lib: &LibraryRow, filter: &str) -> sqlx::Result<Vec<ItemRow>> {
+    smart_items_up_to(db, user_id, lib, filter, None).await
+}
+
+/// [`smart_items`], the first `most` of them when it's given (a row's
+/// worth): fewer read, rather than all of them cut afterwards.
+pub(crate) async fn smart_items_up_to(
+    db: &Db,
+    user_id: i64,
+    lib: &LibraryRow,
+    filter: &str,
+    most: Option<usize>,
+) -> sqlx::Result<Vec<ItemRow>> {
     let params = filter_params(filter);
     let Some(kind) = smart_kind(lib, &params) else { return Ok(Vec::new()) };
-    let Ok(query) = SectionQuery::new(lib.id, kind, &params) else { return Ok(Vec::new()) };
+    let Ok(mut query) = SectionQuery::new(lib.id, kind, &params) else { return Ok(Vec::new()) };
+    if let Some(most) = most {
+        query.cap = Some(query.cap.map_or(most, |cap| cap.min(most)));
+    }
     Ok(query.page(db, user_id, &Page::default()).await?.0)
 }
 
@@ -1417,6 +1574,23 @@ pub(crate) async fn smart_count(db: &Db, user_id: i64, lib: &LibraryRow, filter:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_choice_key_passes_through_a_query_string_and_reads_back() {
+        assert_eq!(choice_key("Science Fiction"), "Science Fiction");
+        for name in ["Disney+ Movies", "Action & Adventure", "R&B, Soul", "100%", "~41", "Café+"] {
+            let key = choice_key(name);
+            assert!(key.starts_with('~') && key[1..].chars().all(|c| c.is_ascii_hexdigit()), "{key}");
+            assert_eq!(choice_name(&key), name);
+            // A tool that spells the hex in capitals means the same key.
+            assert_eq!(choice_name(&key.to_uppercase()), name);
+        }
+        // What isn't such a key is a name, one that only looks like a key
+        // (`~41` would be "A", which is its own key) included.
+        for value in ["~", "~4", "~zz", "~ff", "~41", "~4142", "Plain"] {
+            assert_eq!(choice_name(value), value);
+        }
+    }
 
     fn params(pairs: &[(&str, &str)]) -> Params {
         Params(pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect())
@@ -1543,6 +1717,11 @@ mod tests {
         assert_eq!(
             parse_sort(Some("movie.addedAt:desc,titleSort")),
             vec![(SortField::Added, true), (SortField::Title, false)]
+        );
+        // Shows' Last Episode Date Added, apart from their own Date Added.
+        assert_eq!(
+            parse_sort(Some("episode.addedAt:desc,show.addedAt")),
+            vec![(SortField::EpisodeAdded, true), (SortField::Added, false)]
         );
         assert_eq!(parse_sort(None), vec![(SortField::Title, false)]);
         assert_eq!(date_secs("1970-01-02"), Some(86_400));
@@ -1822,7 +2001,7 @@ mod tests {
         }
         let sorted = |spec: &str| {
             let mut rows = rows.clone();
-            sort_rows(&mut rows, &parse_sort(Some(spec)), &HashMap::new());
+            sort_rows(&mut rows, &parse_sort(Some(spec)), &SortValues::default());
             rows.iter().map(|r| r.title.clone()).collect::<Vec<_>>()
         };
         assert_eq!(sorted("year"), ["Charlie", "Alpha", "Delta", "Bravo"], "ties by title, missing last");
@@ -2428,6 +2607,18 @@ mod tests {
             vec![("title", "zzz"), ("or", "1"), ("title", "")],
             vec![("year>>", "2000"), ("rating>>", "7"), ("title!", "zeta")],
             vec![("actor!", "1"), ("contentRating", "PG"), ("lastViewedAt>>", "0")],
+            vec![("originallyAvailableAt>>", "2000-01-01")],
+            vec![("originallyAvailableAt<<", "2001-05-01")],
+            vec![("originallyAvailableAt", "2005-03-03")],
+            vec![("originallyAvailableAt", "2001-05-01")],
+            vec![("originallyAvailableAt!", "2001-05-01")],
+            vec![("originallyAvailableAt!", "-1")],
+            vec![("originallyAvailableAt>", "1999-12-31")],
+            vec![("originallyAvailableAt<", "1969-10-01")],
+            vec![("originallyAvailableAt>>", "-9999999999999y")],
+            vec![("originallyAvailableAt>>", "-30d")],
+            vec![("originallyAvailableAt>>", "soon")],
+            vec![("originallyAvailableAt", "0")],
         ];
         // Only the in-memory path can check these.
         let memory_only: Vec<Vec<(&str, &str)>> = vec![
@@ -2435,8 +2626,6 @@ mod tests {
             vec![("title", "İ")],
             vec![("studio", "Étude")],
             vec![("title", "alpha,ÉCOLE")],
-            vec![("originallyAvailableAt>>", "2000-01-01")],
-            vec![("originallyAvailableAt", "2005-03-03")],
             vec![("title", "alpha"), ("or", "1"), ("title", "é")],
         ];
         movie_filters.extend(memory_only.iter().cloned());
@@ -2458,6 +2647,7 @@ mod tests {
             vec![("guid", "tvdb://073739")],
             vec![("guid", "tvdb://73739,tvdb://1")],
             vec![("label", "kids")],
+            vec![("originallyAvailableAt<<", "2000-01-01")],
         ];
         let season_filters: Vec<Vec<(&str, &str)>> = vec![
             vec![],
@@ -2468,6 +2658,7 @@ mod tests {
             vec![("show.index", "1")],
             vec![("index", "1")],
             vec![("season.title", "2")],
+            vec![("originallyAvailableAt>>", "2000-01-01")],
         ];
         let episode_filters: Vec<Vec<(&str, &str)>> = vec![
             vec![],
@@ -2486,6 +2677,7 @@ mod tests {
             vec![("index", "1")],
             vec![("viewCount>>", "0")],
             vec![("addedAt", "5001")],
+            vec![("originallyAvailableAt", "2004-09-22")],
         ];
         let mut compared = 0;
         for user in [1, 2] {
@@ -2539,6 +2731,67 @@ mod tests {
                     assert_eq!(found, expected, "user {user}, {pairs:?}, {page:?}");
                 }
             }
+        }
+    }
+
+    /// A row reads only its first titles of a smart collection, the
+    /// filter's own `limit` still holding when it is smaller.
+    #[tokio::test]
+    async fn a_smart_collection_gives_a_row_its_first_titles_alone() {
+        let dir = crate::testing::tempdir();
+        let db = listing_fixture(dir.path()).await;
+        let lib = crate::library::get_library(&db, 1).await.unwrap().unwrap();
+        let ids = |rows: Vec<ItemRow>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+        // In SQL, and in memory (a release date is compared there).
+        let filters = [
+            "sort=titleSort",
+            "unwatched=1&sort=rating:desc",
+            "sort=titleSort&limit=2",
+            "originallyAvailableAt!=-1&sort=originallyAvailableAt:desc",
+        ];
+        for filter in filters {
+            let all = ids(smart_items(&db, 1, &lib, filter).await.unwrap());
+            assert!(all.len() > 1, "{filter}: {all:?}");
+            for most in [0, 1, 3] {
+                let first = ids(smart_items_up_to(&db, 1, &lib, filter, Some(most)).await.unwrap());
+                assert_eq!(first, all[..most.min(all.len())], "{filter}, {most}");
+            }
+        }
+    }
+
+    /// Release dates in SQL are the dates `date_secs` reads.
+    #[tokio::test]
+    async fn release_dates_in_sql_are_read_as_in_memory() {
+        let dir = crate::testing::tempdir();
+        let db = Db::open(&dir.path().join("pley.db")).await.unwrap();
+        let dates = [
+            "2001-05-01",
+            "1969-12-31",
+            "0000-01-01",
+            "9999-12-31",
+            "2024-02-29",
+            "2005-02-31",
+            "2023-04-31",
+            "2024-13-01",
+            "2024-00-10",
+            "2024-01-00",
+            "2024-01-32",
+            "2024-05-01T12:30:00Z",
+            "2024-05-01 and more",
+            "2010",
+            "2010-05",
+            "20100501",
+            "2010-5-01",
+            "2010-05-1",
+            " 2010-05-01",
+            "",
+            "soon",
+        ];
+        let sql = format!("SELECT {RELEASED_SECS_SQL} FROM (SELECT ? AS release_date) i");
+        for date in dates {
+            let found: Option<i64> =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str())).bind(date).fetch_one(&db.read).await.unwrap();
+            assert_eq!(found, date_secs(date), "{date:?}");
         }
     }
 }

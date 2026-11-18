@@ -220,12 +220,13 @@ async fn settings_test_a_tmdb_key_before_saving_it() {
     let good = test(KEY).await;
     assert_eq!((good.body["ok"].clone(), good.body["message"].clone()), (json!(true), json!("TMDB accepted the key.")));
     let bad = test("nope").await;
-    assert_eq!(bad.body["ok"], json!(false));
+    assert_eq!((&bad.body["ok"], &bad.body["refused"]), (&json!(false), &json!(true)));
     assert!(bad.body["message"].as_str().unwrap().starts_with("TMDB rejected this key."), "{:?}", bad.body);
     // The key never shows up in what the test says.
     assert!(!bad.mentions("nope"));
     let none = app.post("/api/settings/test", &admin, json!({"service": "tmdb"})).await;
     assert_eq!(none.body["message"], json!("Enter a TMDB API key first."));
+    assert_eq!(none.body["refused"], json!(false), "not TMDB's answer");
     // Testing saves nothing.
     assert_eq!(app.get("/api/settings", &admin).await.body["tmdb_api_key"], json!(""));
     assert_eq!(mock.requests.lock().iter().filter(|r| r.starts_with("/configuration")).count(), 2);
@@ -268,8 +269,9 @@ async fn movies_are_matched_and_described() {
 
     // Both films are in the TMDB collection.
     let collections = app.get(&format!("/api/libraries/{lib}/collections"), &admin).await;
-    assert_eq!(titles(&collections.body["collections"]), ["Alien Collection"]);
-    assert_eq!(collections.body["collections"][0]["item_count"], json!(2));
+    let collections = common::own_collections(&collections.body);
+    assert_eq!(titles(&collections), ["Alien Collection"]);
+    assert_eq!(collections[0]["item_count"], json!(2));
 
     // A film TMDB doesn't know is not looked up again by every scan; a
     // forced scan tries again.

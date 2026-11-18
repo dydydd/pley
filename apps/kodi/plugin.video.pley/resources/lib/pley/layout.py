@@ -14,6 +14,23 @@ from collections import namedtuple
 
 WIDTH, HEIGHT = 1920, 1080
 
+# The add-on's words the windows' XML draws (strings.po ids). Kodi's own
+# $ADDON[] would draw them in Kodi's language: each is a Home window
+# property instead, which the add-on fills in the language shown
+# (kodi.show_words) and fills again when it changes.
+WORDS = (
+    30003, 30004, 30005, 30019, 30020, 30021, 30027, 30100, 30101, 30102, 30103, 30104, 30105, 30106, 30107, 30109,
+    30110, 30111, 30171, 30172, 30174, 30175, 30176, 30177, 30178, 30180, 30207, 30214, 30219, 30247, 30257,
+    30577,
+)
+
+
+def word(id_: int) -> str:
+    """The label that draws the words of `id_` (one of WORDS)."""
+    if id_ not in WORDS:
+        raise ValueError("%d isn't one of layout.WORDS" % id_)
+    return "$INFO[Window(Home).Property(pley.word.%d)]" % id_
+
 # pley's colours (PleyColors.kt), as Kodi writes them: AARRGGBB.
 BG = "FF0B0D10"
 SURFACE = "FF12151A"
@@ -254,11 +271,15 @@ LIBRARY_FILTER = 4022
 # row has no room for: Filter's twin says them while one is chosen.
 LIBRARY_UNWATCHED_ON, LIBRARY_GENRE_ON, LIBRARY_YEAR_ON = 4123, 4124, 4125
 LIBRARY_FILTER_ON = 4122
+# The Collections tab's chip, off and on, in the same row: Category.
+LIBRARY_CATEGORY, LIBRARY_CATEGORY_ON = 4028, 4128
 LIBRARY_COUNT = 4026
 LIBRARY_GRID = 4030  # one list per grid shape
 LIBRARY_EMPTY = 4040
+# The Recommended tab's rows, and the Collections tab's categories when it
+# has more than one.
 LIBRARY_ROWS = 4200
-LIBRARY_SLOTS = 5
+LIBRARY_SLOTS = 10
 
 # Search (TvSearchScreen).
 SEARCH_FIELD = 5011

@@ -126,10 +126,12 @@ private func eventually(_ condition: () -> Bool) async -> Bool {
         }
         let heard = Heard()
         let connected = OSAllocatedUnfairLock(initialState: 0)
+        let disconnected = OSAllocatedUnfairLock(initialState: 0)
         let reader = Task {
             for await signal in stream.signals() {
                 switch signal {
                 case .connected: connected.withLock { $0 += 1 }
+                case .disconnected: disconnected.withLock { $0 += 1 }
                 case .event(let event): heard.add(event)
                 }
             }
@@ -146,6 +148,8 @@ private func eventually(_ condition: () -> Bool) async -> Bool {
         server.endEvents()
         #expect(await eventually { server.eventConnects == 2 && connected.withLock { $0 } == 2 })
         #expect(waits.all == [1])
+        // Each connection that ended says so, before the next one opens.
+        #expect(disconnected.withLock { $0 } == 1)
 
         // A line too long drops the connection, and it connects again.
         server.pushEventText("data: " + String(repeating: "x", count: EventStream.maxLine + 10))
@@ -171,6 +175,30 @@ private func eventually(_ condition: () -> Bool) async -> Bool {
         let before = waits.all.count
         #expect(await eventually { waits.all.count > before + 1 })
         #expect(waits.all.suffix(1) == [30])
+    }
+
+    @Test func aStreamNamesItsDeviceAsOneThatTakesCasts() async throws {
+        let server = try await fixture()
+        defer { server.stop() }
+        let receiver = EventReceiver(id: "apple-test", deviceName: "Living room", deviceKind: .tv,
+                                     casts: [.item, .live])
+        let stream = EventStream(api: api(server), receiver: receiver) { _ in
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let reader = Task { for await _ in stream.signals() {} }
+        defer { reader.cancel() }
+        #expect(await eventually { server.openEventStreams == 1 })
+        let asked = try #require(server.requests("/api/events").first)
+        #expect(asked.query == ["receiver": "apple-test", "device_name": "Living room", "device_kind": "tv",
+                                "casts": "item,live"])
+        // The device takes casts while its stream is open.
+        let devices = try await api(server).remoteDevices()
+        #expect(devices.map(\.receiverId) == ["apple-test"])
+        #expect(devices.first?.name == "Living room" && devices.first?.kind == .tv)
+        #expect(devices.first?.casts == [.item, .live])
+        // What the app doesn't know of itself is left out, for the server to tell.
+        #expect(EventReceiver(id: "apple-test").query.map(\.name) == ["receiver", "casts"])
+        #expect(EventReceiver(id: "apple-test").query.last?.value == "item")
     }
 
     @Test func aRefusedAppStopsForGood() async throws {

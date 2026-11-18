@@ -8,6 +8,44 @@ describes how they are made.
 
 ## [Unreleased]
 
+### Added
+
+- A library's Collections are grouped by category, and can be narrowed
+  to one category; a collection's page shows its category.
+- A row's See all opens the collection it shows, and a Home row of
+  collections of the same title in several libraries opens them together.
+- Home's hero features the newest movies and shows you haven't watched,
+  as the web and Android do, each with why it's there, Play, Info and My
+  List. Right from its last button goes to the next title, and it turns
+  to the next by itself every few seconds while you aren't pressing
+  anything. Continue Watching is the first row under it.
+- A globe at the bottom right of Choose your server and the address
+  screen, and at the top right of the sign-in code, picks the TV's language before anyone signs in:
+  Automatic (the TV's own), English, Français or Español. The TV keeps the
+  choice, and a profile set to Automatic uses it.
+- Someone else in your household can cast to the TV from their phone or
+  browser while it is on your profile: the TV switches to their profile
+  (their phone or browser asks their PIN, not the TV) and plays what they
+  sent. A switch that fails says so and plays nothing.
+- When your phone or browser pauses, plays, seeks or skips a film or
+  episode on the TV, or changes its audio, subtitles or quality, the TV
+  says so for 2 s at the top right ("Paused", "+30 s", "Jumped to 12:34",
+  "Subtitles off") and doesn't bring up the player's controls. Controls
+  already up hide as they do while it plays, even once it is paused, until
+  a key is pressed on the TV.
+- When the server has video transcoding turned off, the Quality menu
+  offers only Original.
+
+### Changed
+
+- Recommended no longer ends with a row of every collection: it shows
+  the rows administrators chose.
+- The TV starts straight into Home as the profile it was left on when it
+  has no PIN, where a household of several profiles was asked "Who's
+  watching?" each time. A profile with a PIN still asks first, and Switch
+  profile still shows every profile. Settings' Always start as
+  calls this Profile used last, where it said Ask who's watching.
+
 ### Security
 
 - A crafted file's picture subtitles (PGS, DVB, VobSub) can no longer keep
@@ -33,6 +71,27 @@ describes how they are made.
 
 ### Added
 
+- Pley for Samsung TV is in French and Spanish as well as English: the
+  account's language, else the TV's, else the server's. Settings → Profile
+  → Language picks the account's, on all its devices, and the app changes
+  to it at once. On a server from before languages, which can't keep your
+  account's, the Language row keeps your choice on this TV.
+- Your phone or browser changes the quality of a film or episode playing
+  on the TV, as the player's Quality menu does (the pick is kept for the
+  next ones), and sees which is picked. A film or episode sent from a
+  title's page plays with the audio and subtitles picked there.
+- Your phone or browser plays a film, an episode, a show, an album, an
+  artist, a track, a playlist or a Live TV channel on the TV ("Play on…"):
+  it starts as the TV's own Play would, in place of what plays, and the
+  TV says "Playing from" the device it came from.
+- Your phone or browser changes the audio and subtitles of a film or
+  episode playing on the TV, as the player's own Audio and Subtitles do,
+  and sees which play.
+- Your phone or browser controls what plays on the TV: a film or episode
+  plays, pauses, seeks and skips, and goes on to the next one; music does
+  the same, and goes back a track; Live TV changes channel. Live TV
+  stopped from another device, or by the server's administrator, stops
+  on the TV and says who, with their message.
 - Live TV, where the server has IPTV channels for the profile, by
   category: Favourites, Recently watched, All
   channels, the regions in alphabetical order, each opening to its
@@ -51,10 +110,11 @@ describes how they are made.
   row. Needs a server that gives the TV's player keyed live addresses.
 - Requests, on a server that has them turned on. Discover, in the rail,
   shows what is trending and popular on TMDB, coming to cinemas, and
-  anime, each title marked with what the libraries have. A title's page
-  asks for a movie, or for a show's seasons picked in a panel beside it,
-  and says where its request is. Your requests follows them, and a
-  notice pops up once one is ready to watch; administrators get
+  anime, each title marked with what the libraries have; one a library
+  has whole opens its library page, where it plays, here and in Search.
+  A title's page asks for a movie, or for a show's seasons picked in a
+  panel beside it, and says where its request is. Your requests follows
+  them, and a notice pops up once one is ready to watch; administrators get
   Requests, opening on those that need attention, to approve, decline
   (with a reason typed on the TV's keyboard), mark as added by hand or
   delete. A number on the rail counts what needs attention or has news.
@@ -72,8 +132,13 @@ describes how they are made.
 
 ### Changed
 
+- Requests: a sign-in from before the app could ask says "Sign in again to ask for movies
+  and shows" without a second line, and its button reads Sign in.
 - The app's icon is square, as the TV's menu draws the other apps, where
   it was wider than the rest.
+- When the server can't be reached, the app says "Pley is offline", where
+  it said "Showing what Pley had saved. Reconnecting…". It still shows
+  what it saved and reconnects by itself.
 - Picture subtitles (PGS, VobSub, DVB) show within a few seconds of a
   playback starting or a seek, where they could take up to a minute: the
   TV tells the server where it plays, and the server reads those around it
@@ -108,6 +173,11 @@ describes how they are made.
 - Search's rows hold every result, up to 200 titles, 200 people and 200
   Live TV channels, where they stopped at 60 titles and 12 people and
   channels.
+- A programme's details in Live TV have Watch and the favourite side by
+  side, the favourite a star as in the live player, filled for a
+  favourite, where Watch and Add to or Remove from favourites were rows of
+  the panel. In the live player, the star no longer shows its words under
+  it, which ran under Channels.
 
 ### Removed
 
@@ -119,6 +189,16 @@ describes how they are made.
 - Audio above 48 kHz (AAC 5.1 at 96 kHz, say) plays clean: the TV decodes
   up to 48 kHz and garbled it without an error, so the server now converts
   such a track to 48 kHz while the video plays as it is.
+- A collection's page shows its titles under Play and Shuffle, where they
+  were drawn below the screen.
+- Live TV's channel up or down, still finding the next channel when another
+  is picked from the list or the app is hidden, no longer changes channel
+  a moment later.
+- Seeking in a track the server converts ends the track's session before
+  the new one starts, so a pause meanwhile no longer pauses the old one.
+- A film the TV can't play falls back one step at a time, to a conversion
+  of its audio before one of the whole film: the TV's player says a failure
+  twice, and the second skipped a step and started a second session.
 - Blu-ray subtitles that show two pictures at once, the first one forced,
   show both, and a picture the disc crops shows cropped.
 - Settings' Always start as no longer starts the TV as a profile with a
@@ -153,6 +233,10 @@ describes how they are made.
   type, one the remote's arrows can't reach.
 - Dolby Vision details call a profile 8 with the Blu-ray's base layer
   "Profile 8", as its label does, not "Profile 8.6".
+- A movie or episode with several versions plays the same version from
+  its page as from Home and Continue Watching: the one this TV plays
+  best, unless you pick another. The page's badges and tracks are that
+  version's.
 
 ## [0.0.1] - 2026-10-29
 

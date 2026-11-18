@@ -98,6 +98,13 @@ public enum Qualities {
         return [original, automatic] + sorted
     }
 
+    /// The qualities the menu offers for `file`: those worth offering
+    /// (`forFile`), or the original alone on a server that converts no video
+    /// (`PlaybackInfo.originalOnly`), which has no other to give.
+    public static func offered(_ file: MediaFile?, originalOnly: Bool) -> [QualityPreset] {
+        originalOnly ? [original] : forFile(file)
+    }
+
     /// The lines `preset` gives a file of `fileLines`: never more than the file's.
     public static func linesFor(_ preset: QualityPreset, fileLines: Int?) -> Int? {
         guard let most = preset.maxHeight else { return fileLines }
@@ -157,10 +164,10 @@ public enum Qualities {
 
     /// A quality by the menu's name: "Original", "Automatic", "8 Mbps 1080p".
     public static func label(_ preset: QualityPreset) -> String {
-        if preset.original { return "Original" }
-        if preset.automatic { return "Automatic" }
-        guard let kbps = preset.maxBitrateKbps, let lines = preset.maxHeight else { return "Original" }
-        return "\(kbps / 1000) Mbps \(linesLabel(lines))"
+        if preset.original { return localized("Original") }
+        if preset.automatic { return localized("Automatic") }
+        guard let kbps = preset.maxBitrateKbps, let lines = preset.maxHeight else { return localized("Original") }
+        return localized("\(kbps / 1000) Mbps \(linesLabel(lines))")
     }
 
     /// A quality as offered for a file of `fileLines`: one taller than the
@@ -169,7 +176,7 @@ public enum Qualities {
         guard let most = preset.maxHeight, let kbps = preset.maxBitrateKbps, let fileLines, fileLines < most else {
             return label(preset)
         }
-        return "\(kbps / 1000) Mbps \(linesLabel(fileLines))"
+        return localized("\(kbps / 1000) Mbps \(linesLabel(fileLines))")
     }
 
     /// "4K" for 2160 lines, "1080p" for 1080.

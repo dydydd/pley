@@ -1,5 +1,6 @@
 import CoreText
 import Foundation
+import PleyModel
 
 /// This device's own settings, kept in `UserDefaults` under `pley.settings.*`
 /// (the quality under the `pley.quality.*` keys the player has always
@@ -27,6 +28,24 @@ public final class AppSettings: @unchecked Sendable {
     public var lastSection: String? {
         get { defaults.string(forKey: Self.prefix + "section") }
         set { set(newValue, for: "section") }
+    }
+
+    // MARK: Language
+
+    /// The language picked on this device before signing in (the globe of
+    /// the servers and sign-in); `nil`: Automatic, the device's own. It
+    /// comes before the device's languages, and an account's Automatic
+    /// means it.
+    public var pickedLanguage: Language? {
+        get { Language.of(defaults.string(forKey: Self.prefix + "pickedLanguage")) }
+        set { set(newValue?.code, for: "pickedLanguage") }
+    }
+
+    /// The language the app showed last: the next start shows it at once,
+    /// before the server has said which one.
+    public var lastLanguage: Language? {
+        get { Language.of(defaults.string(forKey: Self.prefix + "lastLanguage")) }
+        set { set(newValue?.code, for: "lastLanguage") }
     }
 
     // MARK: Playback
@@ -157,11 +176,12 @@ public final class AppSettings: @unchecked Sendable {
 
     /// Puts `query` first among the profile's recent searches, once, keeping the last 10.
     public func rememberSearch(_ query: String, origin: String, profileId: Int) {
-        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Kept as it is stored, so a long query searched again replaces itself.
+        let query = String(query.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
         guard !query.isEmpty else { return }
         var recent = recentSearches(origin: origin, profileId: profileId)
         recent.removeAll { $0.caseInsensitiveCompare(query) == .orderedSame }
-        recent.insert(String(query.prefix(200)), at: 0)
+        recent.insert(query, at: 0)
         setRecent(Array(recent.prefix(Self.recentSearches)), origin: origin, profileId: profileId)
     }
 
@@ -173,6 +193,24 @@ public final class AppSettings: @unchecked Sendable {
         var all = defaults.dictionary(forKey: Self.prefix + "recentSearches") as? [String: [String]] ?? [:]
         all[Self.viewKey(origin, profileId)] = recent.isEmpty ? nil : recent
         defaults.set(all, forKey: Self.prefix + "recentSearches")
+    }
+
+    // MARK: Requests
+
+    /// The newest `updated_at` of the profile's requests whose news was
+    /// told (by a notice or by catching up), so none is told twice, across
+    /// starts too.
+    public func requestNewsMark(origin: String, profileId: Int) -> Int {
+        let all = defaults.dictionary(forKey: Self.prefix + "requestNews") as? [String: Int]
+        return all?[Self.viewKey(origin, profileId)] ?? 0
+    }
+
+    /// Raises the mark to `mark`; it never goes down.
+    public func setRequestNewsMark(_ mark: Int, origin: String, profileId: Int) {
+        var all = defaults.dictionary(forKey: Self.prefix + "requestNews") as? [String: Int] ?? [:]
+        let key = Self.viewKey(origin, profileId)
+        all[key] = max(all[key] ?? 0, mark)
+        defaults.set(all, forKey: Self.prefix + "requestNews")
     }
 
     // MARK: Libraries
@@ -270,9 +308,9 @@ public enum GridDensity: String, CaseIterable, Sendable {
 
     public var label: String {
         switch self {
-        case .small: "Small"
-        case .medium: "Medium"
-        case .large: "Large"
+        case .small: localized("Small")
+        case .medium: localized("Medium")
+        case .large: localized("Large")
         }
     }
 
@@ -345,8 +383,8 @@ public enum SubtitleSize: String, CaseIterable, Sendable {
     }
 
     public var label: String {
-        guard let scale else { return "System" }
-        return "\(Int((scale * 100).rounded())) %"
+        guard let scale else { return localized("System") }
+        return localized("\(Int((scale * 100).rounded())) %")
     }
 }
 
@@ -355,9 +393,9 @@ public enum SubtitleBackground: String, CaseIterable, Sendable {
 
     public var label: String {
         switch self {
-        case .system: "System"
-        case .none: "None"
-        case .darkBox: "Dark box"
+        case .system: localized("System")
+        case .none: localized("None")
+        case .darkBox: localized("Dark box")
         }
     }
 }
@@ -367,11 +405,11 @@ public enum SubtitleFont: String, CaseIterable, Sendable {
 
     public var label: String {
         switch self {
-        case .system: "System"
-        case .sansSerif: "Sans serif"
-        case .serif: "Serif"
-        case .monospace: "Monospace"
-        case .casual: "Casual"
+        case .system: localized("System")
+        case .sansSerif: localized("Sans serif")
+        case .serif: localized("Serif")
+        case .monospace: localized("Monospace")
+        case .casual: localized("Casual")
         }
     }
 
@@ -398,6 +436,6 @@ public enum SubtitleRaise: Int, CaseIterable, Sendable {
     public var share: Double { Double(rawValue) / 100 }
 
     public var label: String {
-        self == .bottom ? "Bottom" : "Raised \(rawValue) %"
+        self == .bottom ? localized("Bottom") : localized("Raised \(rawValue) %")
     }
 }

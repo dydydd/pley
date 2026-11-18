@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use futures::future::{BoxFuture, FutureExt, Shared};
 use parking_lot::Mutex;
-use pley_transcoder_api::{MediaInfo, MediaStream, StreamKind, ThumbnailRequest, Tonemapper};
+use pley_transcoder_api::{Capabilities, MediaInfo, MediaStream, StreamKind, ThumbnailRequest, Tonemapper};
 use tokio::sync::{Semaphore, watch};
 
 use crate::background::Background;
@@ -23,9 +23,12 @@ use crate::ffmpeg::Ffmpeg;
 use crate::matroska;
 use crate::metrics::Metrics;
 use crate::mks;
-use crate::plan::{MAX_DURATION_MS, PLACEBO_STATIC_PEAK, TextSource, ZSCALE_TONEMAP, untagged_hdr_fix};
+use crate::plan::{
+    MAX_DURATION_MS, PLACEBO_CURVE, PLACEBO_FALLBACK_PEAK, PLACEBO_STATIC_PEAK, TextSource, ZSCALE_TONEMAP,
+    placebo_still_options, untagged_hdr_fix,
+};
 use crate::probe::Prober;
-use crate::util::{MEDIA_INPUT_OPTIONS, file_key, input_arg, secs, touch, write_atomically};
+use crate::util::{MEDIA_INPUT_OPTIONS, file_key, input_arg, input_options, secs, touch, write_atomically};
 use crate::webvtt::{self, Event};
 
 pub struct Extractor {
@@ -172,7 +175,7 @@ impl Extractor {
         let width = req.width.unwrap_or(640).clamp(64, 1920);
         let plain = Picture::plain(width);
         let picture = if req.hdr {
-            Picture::hdr(width, media.as_deref().and_then(MediaInfo::video), &self.ff.caps.tonemappers)
+            Picture::hdr(width, media.as_deref().and_then(MediaInfo::video), &self.ff.caps)
         } else {
             plain.clone()
         };
@@ -237,7 +240,7 @@ impl Extractor {
     /// A subtitle track converted to WebVTT. `stream = None` means `path` is a
     /// subtitle file itself.
     pub async fn subtitle(self: &Arc<Self>, path: &str, stream: Option<i64>) -> ApiResult<String> {
-        let path = existing(path)?;
+        let path = if stream.is_some() { media(path)? } else { existing(path)? };
         match stream {
             None => {
                 Metrics::inc(&self.metrics.subtitle_extractions);
@@ -251,7 +254,7 @@ impl Extractor {
     /// players that show picture subtitles (PGS, VobSub, DVB) next to an HLS
     /// stream, whole: see [`Extractor::subtitle_matroska_so_far`].
     pub async fn subtitle_matroska(self: &Arc<Self>, path: &str, stream: Option<i64>) -> ApiResult<Vec<u8>> {
-        let path = existing(path)?;
+        let path = if stream.is_some() { media(path)? } else { existing(path)? };
         let track = picture_track_name(&path, stream)?;
         let target = self.subs_dir.join(format!("{track}.mks"));
         if let Some(bytes) = cached_mks(&target).await {
@@ -302,7 +305,7 @@ impl Extractor {
         start: PictureStart,
         rest: bool,
     ) -> ApiResult<(Vec<u8>, bool)> {
-        let path = existing(path)?;
+        let path = if stream.is_some() { media(path)? } else { existing(path)? };
         let track = picture_track_name(&path, stream)?;
         let target = self.subs_dir.join(format!("{track}.mks"));
         if let Some(bytes) = cached_mks(&target).await {
@@ -659,7 +662,7 @@ impl Extractor {
         let part = self.subs_dir.join(format!("{track}.mks.part"));
         let mut cmd = self.ff.command();
         cmd.args(["-loglevel", "error"])
-            .args(MEDIA_INPUT_OPTIONS)
+            .args(input_options(path))
             .arg("-i")
             .arg(input_arg(path))
             .args(["-map", &map, "-vn", "-an", "-dn", "-c", "copy", "-flush_packets", "1", "-f", "matroska", "-y"])
@@ -722,7 +725,7 @@ impl Extractor {
         index: i64,
         wait: Duration,
     ) -> ApiResult<(String, bool)> {
-        let path = existing(path)?;
+        let path = media(path)?;
         let key = file_key(&path)?;
         let target = self.subs_dir.join(format!("{key}_{index}.vtt"));
         if let Some(text) = cached_vtt(&target).await {
@@ -959,7 +962,7 @@ impl Extractor {
 
     async fn extract_vtt(&self, path: &Path, key: &str, streams: &[i64]) -> ApiResult<()> {
         let mut cmd = self.ff.command();
-        cmd.args(["-loglevel", "error", "-y"]).args(MEDIA_INPUT_OPTIONS).arg("-i").arg(input_arg(path));
+        cmd.args(["-loglevel", "error", "-y"]).args(input_options(path)).arg("-i").arg(input_arg(path));
         let mut outputs = Vec::new();
         for index in streams {
             let part = self.subs_dir.join(format!("{key}_{index}.vtt.part"));
@@ -991,7 +994,7 @@ impl Extractor {
         cmd.args(["-loglevel", "error", "-y"]);
         match source {
             TextSource::Embedded(index) => {
-                cmd.args(MEDIA_INPUT_OPTIONS).arg("-i").arg(input_arg(input)).args(["-map", &format!("0:{index}")]);
+                cmd.args(input_options(input)).arg("-i").arg(input_arg(input)).args(["-map", &format!("0:{index}")]);
             }
             TextSource::File(path) => {
                 if let Ok(head) = read_head(path, CHARSET_SAMPLE).await
@@ -1363,8 +1366,18 @@ fn picture_read_time(bytes: u64) -> Duration {
 /// How long reading a picture track through the Cues of the file at `path`
 /// may take: see [`picture_read_time`].
 fn picture_read_timeout(path: &Path) -> Duration {
+    if crate::source::is_remote(path) {
+        return REMOTE_PICTURE_READ_TIME;
+    }
     picture_read_time(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
 }
+
+/// How long reading a picture track through the Cues of an address
+/// ([`crate::source`]) may take, and how long FFmpeg may take to read all of
+/// one: what a big film's takes from a slow host, its size not being known
+/// without asking.
+const REMOTE_PICTURE_READ_TIME: Duration = Duration::from_secs(10 * 60);
+const REMOTE_PASS_TIME: Duration = Duration::from_secs(2 * 3600);
 
 /// The picture subtitles read through the Cues first: from this long before
 /// where the player is (what shows there may have started a while before)
@@ -1655,6 +1668,9 @@ fn mark_written(parts: &[&Path]) {
 /// How long FFmpeg may take to read the whole file at `path`: see
 /// [`pass_timeout`].
 fn whole_file_timeout(path: &Path) -> Duration {
+    if crate::source::is_remote(path) {
+        return REMOTE_PASS_TIME;
+    }
     pass_timeout(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
 }
 
@@ -1776,15 +1792,18 @@ impl Picture {
     /// HDR tone-mapped to SDR the best way available. Dolby Vision without a
     /// compatible base layer (profile 5) only gets its colours right through
     /// libplacebo, which applies the RPU; other HDR is cheaper on the CPU with
-    /// zimg, given the colour properties it needs.
-    fn hdr(width: u32, video: Option<&MediaStream>, tonemappers: &[Tonemapper]) -> Self {
-        let placebo = tonemappers.contains(&Tonemapper::Libplacebo);
-        let zscale = tonemappers.contains(&Tonemapper::Zscale);
+    /// zimg, given the colour properties it needs. libplacebo tone maps as it
+    /// does the video ([`PLACEBO_FALLBACK_PEAK`]).
+    fn hdr(width: u32, video: Option<&MediaStream>, caps: &Capabilities) -> Self {
+        let placebo = caps.tonemappers.contains(&Tonemapper::Libplacebo);
+        let zscale = caps.tonemappers.contains(&Tonemapper::Zscale);
         if placebo && (!zscale || video.is_some_and(MediaStream::is_dolby_vision_only)) {
+            let fallback = if caps.placebo_fallback_peak { format!(":{PLACEBO_FALLBACK_PEAK}") } else { String::new() };
+            let still = placebo_still_options(video);
             return Self {
                 init: &VULKAN_DEVICE,
                 vf: format!(
-                    "libplacebo=w={width}:h=-2:format=yuv420p:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:tonemapping=auto:{PLACEBO_STATIC_PEAK}"
+                    "libplacebo=w={width}:h=-2:format=yuv420p:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:{PLACEBO_CURVE}:{PLACEBO_STATIC_PEAK}{fallback}{still}"
                 ),
                 tone_mapped: true,
             };
@@ -1831,6 +1850,12 @@ async fn flush(path: &Path) -> std::io::Result<()> {
 fn existing(path: &str) -> ApiResult<PathBuf> {
     let path = PathBuf::from(path);
     if path.is_file() { Ok(path) } else { Err(ApiError::NotFound(format!("file not found: {}", path.display()))) }
+}
+
+/// [`existing`] for media whose tracks are read: a file, or an address
+/// ([`crate::source`]).
+fn media(path: &str) -> ApiResult<PathBuf> {
+    if crate::source::is_remote(Path::new(path)) { Ok(PathBuf::from(path)) } else { existing(path) }
 }
 
 /// The most a capture takes from ffmpeg's output (a cover, a thumbnail, a
@@ -2027,11 +2052,14 @@ mod tests {
             color_space: Some("bt2020nc".into()),
             ..Default::default()
         };
-        let all = [Tonemapper::Libplacebo, Tonemapper::Opencl, Tonemapper::Zscale];
+        let caps =
+            |tonemappers: &[Tonemapper]| Capabilities { tonemappers: tonemappers.to_vec(), ..Default::default() };
+        let all = caps(&[Tonemapper::Libplacebo, Tonemapper::Opencl, Tonemapper::Zscale]);
         // Profile 5 went through zimg, which fails on its untagged frames
         // ("Nothing was written into output file"): libplacebo applies its RPU.
         let picture = Picture::hdr(640, Some(&p5), &all);
         assert!(picture.vf.starts_with("libplacebo=w=640:h=-2:"), "{picture:?}");
+        assert!(!picture.vf.contains("fallback_peak"), "{picture:?}");
         assert_eq!(picture.init, VULKAN_DEVICE.as_slice());
         // Other HDR stays on the CPU.
         let picture = Picture::hdr(640, Some(&hdr10), &all);
@@ -2039,14 +2067,32 @@ mod tests {
         assert!(picture.init.is_empty() && picture.tone_mapped);
         // Without libplacebo, profile 5 frames are tagged for zimg: off
         // colours, but a picture.
-        let picture = Picture::hdr(640, Some(&p5), &[Tonemapper::Zscale]);
+        let picture = Picture::hdr(640, Some(&p5), &caps(&[Tonemapper::Zscale]));
         assert!(
             picture.vf.starts_with("setparams=color_trc=smpte2084:color_primaries=bt2020:colorspace=bt2020nc,zscale="),
             "{picture:?}"
         );
         // Unknown video (the probe failed) or no tone mapper.
-        assert_eq!(Picture::hdr(640, None, &[Tonemapper::Libplacebo]).init, VULKAN_DEVICE.as_slice());
-        assert_eq!(Picture::hdr(640, Some(&p5), &[Tonemapper::Opencl]), Picture::plain(640));
+        assert_eq!(Picture::hdr(640, None, &caps(&[Tonemapper::Libplacebo])).init, VULKAN_DEVICE.as_slice());
+        assert_eq!(Picture::hdr(640, Some(&p5), &caps(&[Tonemapper::Opencl])), Picture::plain(640));
+        // HDR10 that says nothing of its brightness, as the video is tone
+        // mapped, where libplacebo takes a peak for it.
+        let pleys = Capabilities { placebo_fallback_peak: true, ..caps(&[Tonemapper::Libplacebo]) };
+        let picture = Picture::hdr(640, Some(&hdr10), &pleys);
+        assert!(picture.vf.ends_with("tonemapping=bt.2390:peak_detect=0:fallback_peak=1000"), "{picture:?}");
+        // Profile 7 with a full enhancement layer: its base layer alone, as
+        // transcodes make it by default; a minimal layer's metadata is read.
+        let fel = MediaStream {
+            dynamic_range: Some(pley_transcoder_api::DynamicRange::DolbyVision),
+            dv_profile: Some(7),
+            dv_bl_compat: Some(6),
+            dv_el: Some(pley_transcoder_api::DolbyVisionLayer::Fel),
+            ..hdr10.clone()
+        };
+        let placebo = caps(&[Tonemapper::Libplacebo]);
+        assert!(Picture::hdr(640, Some(&fel), &placebo).vf.ends_with(":apply_dolbyvision=0"));
+        let mel = MediaStream { dv_el: Some(pley_transcoder_api::DolbyVisionLayer::Mel), ..fel };
+        assert!(!Picture::hdr(640, Some(&mel), &placebo).vf.contains("apply_dolbyvision"));
     }
 
     /// An extractor whose FFmpeg is `ffmpeg` and whose ffprobe doesn't exist.
@@ -2238,6 +2284,50 @@ mod tests {
         // Whole-track requests read them the same way.
         assert!(extractor.subtitle(&name, Some(4)).await.unwrap().ends_with("\nHi\n"));
         assert!(matches!(extractor.subtitle(&name, Some(3)).await, Err(ApiError::BadRequest(_))), "PGS isn't text");
+    }
+
+    /// A film at an address ([`crate::source`]) has its tracks read through
+    /// its Cues, a range at a time, as a file's are.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subtitles_of_an_address_are_read_through_its_cues() {
+        let dir = crate::testing::tempdir();
+        let extractor = extractor_without_ffmpeg(dir.path());
+        let served = crate::source::tests::serve(&matroska::tests::movie().write(dir.path())).await;
+        extractor.prober.remember(&served.path(), matroska::tests::movie_media());
+        let key = file_key(&served.path()).unwrap();
+        let wait = Duration::from_secs(10);
+
+        let (text, complete) = extractor.subtitle_so_far(&served.url, 2, wait).await.unwrap();
+        assert!(
+            complete
+                && text.contains(
+                    "
+Hello
+"
+                )
+                && text.ends_with(
+                    "
+No duration
+"
+                ),
+            "{text}"
+        );
+        assert!(dir.path().join("subtitles").join(format!("{key}_2.vtt")).is_file());
+        assert!(extractor.subtitle(&served.url, Some(4)).await.unwrap().ends_with(
+            "
+Hi
+"
+        ));
+        let (bytes, complete) = extractor
+            .subtitle_matroska_so_far(&served.url, Some(3), wait, PictureStart::default(), false)
+            .await
+            .unwrap();
+        assert!(complete && bytes.windows(10).any(|w| w == b"S_HDMV/PGS"));
+        // Only a file is a subtitle file, a cover or a frame's.
+        assert!(matches!(extractor.subtitle(&served.url, None).await, Err(ApiError::NotFound(_))));
+        assert!(matches!(extractor.cover(&served.url).await, Err(ApiError::NotFound(_))));
+        let frame = ThumbnailRequest { path: served.url.clone(), ..Default::default() };
+        assert!(matches!(extractor.thumbnail(&frame).await, Err(ApiError::NotFound(_))));
     }
 
     #[tokio::test]

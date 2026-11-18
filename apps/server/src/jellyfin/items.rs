@@ -11,11 +11,11 @@ use axum::http::{HeaderMap, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::dto::{self, Batch, Fields, Item, NameId};
 use super::ids::Kind;
-use super::{Jellyfin, JfError, JfResult, JfUser, Q, QueryResult};
+use super::{Body, Jellyfin, JfError, JfResult, JfUser, Q, QueryResult};
 use crate::auth::{AuthUser, SourceIp};
 use crate::catalog::{self, ItemRow};
 use crate::events::ServerEvent;
@@ -27,6 +27,9 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/userviews", get(views))
         .route("/users/{user}/views", get(views))
+        .route("/userviews/groupingoptions", get(grouping_options))
+        .route("/users/{user}/groupingoptions", get(grouping_options))
+        .route("/library/virtualfolders", get(virtual_folders))
         .route("/items", get(items))
         .route("/users/{user}/items", get(items))
         .route("/items/latest", get(latest))
@@ -37,7 +40,7 @@ pub fn routes() -> Router<AppState> {
         .route("/users/{user}/items/resume", get(resume))
         .route("/items/filters", get(filters))
         .route("/items/filters2", get(filters2))
-        .route("/items/{id}", get(item))
+        .route("/items/{id}", get(item).delete(super::lists::delete_item))
         .route("/users/{user}/items/{id}", get(user_item))
         .route("/items/{id}/similar", get(similar))
         .route("/items/{id}/localtrailers", get(trailers))
@@ -66,7 +69,10 @@ pub fn routes() -> Router<AppState> {
         .route("/tags", get(nothing))
         .route("/persons", get(persons))
         .route("/search/hints", get(search_hints))
-        .route("/playlists/{id}/items", get(playlist_items))
+        .route(
+            "/playlists/{id}/items",
+            get(playlist_items).post(super::lists::add_to_playlist).delete(super::lists::remove_from_playlist),
+        )
         .route("/userplayeditems/{id}", post(played).delete(unplayed))
         .route("/users/{user}/playeditems/{id}", post(user_played).delete(user_unplayed))
         .route("/userfavoriteitems/{id}", post(favorite).delete(unfavorite))
@@ -80,7 +86,8 @@ pub fn routes() -> Router<AppState> {
 /// The most items a page has: clients asking for more get this many.
 const MAX_LIMIT: usize = 1000;
 
-/// Libraries the user can see.
+/// Libraries the user can see. Audiobooks aren't among them: the API has
+/// no audiobook items to give Jellyfin's apps (`AuthUser::audiobooks`).
 pub async fn libraries(state: &AppState, user: &AuthUser) -> JfResult<Vec<LibraryRow>> {
     Ok(crate::access::visible_libraries(&state.db, user).await?)
 }
@@ -107,7 +114,7 @@ pub async fn dtos(
     rows: &[ItemRow],
     fields: Fields,
 ) -> JfResult<Vec<Item>> {
-    let batch = Batch::load(&state.db, user, rows, fields).await?;
+    let batch = Batch::load(state, user, rows, fields).await?;
     Ok(rows.iter().map(|row| dto::build(jellyfin, row, &batch)).collect())
 }
 
@@ -137,6 +144,36 @@ async fn views(
     Ok(answer(items, total, 0))
 }
 
+/// `/UserViews/GroupingOptions`: the libraries Jellyfin lets a user group
+/// into its views, its movies' and shows', by name. Pley groups nothing, but
+/// apps ask as they load their home screen, and Infuse stops at a `404`.
+async fn grouping_options(
+    State(state): State<AppState>,
+    Extension(jellyfin): Extension<Arc<Jellyfin>>,
+    JfUser { user, .. }: JfUser,
+    user_path: Option<Path<String>>,
+) -> JfResult<Json<Vec<NameId>>> {
+    if let Some(Path(id)) = user_path {
+        own(&jellyfin, &user, &id)?;
+    }
+    let mut options: Vec<NameId> = libraries(&state, &user)
+        .await?
+        .iter()
+        .filter(|lib| lib.kind() != crate::library::LibraryKind::Music)
+        .map(|lib| NameId { name: lib.name.clone(), id: jellyfin.ids.of(Kind::Library, lib.id) })
+        .collect();
+    options.sort_by_key(|option| option.name.to_lowercase());
+    Ok(Json(options))
+}
+
+/// `/Library/VirtualFolders`: the libraries and their folders on disk, which
+/// Jellyfin shows administrators alone. Nothing administers through this
+/// API, so everyone is refused as Jellyfin refuses those who don't (`403`):
+/// apps that ask as they load (Infuse) carry on, and stop at a `404`.
+async fn virtual_folders(_user: JfUser) -> JfError {
+    JfError::Forbidden
+}
+
 // ------------------------------------------------------------------ listings
 
 /// Jellyfin's sorts as the listing's (`SortBy=SortName,ProductionYear`,
@@ -147,7 +184,9 @@ fn sort_of(q: &Q) -> String {
     for (i, field) in q.list("sortBy").iter().enumerate() {
         let key = match field.to_ascii_lowercase().as_str() {
             "sortname" | "name" => "titleSort",
-            "datecreated" | "datelastcontentadded" => "addedAt",
+            "datecreated" => "addedAt",
+            // A series by its newest episode, anything else by its own date.
+            "datelastcontentadded" => "episode.addedAt",
             "premieredate" => "originallyAvailableAt",
             "productionyear" => "year",
             "communityrating" | "criticrating" => "rating",
@@ -258,7 +297,8 @@ async fn list_libraries(
             pairs.push(("id".into(), ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")));
         }
         let params = Params(pairs);
-        let (found, count) = SectionQuery::new(lib.id, kind, &params)?.page(&state.db, user.id, &window).await?;
+        let (found, count) =
+            SectionQuery::asked_by(user, lib.id, kind, &params)?.page(&state.db, user.id, &window).await?;
         rows.extend(found);
         total += count;
     }
@@ -266,8 +306,8 @@ async fn list_libraries(
         shuffle(&mut rows);
     } else if merged {
         let sort = listing::parse_sort(Some(&sort_of(q)).filter(|s| !s.is_empty()).map(String::as_str));
-        let bitrates = listing::bitrates_for(&state.db, &rows, &sort).await?;
-        listing::sort_rows(&mut rows, &sort, &bitrates);
+        let values = listing::sort_values(&state.db, &rows, &sort).await?;
+        listing::sort_rows(&mut rows, &sort, &values);
     }
     if random || merged {
         rows = rows.into_iter().skip(page.start).take(page.size.unwrap_or(usize::MAX)).collect();
@@ -326,7 +366,7 @@ async fn list(state: &AppState, jellyfin: &Jellyfin, user: &AuthUser, q: &Q) -> 
         return Ok(paged(visible(catalog::items_by_ids(&state.db, user.id, &ids).await?)));
     }
     if let Some(term) = q.get("searchTerm") {
-        let rows = visible(catalog::search(&state.db, user.id, term, 200).await?);
+        let rows = visible(crate::search::items(&state.db, user.id, term, 200).await?);
         return Ok(paged(rows));
     }
 
@@ -375,7 +415,14 @@ async fn list(state: &AppState, jellyfin: &Jellyfin, user: &AuthUser, q: &Q) -> 
             Ok(page.apply(rows))
         }
         Some((Kind::Collection, id)) => {
-            let (_, rows) = crate::collections::get(&state.db, user, id).await?.ok_or(JfError::NotFound)?;
+            let (_, rows) = crate::collections::get(
+                &state.db,
+                user,
+                id,
+                crate::i18n::server_language(&state.settings.get().language),
+            )
+            .await?
+            .ok_or(JfError::NotFound)?;
             Ok(paged(visible(rows)))
         }
         Some((Kind::Playlist, id)) => {
@@ -435,9 +482,16 @@ async fn lists(state: &AppState, jellyfin: &Jellyfin, user: &AuthUser, q: &Q) ->
             if q.get("parentId").is_some_and(|p| jellyfin.ids.number(Kind::Library, p) != Some(lib.id)) {
                 continue;
             }
-            for c in crate::collections::list(&state.db, user, lib.id).await? {
+            for c in crate::collections::list_shared(
+                &state.db,
+                user,
+                lib.id,
+                crate::i18n::server_language(&state.settings.get().language),
+            )
+            .await?
+            {
                 let tag = collection_tag(jellyfin, c.updated_at, user);
-                items.push(list_item(
+                let mut collection = list_item(
                     jellyfin,
                     Kind::Collection,
                     c.id,
@@ -448,7 +502,9 @@ async fn lists(state: &AppState, jellyfin: &Jellyfin, user: &AuthUser, q: &Q) ->
                     c.created_at,
                     c.summary.clone(),
                     Some(tag),
-                ));
+                );
+                collection.can_delete = manages(user);
+                items.push(collection);
             }
         }
         items.sort_by(|a, b| a.sort_name.cmp(&b.sort_name));
@@ -491,6 +547,8 @@ fn list_item(
         id: jellyfin.ids.of(kind, id),
         etag: Some(format!("{updated_at:x}")),
         date_created: Some(super::users::iso(created_at)),
+        // Playlists are listed to their owner alone, who may delete them.
+        can_delete: kind == Kind::Playlist,
         sort_name: Some(title.to_lowercase()),
         is_folder: true,
         kind: item_type,
@@ -506,6 +564,11 @@ fn list_item(
         item.image_tags.insert("Primary", tag);
     }
     item
+}
+
+/// Whether the caller changes collections: with `manage` ([`super::JfManager`]).
+fn manages(user: &AuthUser) -> bool {
+    user.compatibility_allows(crate::auth::compatibility::Scope::Manage)
 }
 
 /// A collection's picture tag: when it last changed, and whose list it was
@@ -534,6 +597,11 @@ async fn items(
     }
     if let Some((items, total)) = lists(&state, &jellyfin, &user, &q).await? {
         return Ok(answer(items, total, start));
+    }
+    // A playlist's titles, as some apps list them, with their entries' ids.
+    let playlist = q.get("parentId").and_then(|p| jellyfin.ids.number(Kind::Playlist, p));
+    if let Some(playlist) = playlist.filter(|_| q.get("ids").is_none() && q.get("searchTerm").is_none()) {
+        return playlist_entries(&state, &jellyfin, &user, playlist, &q).await;
     }
     let (rows, total) = list(&state, &jellyfin, &user, &q).await?;
     let items = dtos(&state, &jellyfin, &user, &rows, Fields::of(&q)).await?;
@@ -568,7 +636,7 @@ async fn latest(
     }
     // One library's are in its order already; several are merged.
     if libs.len() > 1 {
-        rows.sort_by_key(|r| std::cmp::Reverse(r.added_at));
+        catalog::sort_newest_added(&state.db, &mut rows).await?;
     }
     rows.truncate(limit as usize);
     Ok(Json(dtos(&state, &jellyfin, &user, &rows, Fields::of(&q)).await?).into_response())
@@ -699,7 +767,7 @@ async fn suggestions(
                 .filter(|r| matches!(r.kind.as_str(), "movie" | "show") && !r.watched && r.position_ms == 0),
         );
     }
-    rows.sort_by_key(|r| std::cmp::Reverse(r.added_at));
+    catalog::sort_newest_added(&state.db, &mut rows).await?;
     rows.truncate(limit);
     let total = rows.len();
     let items = dtos(&state, &jellyfin, &user, &rows, Fields::of(&q)).await?;
@@ -742,9 +810,16 @@ async fn other(state: &AppState, jellyfin: &Jellyfin, user: &AuthUser, kind: Kin
             Ok(item)
         }
         Kind::Collection => {
-            let (c, _) = crate::collections::get(&state.db, user, id).await?.ok_or(JfError::NotFound)?;
+            let (c, _) = crate::collections::get(
+                &state.db,
+                user,
+                id,
+                crate::i18n::server_language(&state.settings.get().language),
+            )
+            .await?
+            .ok_or(JfError::NotFound)?;
             let tag = collection_tag(jellyfin, c.updated_at, user);
-            Ok(list_item(
+            let mut collection = list_item(
                 jellyfin,
                 Kind::Collection,
                 c.id,
@@ -755,7 +830,9 @@ async fn other(state: &AppState, jellyfin: &Jellyfin, user: &AuthUser, kind: Kin
                 c.created_at,
                 c.summary.clone(),
                 Some(tag),
-            ))
+            );
+            collection.can_delete = manages(user);
+            Ok(collection)
         }
         Kind::Playlist => {
             let (p, _) = crate::playlists::get_rows(&state.db, user, id).await?.ok_or(JfError::NotFound)?;
@@ -780,8 +857,25 @@ async fn details(state: &AppState, jellyfin: &Jellyfin, user: &AuthUser, id: &st
     match jellyfin.ids.read(id) {
         Some((Kind::Item, _)) => {
             let row = visible_item(state, jellyfin, user, id).await?;
-            let mut items = dtos(state, jellyfin, user, &[row], Fields::all()).await?;
-            Ok(Json(items.remove(0)).into_response())
+            // Opened, as on Pley's own item page: its seek previews are made.
+            if matches!(row.kind.as_str(), "movie" | "episode") {
+                for file in catalog::files_for_item(&state.db, row.id).await? {
+                    state.trickplay.request(&file);
+                }
+            }
+            let mut items = dtos(state, jellyfin, user, std::slice::from_ref(&row), Fields::all()).await?;
+            let mut item = items.remove(0);
+            // What an editor sends back: the locks and the labels (to editors
+            // only, see `labels::shown_to`).
+            let (locked, all, sort) = super::editing::locks(state, row.id).await?;
+            item.locked_fields = Some(locked);
+            item.lock_data = Some(all);
+            item.forced_sort_name = sort;
+            if crate::labels::shown_to(user) {
+                item.tags =
+                    Some(crate::labels::for_items(&state.db, &[row.id]).await?.remove(&row.id).unwrap_or_default());
+            }
+            Ok(Json(item).into_response())
         }
         Some((kind, number)) => Ok(Json(other(state, jellyfin, user, kind, number).await?).into_response()),
         None => Err(JfError::NotFound),
@@ -1028,7 +1122,8 @@ async fn artists(
     let window = if several { Page { start: 0, size: page.size.map(|s| s + page.start) } } else { page };
     let (mut rows, mut total) = (Vec::new(), 0);
     for lib in &libs {
-        let (found, count) = SectionQuery::new(lib.id, "artist", &params)?.page(&state.db, user.id, &window).await?;
+        let (found, count) =
+            SectionQuery::asked_by(&user, lib.id, "artist", &params)?.page(&state.db, user.id, &window).await?;
         rows.extend(found);
         total += count;
     }
@@ -1121,7 +1216,7 @@ async fn persons(
 ) -> JfResult<Response> {
     let Some(term) = q.get("searchTerm") else { return Ok(answer(Vec::new(), 0, 0)) };
     let limit = q.number("limit").unwrap_or(20).clamp(1, 100);
-    let found = crate::people::search(&state.db, user.id, term, limit).await?;
+    let found = crate::search::people(&state.db, user.id, term, limit).await?;
     let items: Vec<Item> = found
         .into_iter()
         .map(|p| {
@@ -1187,7 +1282,7 @@ async fn search_hints(
     let limit = q.number("limit").unwrap_or(20).clamp(1, 100) as usize;
     let wanted: Vec<&'static str> = q.list("includeItemTypes").iter().filter_map(|t| dto::kind_of_type(t)).collect();
     let libs = libraries(&state, &user).await?;
-    let rows: Vec<ItemRow> = catalog::search(&state.db, user.id, term, 200)
+    let rows: Vec<ItemRow> = crate::search::items(&state.db, user.id, term, 200)
         .await?
         .into_iter()
         .filter(|r| {
@@ -1227,10 +1322,33 @@ async fn playlist_items(
     q: Q,
 ) -> JfResult<Response> {
     let id = jellyfin.ids.number(Kind::Playlist, &id).ok_or(JfError::NotFound)?;
-    let (_, entries) = crate::playlists::get_rows(&state.db, &user, id).await?.ok_or(JfError::NotFound)?;
-    let page = page(&q);
-    let (rows, total) = page.apply(entries.into_iter().map(|(_, row)| row).collect());
-    let items = dtos(&state, &jellyfin, &user, &rows, Fields::of(&q)).await?;
+    playlist_entries(&state, &jellyfin, &user, id, &q).await
+}
+
+/// The entries of playlist `id` the user sees, in its order, each with its
+/// own id (`PlaylistItemId`), by which apps remove and move it: an item may
+/// be there more than once. `IncludeItemTypes` and `ExcludeItemTypes`
+/// narrow them, as other lists.
+async fn playlist_entries(
+    state: &AppState,
+    jellyfin: &Jellyfin,
+    user: &AuthUser,
+    id: i64,
+    q: &Q,
+) -> JfResult<Response> {
+    let (_, mut entries) = crate::playlists::get_rows(&state.db, user, id).await?.ok_or(JfError::NotFound)?;
+    let wanted: Vec<&'static str> = q.list("includeItemTypes").iter().filter_map(|t| dto::kind_of_type(t)).collect();
+    let excluded: Vec<&'static str> = q.list("excludeItemTypes").iter().filter_map(|t| dto::kind_of_type(t)).collect();
+    entries.retain(|(_, row)| {
+        (wanted.is_empty() || wanted.contains(&row.kind.as_str())) && !excluded.contains(&row.kind.as_str())
+    });
+    let page = page(q);
+    let (entries, total) = page.apply(entries);
+    let (keys, rows): (Vec<i64>, Vec<ItemRow>) = entries.into_iter().unzip();
+    let mut items = dtos(state, jellyfin, user, &rows, Fields::of(q)).await?;
+    for (item, entry) in items.iter_mut().zip(keys) {
+        item.playlist_item_id = Some(jellyfin.ids.of(Kind::PlaylistEntry, entry));
+    }
     Ok(answer(items, total, page.start))
 }
 
@@ -1238,7 +1356,7 @@ async fn playlist_items(
 
 /// Pley's artwork kind and Jellyfin's image type: a poster is Primary (an
 /// episode's still), a backdrop Backdrop, a frame of the video Thumb.
-fn artwork_kind(row_kind: &str, image: &str) -> Option<&'static str> {
+pub(super) fn artwork_kind(row_kind: &str, image: &str) -> Option<&'static str> {
     Some(match image {
         "primary" if matches!(row_kind, "episode" | "extra") => "thumb",
         "primary" => "poster",
@@ -1468,17 +1586,6 @@ async fn user_unfavorite(
     set_favorite(&s, &j, &user, &id, false).await
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct UserDataUpdate {
-    #[serde(default)]
-    played: Option<bool>,
-    #[serde(default)]
-    is_favorite: Option<bool>,
-    #[serde(default)]
-    playback_position_ticks: Option<i64>,
-}
-
 async fn get_user_data(
     State(s): State<AppState>,
     Extension(j): Extension<Arc<Jellyfin>>,
@@ -1499,35 +1606,74 @@ async fn user_get_user_data(
 }
 
 /// `POST /UserItems/{id}/UserData`: played, favorite, or the resume point
-/// cleared (`PlaybackPositionTicks: 0`).
+/// set or cleared (`PlaybackPositionTicks`). Sync tools such as WatchState
+/// copy a place in a video from another server this way, sending the ticks
+/// as text, with when it was played (`LastPlayedDate`), which Pley keeps.
 async fn update_user_data(
     state: &AppState,
     jellyfin: &Jellyfin,
     user: &AuthUser,
     id: &str,
-    body: UserDataUpdate,
+    body: Body,
 ) -> JfResult<Response> {
     let row = visible_item(state, jellyfin, user, id).await?;
-    if let Some(played) = body.played {
+    // What can't be read is refused, as Jellyfin does: a sync tool told it
+    // worked would not send it again.
+    let given = |name: &str| body.get(name).is_some_and(|v| !v.is_null());
+    let ticks = match body.number("PlaybackPositionTicks") {
+        None if given("PlaybackPositionTicks") => {
+            return Err(JfError::BadRequest("PlaybackPositionTicks is not a whole number".into()));
+        }
+        ticks => ticks,
+    };
+    let last_played = match body.str("LastPlayedDate").and_then(crate::util::iso_secs) {
+        None if given("LastPlayedDate") => return Err(JfError::BadRequest("LastPlayedDate is not a date".into())),
+        at => at,
+    };
+    // Apps that post back the whole UserData they were given, to change one
+    // thing, send what it holds too: only what differs changes. (Marking
+    // unplayed clears the place, which `Played: false` as given mustn't, and
+    // watched takes a movie off My List, which `IsFavorite: true` as given
+    // mustn't put back.)
+    let played = body.flag("Played");
+    let marked = played.filter(|played| *played != dto::played(&row));
+    let favorite = match body.flag("IsFavorite") {
+        Some(favorite) if matches!(row.kind.as_str(), "movie" | "show") => {
+            Some((favorite, catalog::in_watchlist(&state.db, user.id, row.id).await?))
+        }
+        _ => None,
+    };
+    if let Some(played) = marked {
         mark(state, jellyfin, user, id, played).await?;
     }
-    if let Some(favorite) = body.is_favorite
-        && matches!(row.kind.as_str(), "movie" | "show")
+    if let Some((favorite, listed)) = favorite
+        && favorite != listed
     {
         set_favorite(state, jellyfin, user, id, favorite).await?;
     }
-    if body.playback_position_ticks == Some(0) && row.position_ms > 0 && body.played.is_none() {
-        catalog::record_progress(
-            &state.db,
-            &state.events,
-            user.id,
-            row.id,
-            0,
-            row.duration_ms.unwrap_or(0),
-            None,
-            "stopped",
-        )
-        .await?;
+    // Only what plays has a place, as with players' reports, and only a
+    // place other than the one kept moves it (one just marked has none).
+    let kept_ms = if marked.is_some() { 0 } else { row.position_ms };
+    let moved = ticks
+        .map(|t| t.max(0) / dto::TICKS_PER_MS)
+        .filter(|ms| played != Some(true) && dto::is_playable(&row.kind) && catalog::resume_point(*ms) != kept_ms);
+    let mut counted = false;
+    if let Some(ms) = moved {
+        let duration = row.duration_ms.unwrap_or(0);
+        let recorded =
+            catalog::record_progress(&state.db, &state.events, user.id, row.id, ms, duration, None, "stopped").await?;
+        if recorded.left_watchlist {
+            state.events.send(ServerEvent::WatchlistChanged { user_id: user.id });
+        }
+        counted = recorded.counted;
+    }
+    // Clocks run ahead, and a time to come would keep the item first in
+    // Continue Watching: it is today at the latest.
+    if (marked.is_some() || moved.is_some())
+        && let Some(at) = last_played.filter(|at| *at > 0)
+    {
+        let at = at.min(crate::util::now());
+        catalog::set_last_played(&state.db, &state.events, user.id, row.id, &row.kind, at, counted).await?;
     }
     Ok(Json(user_data_of(state, jellyfin, user, id).await?).into_response())
 }
@@ -1537,7 +1683,7 @@ async fn set_user_data(
     Extension(j): Extension<Arc<Jellyfin>>,
     JfUser { user, .. }: JfUser,
     Path(id): Path<String>,
-    Json(body): Json<UserDataUpdate>,
+    body: Body,
 ) -> JfResult<Response> {
     update_user_data(&s, &j, &user, &id, body).await
 }
@@ -1547,7 +1693,7 @@ async fn user_set_user_data(
     Extension(j): Extension<Arc<Jellyfin>>,
     JfUser { user, .. }: JfUser,
     Path((u, id)): Path<(String, String)>,
-    Json(body): Json<UserDataUpdate>,
+    body: Body,
 ) -> JfResult<Response> {
     own(&j, &user, &u)?;
     update_user_data(&s, &j, &user, &id, body).await

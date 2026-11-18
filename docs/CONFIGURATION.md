@@ -7,8 +7,33 @@ How to set Pley up once it runs. Installing it is in
 
 On start, Pley prints a link with a one-time setup code
 (`http://localhost:7539/setup?code=…`; on a desktop the tray icon opens it).
-Open it, create the administrator account and add a library. Nobody without
-the code can claim a new server.
+Nobody without the code can claim a new server. Setup is one card, with how
+far it is along its top:
+
+1. **The account.** The administrator's username and password, and the
+   setup code, filled in when the link carries it.
+2. **Your server.** What Pley will use, a row each, to confirm or change:
+   the server's name, Pley's language, the language of titles and summaries
+   (the browser's, where TMDB and TheTVDB have it), the country (whose age
+   ratings are read), a TMDB key for movies' posters and details
+   (optional), and, where devices on the network can reach Pley, whether
+   Apple devices find it by Bonjour (yes, but on what looks like Docker's
+   own network, where they couldn't).
+3. **How to start.** Bring over a Plex server's libraries, profiles and
+   what each person watched ([MOVING_FROM_PLEX.md](MOVING_FROM_PLEX.md)),
+   or start fresh.
+4. **Your libraries**, starting fresh. A row each for Movies, TV Shows and
+   Music: give each its folders, remove any you don't have, and add more
+   of any type, such as Kids Movies, under their own names. Start watching
+   adds each one given a folder and starts its scan; Later leaves with
+   none. In a container with no media folder mounted, the step says so and
+   how to mount one.
+
+From how to start onwards, Back goes a step back; the account, once made,
+stays. Everything setup asks for is in Settings afterwards. Home then shows
+administrators how far the libraries' first scans are, which of them it's
+on, and each library ticked off as it's done; seek previews and intro
+detection wait until they are.
 
 `pley reset-password <user> [--admin]` resets a lost password. It asks for
 the new one (or reads it from standard input) and turns that account's
@@ -25,7 +50,7 @@ example, `--plex-bind` is also `PLEY_PLEX_BIND` and `plex_bind`.
 |---|---|---|
 | `--bind` | `0.0.0.0:7539` | Listen address (7539 spells PLEY on a keypad); several separated by commas |
 | `--plex-bind` | `web` (Pley's own port) | [Plex-compatible API](COMPATIBILITY.md): `off`, or addresses of its own (`0.0.0.0:32400`), several as with `--bind` |
-| `--jellyfin-bind` | `off` | [Jellyfin-compatible API](COMPATIBILITY.md): `web` (Pley's own port), or addresses of its own (`0.0.0.0:8096`), several as with `--bind` |
+| `--jellyfin-bind` | `web` (Pley's own port) | [Jellyfin-compatible API](COMPATIBILITY.md): `off`, or addresses of its own (`0.0.0.0:8096`), several as with `--bind` |
 | `--data-dir` | `%LOCALAPPDATA%\pley`, `~/Library/Application Support/pley`, `~/.local/share/pley` | Database, caches and artwork ([STORAGE.md](STORAGE.md)) |
 | `--ffmpeg`, `--ffprobe` | from `PATH` | Passed to the transcoder |
 | `--transcoder-url` | | Use a transcoder running elsewhere instead of starting one |
@@ -38,8 +63,9 @@ example, `--plex-bind` is also `PLEY_PLEX_BIND` and `plex_bind`.
 Everything else is set in the web app:
 
 - **Settings → Server**: the server name, metadata sources and keys, scanning.
-- **Settings → Transcoder**: hardware acceleration, tone mapping and transcode
-  limits.
+- **Settings → Transcoder**: hardware acceleration, tone mapping, whether
+  video is transcoded at all, and how many streams run at once (video
+  transcodes, and all of them).
 - **Settings → Network**: where Pley listens (networks, port, the Plex- and
   Jellyfin-compatible APIs, discovery, Bonjour), changed while Pley runs and
   saved in `pley.toml`, unless `--bind`, `--plex-bind`, `--jellyfin-bind`,
@@ -67,8 +93,9 @@ its console window, or signing out.
 
 - *Automatic* uses TMDB for TV when it has a key, then TheTVDB, else TVmaze.
   Changing the source fetches every show again.
-- Without a TMDB key, movies keep their file names and local artwork: no
-  keyless source has movie artwork.
+- Without a TMDB key, movies keep their file names and local artwork, or
+  what their [NFO files](#nfo-files) say: no keyless source has movie
+  artwork.
 - TVmaze is in English and has no content ratings. Its specials are season 0,
   in air date order.
 - MusicBrainz only fills in what the tags lack and allows one request a
@@ -80,3 +107,119 @@ data from TVmaze is licensed
 from TheTVDB; please consider adding missing information or subscribing.
 Music data from MusicBrainz is public domain (CC0); covers from the Cover Art
 Archive belong to their owners.
+
+## NFO files
+
+Kodi, Jellyfin, Emby, Radarr, Sonarr, tinyMediaManager and MediaElch keep a
+title's metadata in an `.nfo` file next to it. Pley reads them in movie and
+TV libraries, at each scan:
+
+| Item | File |
+|---|---|
+| Movie | `<video name>.nfo`, else `movie.nfo` in a folder that holds no other movie |
+| Show | `tvshow.nfo` in the show's folder |
+| Season | `season.nfo` in the season's folder: its title and summary only |
+| Episode | `<video name>.nfo`; a file of several episodes holds one `<episodedetails>` each |
+
+- **Ids**: TMDB, IMDb, TheTVDB and TVmaze (`<uniqueid>`, or the older
+  `<tmdbid>`, `<imdbid>`, `<tvdbid>`, `<id>`), or a link to the title's page
+  on one of those sites, as in Kodi's NFO files that hold only a link. A
+  movie or show with ids is looked up by them instead of searched for by
+  name: they win over a match found by name, or an id in the names
+  (`{tmdb-603}`), unless that match has one of them.
+- **Fields**: title, original title, sort title, year, release date
+  (`premiered`, `releasedate` or `aired`), summary (`plot`, else
+  `outline`), tagline, content rating (`mpaa` or `certification`), genres,
+  studio and rating. Of several countries' ratings (`GB:15 / US:R`), the
+  server's country's is taken (Settings › Server), else the US's, else
+  the first.
+- **Lock**: Jellyfin's `<lockdata>true</lockdata>` keeps the item from being
+  fetched online at all, Refresh included.
+- Cast, collections (`<set>`), tags and watch state aren't read. Picture
+  addresses (`<thumb>`, `<fanart>`) are never fetched: Pley takes the
+  `poster.jpg`, `fanart.jpg` and other pictures next to the title, which
+  the same tools save.
+
+What wins, field by field, highest first:
+
+1. An edit made in Pley, and for the match, Fix Match.
+2. The NFO file.
+3. The metadata source (TMDB, TheTVDB or TVmaze).
+4. The file and folder names.
+
+An NFO file's fields describe the title its ids name. When Fix Match
+chooses another, the file's fields and lockdata stop applying and the
+chosen title's metadata shows, until Fix Match is undone or the file is
+corrected to name that title. An NFO file without ids always applies.
+
+An NFO file edited since the last scan is read again, even when its video
+didn't change. When one is removed, or stops setting a field, the field
+goes back to the metadata source's value at the next refresh, or to the
+names'. When it is removed or stops giving ids, the movie or show is
+matched by its names again. Whatever an NFO file changes, the item stays
+the same item, with its watch state and its place in My List.
+
+Pley never writes NFO files. A file bigger than 1 MiB, or a link to
+anything but an NFO file, is skipped.
+
+Reading NFO files is on by default; Settings → Server's NFO files switch
+(the `read_nfo` setting, [API.md](API.md#system-admin)) turns it off.
+Turning it on or off scans every library; turned off, what NFO files set
+goes back as when they are removed.
+
+In an item's Edit details, fields the NFO file sets say so. Fix match says
+when a title was matched by hand, and Undo Fix Match lets its NFO file
+decide the match again.
+
+## .strm files
+
+A `.strm` file is a text file that names where a video is, instead of
+being one: Kodi, Jellyfin and Emby read them, and tools that list what a
+hosting service, a cloud drive or another server holds write them. Pley
+reads them in movie and TV libraries.
+
+```
+Movies/Alien (1979)/Alien (1979).strm
+Movies/Alien (1979)/Alien (1979).en.srt
+Shows/The Expanse/Season 01/The Expanse - S01E01.strm
+```
+
+- **Its name places it** like any video's: title and year, season and
+  episode, edition, `-trailer`. Artwork, subtitle files and an NFO file
+  beside it are its own, and several `.strm` files of one movie are its
+  versions.
+- **Its first line is the address**: the first that isn't empty and
+  doesn't start with `#`. It must be an `http://` or `https://` address of
+  a media file (MKV, MP4, WebM, MPEG-TS…), with ranges for seeking. A name
+  and password in it (`https://name:password@host/…`) are sent as the
+  address asks.
+- **Kodi's headers** after the address are sent with every request:
+  `https://host/film.mkv|User-Agent=VLC%2F3.0&Referer=https%3A%2F%2Fhost%2F`.
+  Pley takes `User-Agent`, `Referer`, `Origin`, `Cookie`, `Authorization`,
+  `Accept` and `Accept-Language`, and leaves Kodi's other options out.
+- **What isn't read**: a path (`/mnt/…`, `C:\…`, `\\nas\…`, `file://`),
+  a relative address, any other protocol (`rtsp`, `rtmp`, `smb`, `ftp`,
+  `plugin://`), a playlist (an `.m3u8` address) and a file over 64 KiB. Such
+  a file is listed, and playing it says what is wrong with it. To have a
+  video elsewhere on the disk in a library, link to it instead.
+- **The address stays on the server.** No app, no player and no log gets
+  it. A player that plays the video as it is reads it through Pley, which
+  asks the address; a stream is made by the transcoder from what Pley
+  hands it. A password or token in the address is never shown to anyone,
+  administrators included: the `.strm` file is where to read it.
+- **A scan doesn't ask the address.** A library of links is scanned as
+  fast as its files are listed, and a hosting service isn't asked for each
+  of them. What the video is (its tracks, its length, its size, 4K and HDR)
+  is found the first time someone opens its page or plays it, and kept
+  until the file names another address. Until then it has no badges in
+  listings and reads `STRM` where its format goes.
+- **What isn't made for it**: seek previews, chapter pictures, a picture
+  grabbed from the video, and intro and credits detection, which all read
+  the whole video. Chapters and a subtitle track in the video work as for
+  a file, read through Pley at the address.
+- **An address on the internet stays on the internet.** It can't redirect
+  to an address of your own network or of the server's computer. An
+  address the file itself names on your network (a NAS, a download
+  service) is asked as it is ([SECURITY.md](../SECURITY.md#strm-files)).
+- A link that stops answering leaves its item in the library: playing it
+  says the address didn't answer, or has nothing there any more.

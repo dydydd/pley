@@ -5,7 +5,8 @@ import { useServerEvents } from "@/api/events";
 import type { ItemDetail, PlaybackInfo, ServerEvent } from "@/api/types";
 import { makeItem, makeStream } from "@/test/fixtures";
 import { pgsMks } from "@/test/pictures";
-import { mockApi, renderWithProviders, testUser, type FakeRequest } from "@/test/render";
+import { LocationDisplay, mockApi, renderWithProviders, testUser, type FakeRequest } from "@/test/render";
+import { isPlayingHere } from "@/lib/playingHere";
 import { forgetNetwork } from "./network";
 import { VideoPlayer, startSize } from "./VideoPlayer";
 
@@ -131,6 +132,7 @@ function renderPlayer(startMs = 0) {
 
 /** The media element methods the player calls, which jsdom only stubs. */
 const media = {
+  play: vi.fn<() => Promise<void>>(),
   pause: vi.fn<() => void>(),
   load: vi.fn<() => void>(),
 };
@@ -138,7 +140,7 @@ const media = {
 beforeEach(() => {
   hlsInstances.length = 0;
   // jsdom has media elements, but plays nothing.
-  vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+  media.play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
   media.pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
   media.load = vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => undefined);
   vi.spyOn(HTMLMediaElement.prototype, "addTextTrack").mockImplementation(
@@ -661,6 +663,7 @@ describe("VideoPlayer in Automatic", () => {
     requests.filter((r) => r.method === "POST" && r.path === "/api/playback").map((r) => r.body as Record<string, unknown>);
 
   beforeEach(() => forgetNetwork());
+  afterEach(() => forgetNetwork());
 
   /** A 20 Mbps 1080p file, played as it is (`remux`: into HLS, its audio converted); `more`: other answers of the server's. */
   function render20(more: Parameters<typeof mockApi>[0] = {}, remux = false) {
@@ -763,6 +766,44 @@ describe("VideoPlayer in Automatic", () => {
     await sleep(3_100);
     expect(starts(requests)).toHaveLength(1);
   }, 15_000);
+
+  it("offers the original alone on a server that converts no video, and stays there on a slow network", async () => {
+    const item = detail();
+    item.files[0]!.bitrate = 20_000_000;
+    const requests = serve([session("r1", { method: "remux", original_only: true }), session("t2")], { "DELETE /api/playback/r1": () => undefined });
+    const { container } = renderWithProviders(<VideoPlayer item={item} startMs={60_000} fileId={null} audio={null} sub={null} />);
+    const video = container.querySelector("video")!;
+    await waitFor(() => expect(hlsInstances[0]?.calls).toContain("attachMedia"));
+    playing(video, 0);
+    segments(16);
+    act(() => {
+      video.dispatchEvent(new Event("waiting"));
+    });
+    await sleep(3_100);
+    expect(starts(requests)).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    await userEvent.click(screen.getByRole("button", { name: /Quality/ }));
+    expect(screen.getAllByRole("menuitemradio").map((option) => option.textContent)).toEqual([expect.stringMatching(/^Original/)]);
+    // The choice kept is for servers that do convert.
+    expect(window.localStorage.getItem("pley.quality")).toBeNull();
+  }, 15_000);
+
+  it("starts the next title as the original on a server that said it converts no video", async () => {
+    window.localStorage.setItem("pley.quality", JSON.stringify("4m"));
+    const answers = [session("r1", { method: "remux", original_only: true }), session("d2", { method: "direct", hls: false, url: "/api/files/3/stream", original_only: true })];
+    const requests = serve(answers, { "DELETE /api/playback/r1": () => undefined, "DELETE /api/playback/d2": () => undefined });
+    const item = detail();
+    item.files[0]!.bitrate = 20_000_000;
+    const first = renderWithProviders(<VideoPlayer item={item} startMs={0} fileId={null} audio={null} sub={null} />);
+    // The quality kept is asked for, until the server says; then the original is.
+    await waitFor(() => expect(starts(requests)).toHaveLength(2));
+    expect(starts(requests).map((s) => s.mode)).toEqual(["transcode", "auto"]);
+    first.unmount();
+    renderWithProviders(<VideoPlayer item={item} startMs={0} fileId={null} audio={null} sub={null} />);
+    await waitFor(() => expect(starts(requests)).toHaveLength(3));
+    expect(starts(requests)[2]).toMatchObject({ mode: "auto", max_bitrate: null });
+    expect(JSON.parse(window.localStorage.getItem("pley.quality")!)).toBe("4m");
+  });
 
   it("keeps a quality picked before, Original included: a slow network waits", async () => {
     window.localStorage.setItem("pley.quality", JSON.stringify("original"));
@@ -908,5 +949,341 @@ describe("VideoPlayer finding subtitles", () => {
     // Gone from the menu, which stays open, and turned off.
     expect(screen.queryByRole("menuitemradio", { name: /English/ })).not.toBeInTheDocument();
     expect(screen.getByRole("menuitemradio", { name: "Off" })).toHaveAttribute("aria-checked", "true");
+  });
+});
+
+describe("VideoPlayer obeying the remote", () => {
+  beforeEach(() => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  /** The player's controls are on screen: its top bar, which shows and hides with the rest. */
+  const controlsShown = () => !screen.getByRole("button", { name: "Back" }).parentElement!.classList.contains("opacity-0");
+  /** The controls' timer, faked, so a test can let them hide as they do after a while. */
+  const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+  /** It plays, and nobody touches it here: the controls go. */
+  async function untouched(video: HTMLVideoElement) {
+    fireEvent.play(video);
+    act(() => {
+      vi.advanceTimersByTime(3_000);
+    });
+    await waitFor(() => expect(controlsShown()).toBe(false));
+  }
+
+  const command = (
+    command: Extract<ServerEvent, { type: "player_command" }>["command"],
+    more: { session_id?: string; position_ms?: number; offset_ms?: number; stream_index?: number; quality?: string } = {},
+  ): ServerEvent => ({
+    type: "player_command",
+    session_id: more.session_id ?? "s1",
+    command,
+    position_ms: more.position_ms ?? null,
+    offset_ms: more.offset_ms ?? null,
+    stream_index: more.stream_index ?? null,
+    quality: more.quality ?? null,
+  });
+  const reports = (requests: FakeRequest[]) =>
+    requests.filter((r) => r.method === "POST" && r.path === "/api/items/7/progress").map((r) => r.body);
+
+  /** The player, started at `startMs`, playing (as far as it can tell) its first session, `s1`. */
+  async function playing(startMs = 0, item = detail(), first: Partial<PlaybackInfo> = {}) {
+    const requests = serve([session("s1", first), session("s2")], {
+      [`POST /api/items/${item.id}/progress`]: () => undefined,
+      [`PUT /api/items/${item.id}/streams`]: () => undefined,
+      "DELETE /api/playback/s1": () => undefined,
+    });
+    function Player() {
+      useServerEvents(testUser.id);
+      return (
+        <>
+          <VideoPlayer item={item} startMs={startMs} fileId={null} audio={null} sub={null} />
+          <LocationDisplay />
+        </>
+      );
+    }
+    const { container, unmount } = renderWithProviders(<Player />);
+    await waitFor(() => expect(hlsInstances[0]?.calls).toContain("attachMedia"));
+    const video = container.querySelector("video")!;
+    let paused = false;
+    Object.defineProperty(video, "paused", { configurable: true, get: () => paused });
+    // Starting pauses the element too.
+    media.pause.mockClear();
+    return { requests, video, unmount, setPaused: (p: boolean) => (paused = p) };
+  }
+
+  /** A film with two audio tracks, the first its default, and a text subtitle track. */
+  function tracked(): ItemDetail {
+    const item = detail();
+    item.files[0]!.streams = [
+      makeStream({ index: 0, kind: "video" }),
+      makeStream({ index: 1, kind: "audio", codec: "eac3", language: "eng", default: true }),
+      makeStream({ index: 2, kind: "audio", codec: "aac", language: "fre", default: false }),
+      makeStream({ index: 3, kind: "subtitle", codec: "subrip", language: "eng", default: false, text_based: true }),
+    ];
+    return item;
+  }
+  const starts = (requests: FakeRequest[]) => requests.filter((r) => r.method === "POST" && r.path === "/api/playback");
+  const remembered = (requests: FakeRequest[]) =>
+    requests.filter((r) => r.method === "PUT" && r.path === "/api/items/7/streams").map((r) => r.body);
+
+  it("says what it obeys as it starts: Next only where something comes next, Audio where there is a choice", async () => {
+    const { requests } = await playing();
+    expect(requests.find((r) => r.path === "/api/playback")?.body).toMatchObject({
+      controls: ["play", "pause", "seek", "skip", "subtitles", "quality"],
+    });
+  });
+
+  it("takes a change of audio where the file has a choice of tracks", async () => {
+    const { requests } = await playing(0, tracked());
+    expect(requests.find((r) => r.path === "/api/playback")?.body).toMatchObject({
+      controls: ["play", "pause", "seek", "skip", "audio", "subtitles", "quality"],
+    });
+  });
+
+  it("changes quality as its own menu does, keeps it, and says in its reports which it plays", async () => {
+    const { requests, video } = await playing(0, tracked(), { audio_index: 1 });
+    fireEvent.pause(video);
+    await waitFor(() => expect(reports(requests).at(-1)).toMatchObject({ quality: "auto" }));
+    // The one it plays already: nothing to say.
+    act(() => FakeEventSource.last?.send(command("quality", { quality: "auto" })));
+    act(() => FakeEventSource.last?.send(command("quality", { quality: "2m" })));
+    await waitFor(() => expect(starts(requests)).toHaveLength(2));
+    expect(starts(requests)[1]?.body).toMatchObject({ max_bitrate: 2_000 });
+    expect(localStorage.getItem("pley.quality")).toContain("2m");
+    await waitFor(() => expect(reports(requests).at(-1)).toMatchObject({ quality: "2m" }));
+    // Said as its Quality menu names it.
+    expect(screen.getAllByText(/^Quality:/).map((n) => n.textContent)).toEqual(["Quality: 2 Mbps 480p"]);
+    // One its menu doesn't offer is left alone.
+    act(() => FakeEventSource.last?.send(command("quality", { quality: "nonsense" })));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(starts(requests)).toHaveLength(2);
+    expect(screen.getAllByText(/^Quality:/)).toHaveLength(1);
+  });
+
+  it("plays its session in this tab until it is stopped, so the remote leaves it out", async () => {
+    await playing();
+    await waitFor(() => expect(isPlayingHere("s1")).toBe(true));
+    act(() => FakeEventSource.last?.send({ type: "session_stopped", session_id: "s1", message: null, by_admin: false }));
+    await waitFor(() => expect(isPlayingHere("s1")).toBe(false));
+  });
+
+  it("leaves a command for another session alone", async () => {
+    const { requests, video } = await playing(60_000);
+    const before = requests.length;
+    act(() => FakeEventSource.last?.send(command("pause", { session_id: "other" })));
+    act(() => FakeEventSource.last?.send(command("seek", { session_id: "other", position_ms: 1_000 })));
+    expect(media.pause).not.toHaveBeenCalled();
+    expect(video.currentTime).not.toBe(1);
+    expect(requests.slice(before)).toEqual([]);
+    expect(screen.queryByText("Paused")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Jumped to/)).not.toBeInTheDocument();
+  });
+
+  it("pauses and plays, says it plays again at once, and says each in a brief notice", async () => {
+    const { requests, setPaused } = await playing();
+    act(() => FakeEventSource.last?.send(command("pause")));
+    expect(media.pause).toHaveBeenCalled();
+    expect(await screen.findByText("Paused")).toBeInTheDocument();
+
+    setPaused(true);
+    media.play.mockClear();
+    act(() => FakeEventSource.last?.send(command("play")));
+    expect(media.play).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(reports(requests).at(-1)).toMatchObject({ state: "playing", session_id: "s1" }));
+    expect(await screen.findByText("Playing")).toBeInTheDocument();
+  });
+
+  it("says again that it plays, or is paused, when told so already, so a remote a little behind settles", async () => {
+    const { requests, setPaused } = await playing();
+    media.play.mockClear();
+    act(() => FakeEventSource.last?.send(command("play")));
+    expect(media.play).not.toHaveBeenCalled();
+    await waitFor(() => expect(reports(requests).at(-1)).toMatchObject({ state: "playing", session_id: "s1" }));
+
+    setPaused(true);
+    act(() => FakeEventSource.last?.send(command("pause")));
+    expect(media.pause).not.toHaveBeenCalled();
+    await waitFor(() => expect(reports(requests).at(-1)).toMatchObject({ state: "paused", session_id: "s1" }));
+    // Nothing changed here: nothing to say.
+    expect(screen.queryByText("Playing")).not.toBeInTheDocument();
+    expect(screen.queryByText("Paused")).not.toBeInTheDocument();
+  });
+
+  it("seeks, no further than the end, reports where at once, and says where to", async () => {
+    const { requests, video } = await playing();
+    act(() => FakeEventSource.last?.send(command("seek", { position_ms: 754_000 })));
+    expect(video.currentTime).toBe(754);
+    await waitFor(() => expect(reports(requests).at(-1)).toMatchObject({ position_ms: 754_000, state: "playing" }));
+    expect(await screen.findByText("Jumped to 12:34")).toBeInTheDocument();
+
+    act(() => FakeEventSource.last?.send(command("seek", { position_ms: 3_723_000 })));
+    expect(await screen.findByText("Jumped to 1:02:03")).toBeInTheDocument();
+
+    act(() => FakeEventSource.last?.send(command("seek", { position_ms: 99_000_000 })));
+    expect(video.currentTime).toBeLessThanOrEqual(6_000);
+    expect(video.currentTime).toBeGreaterThan(5_999);
+    // Where it went: the end.
+    expect(await screen.findByText("Jumped to 1:39:59")).toBeInTheDocument();
+  });
+
+  it("skips from where it is, never before the start, and says by how much", async () => {
+    const { requests, video, setPaused } = await playing(60_000);
+    setPaused(true);
+    act(() => FakeEventSource.last?.send(command("skip", { offset_ms: 30_000 })));
+    expect(video.currentTime).toBe(90);
+    await waitFor(() => expect(reports(requests).at(-1)).toMatchObject({ position_ms: 90_000, state: "paused" }));
+    expect(await screen.findByText("+30 s")).toBeInTheDocument();
+
+    act(() => FakeEventSource.last?.send(command("skip", { offset_ms: -10_000 })));
+    expect(video.currentTime).toBe(80);
+    expect(await screen.findByText("−10 s")).toBeInTheDocument();
+
+    act(() => FakeEventSource.last?.send(command("skip", { offset_ms: -600_000 })));
+    expect(video.currentTime).toBe(0);
+  });
+
+  it("shows a remote's pause, skip or seek only in its notice: the controls stay hidden", async () => {
+    fakeTimers();
+    const { video, setPaused } = await playing(60_000);
+    await untouched(video);
+
+    act(() => FakeEventSource.last?.send(command("pause")));
+    setPaused(true);
+    fireEvent.pause(video);
+    expect(await screen.findByText("Paused")).toBeInTheDocument();
+    act(() => FakeEventSource.last?.send(command("skip", { offset_ms: 30_000 })));
+    act(() => FakeEventSource.last?.send(command("seek", { position_ms: 754_000 })));
+    expect(await screen.findByText("Jumped to 12:34")).toBeInTheDocument();
+    expect(controlsShown()).toBe(false);
+
+    // Someone here presses a key: the controls show, and stay while it's paused.
+    fireEvent.keyDown(video, { key: "Shift" });
+    expect(controlsShown()).toBe(true);
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(controlsShown()).toBe(true);
+  });
+
+  it("shows the controls for a pause here as before, and a remote's pause ends as it plays again", async () => {
+    fakeTimers();
+    const { video, setPaused } = await playing();
+    await untouched(video);
+
+    // Paused here (a media key, say): the controls show, as they always have.
+    fireEvent.pause(video);
+    expect(controlsShown()).toBe(true);
+    fireEvent.play(video);
+    expect(controlsShown()).toBe(false);
+
+    act(() => FakeEventSource.last?.send(command("pause")));
+    setPaused(true);
+    fireEvent.pause(video);
+    expect(controlsShown()).toBe(false);
+    act(() => FakeEventSource.last?.send(command("play")));
+    setPaused(false);
+    fireEvent.play(video);
+    expect(await screen.findByText("Playing")).toBeInTheDocument();
+    expect(controlsShown()).toBe(false);
+
+    // Played again: the next pause here shows them, as before.
+    fireEvent.pause(video);
+    expect(controlsShown()).toBe(true);
+  });
+
+  it("asks for a click, with the controls, where the browser won't play a remote's Play without one", async () => {
+    fakeTimers();
+    const { video, setPaused } = await playing();
+    await untouched(video);
+    act(() => FakeEventSource.last?.send(command("pause")));
+    setPaused(true);
+    fireEvent.pause(video);
+    expect(controlsShown()).toBe(false);
+
+    media.play.mockRejectedValueOnce(new DOMException("Not allowed", "NotAllowedError"));
+    act(() => FakeEventSource.last?.send(command("play")));
+    // Its big Play, beside the controls' own.
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Play" })).toHaveLength(2));
+    expect(controlsShown()).toBe(true);
+    expect(screen.queryByText("Playing")).not.toBeInTheDocument();
+  });
+
+  it("plays the next episode, as its own Next does", async () => {
+    const episode = detail({ id: 8, kind: "episode", title: "Pilot" });
+    const next = makeItem({ id: 9, kind: "episode", title: "Second" });
+    const { requests } = await playing(0, episode);
+    expect(requests.find((r) => r.path === "/api/playback")?.body).toMatchObject({
+      controls: ["play", "pause", "seek", "skip", "next", "subtitles", "quality"],
+    });
+    mockApi({
+      "GET /api/items/8/next": () => ({ item: next }),
+      "POST /api/items/8/progress": () => undefined,
+      "DELETE /api/playback/s1": () => undefined,
+    });
+    act(() => FakeEventSource.last?.send(command("next")));
+    await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent(/^\/play\//));
+  });
+
+  it("does nothing for Next when nothing comes next", async () => {
+    const episode = detail({ id: 8, kind: "episode", title: "Finale" });
+    await playing(0, episode);
+    const requests = mockApi({ "GET /api/items/8/next": () => ({ item: null }), "POST /api/items/8/progress": () => undefined });
+    act(() => FakeEventSource.last?.send(command("next")));
+    await waitFor(() => expect(requests.some((r) => r.path === "/api/items/8/next")).toBe(true));
+    expect(screen.getByTestId("location")).toHaveTextContent(/^\/$/);
+    expect(screen.queryByText("This is the last episode")).not.toBeInTheDocument();
+  });
+
+  it("changes audio as its own menu does: a new session with the track picked, which it remembers", async () => {
+    const { requests } = await playing(0, tracked(), { audio_index: 1 });
+    act(() => FakeEventSource.last?.send(command("audio", { stream_index: 2 })));
+    await waitFor(() => expect(starts(requests)).toHaveLength(2));
+    expect(starts(requests)[1]?.body).toMatchObject({ audio_index: 2 });
+    await waitFor(() => expect(remembered(requests)).toEqual([{ file_id: 3, audio_index: 2, subtitle_index: null }]));
+    // Said as its Audio menu names the track.
+    expect(screen.getByText("Audio: French (AAC)")).toBeInTheDocument();
+  });
+
+  it("says at once that it plays the audio picked, where it does already", async () => {
+    const { requests } = await playing(0, tracked(), { audio_index: 1 });
+    const before = reports(requests).length;
+    act(() => FakeEventSource.last?.send(command("audio", { stream_index: 1 })));
+    await waitFor(() => expect(reports(requests)).toHaveLength(before + 1));
+    expect(reports(requests).at(-1)).toMatchObject({ state: "playing", session_id: "s1", audio_index: 1, subtitle_index: -1 });
+    expect(starts(requests)).toHaveLength(1);
+    expect(screen.queryByText(/^Audio:/)).not.toBeInTheDocument();
+  });
+
+  it("turns subtitles on and off as its own menu does, and says so at once", async () => {
+    const { requests, setPaused } = await playing(0, tracked(), { audio_index: 1 });
+    setPaused(true);
+    act(() => FakeEventSource.last?.send(command("subtitles", { stream_index: 3 })));
+    await waitFor(() => expect(reports(requests).at(-1)).toMatchObject({ state: "paused", audio_index: 1, subtitle_index: 3 }));
+    await waitFor(() => expect(remembered(requests)).toEqual([{ file_id: 3, subtitle_index: 3 }]));
+    expect(screen.getByText("Subtitles: English (SRT)")).toBeInTheDocument();
+
+    act(() => FakeEventSource.last?.send(command("subtitles", { stream_index: -1 })));
+    await waitFor(() => expect(reports(requests).at(-1)).toMatchObject({ subtitle_index: -1 }));
+    expect(screen.getByText("Subtitles off")).toBeInTheDocument();
+    // Off already: said again at once, so a remote a little behind settles, with nothing to say here.
+    const before = reports(requests).length;
+    act(() => FakeEventSource.last?.send(command("subtitles", { stream_index: -1 })));
+    await waitFor(() => expect(reports(requests)).toHaveLength(before + 1));
+    expect(reports(requests).at(-1)).toMatchObject({ subtitle_index: -1 });
+    expect(screen.getAllByText(/^Subtitles/).map((n) => n.textContent)).toEqual(["Subtitles: English (SRT)", "Subtitles off"]);
+    // Text subtitles need no new session.
+    expect(starts(requests)).toHaveLength(1);
+  });
+
+  it("says in every report the audio and the subtitles it plays, its last one too", async () => {
+    const { requests, video, unmount } = await playing(0, tracked(), { audio_index: 2 });
+    fireEvent.pause(video);
+    await waitFor(() => expect(reports(requests).at(-1)).toMatchObject({ state: "paused", audio_index: 2, subtitle_index: -1 }));
+    unmount();
+    await waitFor(() => expect(reports(requests).at(-1)).toMatchObject({ state: "stopped", audio_index: 2, subtitle_index: -1 }));
   });
 });

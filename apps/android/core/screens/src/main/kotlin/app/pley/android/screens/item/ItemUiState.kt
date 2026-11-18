@@ -1,5 +1,6 @@
 package app.pley.android.screens.item
 
+import app.pley.android.common.UiText
 import app.pley.android.data.Loadable
 import app.pley.android.model.CollectionRef
 import app.pley.android.model.Credit
@@ -99,7 +100,10 @@ data class ItemContext(
 /** One piece of the metadata line, in order; the interfaces put "·" between them. */
 sealed interface MetaPart {
     /** A year, an air date, "3 seasons", "2021-2025", an edition, a runtime. */
-    data class Text(val text: String) : MetaPart
+    data class Text(val text: UiText) : MetaPart {
+        /** Words that are no language's own: a year, an edition, a date already written. */
+        constructor(text: String) : this(UiText.raw(text))
+    }
 
     /** "PG-13", boxed. */
     data class ContentRating(val rating: String) : MetaPart
@@ -180,7 +184,10 @@ data class ItemDetails(
     /** Each version in the web's long form, "4K · HEVC · Dolby Vision P8.1 · TrueHD Atmos 7.1 · 62.0 GB", the one that plays checked. */
     val versions: List<TrackChoice>,
 ) {
-    val isEmpty: Boolean get() = crew.isEmpty() && originalTitle == null && released == null && studio == null && plays == null && versions.isEmpty()
+    val isEmpty: Boolean get() = !hasFacts && versions.isEmpty()
+
+    /** Who made it or a fact about it: the TV shows these under the cast. */
+    val hasFacts: Boolean get() = crew.isNotEmpty() || originalTitle != null || released != null || studio != null || plays != null
 }
 
 /** "Directors: A, B, C, D and 2 more": [role], [people] (four at most) and how many more. */
@@ -196,7 +203,7 @@ enum class CastTitle { Cast, GuestStars }
 data class FileInfo(
     val id: Long,
     /** Its edition, or "Version 2" when there are several; `null` for the only one. */
-    val title: String?,
+    val title: UiText?,
     val rows: List<InfoRow>,
     val streams: List<StreamInfo>,
     /** The file as the server describes it, for media info in full (the TV's). */
@@ -215,8 +222,8 @@ data class StreamInfo(
     /** "English", or `null`. */
     val language: String?,
     val title: String?,
-    /** "4K · 3840×2160 · 23.98 fps · 10-bit · Dolby Vision P8.1 · Main 10". */
-    val details: String,
+    /** "4K", "3840×2160", "23.98 fps", "10-bit", "Dolby Vision P8.1", "Main 10": shown with "·" between them. */
+    val details: List<UiText>,
 )
 
 /**
@@ -232,13 +239,20 @@ data class SeasonsSection(
     val episodes: List<EpisodeLine>?,
     /** The episode to start from: the one Play plays, or the page's own episode. */
     val focus: Long?,
+    /**
+     * The TV shows the seasons as a row of posters, as the web's seasons
+     * do, rather than tabs: at least one season has a poster of its own
+     * (the others show the show's). Decided for the whole show, so it is
+     * all posters or all tabs.
+     */
+    val posters: Boolean = false,
 ) {
     /** The season shown, as a tab. */
     val selectedTab: SeasonTab? get() = seasons.firstOrNull { it.id == selected }
 }
 
-/** A season among a show's: "Season 2", "Specials", with "8 episodes". */
-data class SeasonTab(val id: Long, val title: String, val episodes: String?)
+/** A season among a show's: "Season 2", "Specials", with "8 episodes", and the season itself for its poster tile. */
+data class SeasonTab(val id: Long, val title: String, val episodes: UiText?, val item: ItemSummary? = null)
 
 /** An episode in a list or row, its words worked out. */
 data class EpisodeLine(

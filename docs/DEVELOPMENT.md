@@ -28,7 +28,7 @@ server talks to it only over HTTP ([TRANSCODER.md](TRANSCODER.md)).
 | `packages/transcoder-api` | Protocol types shared by server and transcoder |
 | `deploy/` | Docker, systemd and launchd setups, the Windows installer, store listings |
 | `docs/` | Documentation |
-| `scripts/` | Versions and releases (`version.mjs`, `release.mjs`), release builds, the license checks, the apps' icons and store pictures (`render-icons.mjs`), marking a pull request's screenshots (`mark-screenshot.mjs`) |
+| `scripts/` | Versions and releases (`version.mjs`, `release.mjs`), release builds, the license checks, the apps' icons and store pictures (`render-icons.mjs`), marking a pull request's screenshots and animations (`mark-screenshot.mjs`, `mark-animation.mjs`), recording the Android app's animations (`record-android.mjs`) |
 
 ## Requirements
 
@@ -41,11 +41,15 @@ server talks to it only over HTTP ([TRANSCODER.md](TRANSCODER.md)).
 - The .NET 8 SDK, for the native Samsung app only.
 - For the LG app's TV build, Linux with the webOS toolchain, or Docker
   ([LG.md](LG.md#the-tv-build)); its tests and simulator need only Rust.
-- FFmpeg and ffprobe on `PATH` or configured; 6.1 or newer throttles
-  transcodes. For hardware transcoding and GPU tone mapping, use a build
-  with NVENC, QSV, AMF or VAAPI and libplacebo: gyan.dev's "full" build on
-  Windows, Debian 13's or jellyfin-ffmpeg on Linux, Homebrew's `ffmpeg-full`
-  on macOS ([deploy/README.md](../deploy/README.md)).
+- FFmpeg and ffprobe on `PATH` or configured, version 9 recommended (6.1
+  or newer throttles transcodes). For hardware transcoding and GPU tone
+  mapping, use a build with NVENC, QSV, AMF or VAAPI and libplacebo:
+  gyan.dev's "full" build on Windows, the distribution's or jellyfin-ffmpeg
+  on Linux, Homebrew's `ffmpeg-full` on macOS
+  ([deploy/README.md](../deploy/README.md)). The Docker image's is
+  pley-ffmpeg, FFmpeg with patches for Intel GPUs, which
+  [deploy/ffmpeg](../deploy/ffmpeg/README.md) builds for Linux and for
+  Windows.
 
 ## Running from source
 
@@ -104,6 +108,29 @@ from) changes. The server's runs on Linux, macOS and Windows, with a build on
 the oldest supported Rust, the license check and the Docker build
 ([RELEASING.md](RELEASING.md#ci)).
 
+### Casting to Google Cast without a device
+
+Android's Google TV emulator is a Cast device: its system image (`google-tv`,
+in Android Studio's device manager or `sdkmanager`) runs Google's own Cast
+receiver once signed in to a Google account and updated from the Play Store.
+The server can't find it by mDNS through the emulator's network, so a debug
+build takes it from two environment variables:
+
+```sh
+adb forward tcp:8009 tcp:8009
+adb forward tcp:8008 tcp:8008
+PLEY_CAST_DEVICE=127.0.0.1:8009 PLEY_CAST_SERVER=http://10.0.2.2:7539 ./target/debug/pley
+```
+
+`PLEY_CAST_DEVICE` is where the server connects to the device, and
+`PLEY_CAST_SERVER` where the device reaches the server (`10.0.2.2` is the
+computer, from the emulator). With Google Cast and AirPlay devices
+turned on (Settings → Network), home members' remotes then list "Cast
+emulator". The server asks the device's setup API, which picks what it
+streams, at the device's address on port 8008 (forwarded above), or at
+`PLEY_CAST_SETUP`. Release builds ignore all three. `tests/cast_devices.rs` plays against
+a fake device instead.
+
 The README's screenshot (`docs/images/web-home.jpg`) shows a demo library of
 made-up titles ([scripts/store-library](../scripts/store-library/README.md)):
 `bun scripts/store-library/web.mjs <dir> <address>` takes it from a server
@@ -141,6 +168,21 @@ pixels, and writes a PNG; it takes a phone's JPEG too:
 ```sh
 bun scripts/mark-screenshot.mjs before.png before-marked.png --box 176,40,550,370 --arrow 1000,560,740,410
 bun scripts/mark-screenshot.mjs before.png corner.png --zoom 84,416,160,100 --box 88,454,20,60   # 5× there, pixel for pixel
+```
+
+A change that moves (an animation, a transition) is shown moving. The native
+Samsung app's debug build records one frame by frame (`metrics.mjs record`,
+[TV_PLATFORMS.md](TV_PLATFORMS.md), "Profiling"), and
+`scripts/record-android.mjs` records the Android app, phone or TV, through
+adb ([ANDROID.md](ANDROID.md#recording-an-animation));
+`scripts/mark-animation.mjs` marks the frames as `mark-screenshot.mjs` marks
+a screenshot and writes an animated PNG, slower than it was where the change
+is too quick to see, which the caption says. GitHub takes pictures up to
+10 MB: a smaller `--scale`, a longer `--step` or a quicker `--speed` makes one
+smaller, which counts where the whole screen moves, as in a crossfade.
+
+```sh
+bun scripts/mark-animation.mjs apps/tizen-native/out/rec-<time>-<model> after.png --speed 0.2 --box 4,28,164,1024 --arrow 480,740,184,740
 ```
 
 The pictures are attached to the pull request, never committed:

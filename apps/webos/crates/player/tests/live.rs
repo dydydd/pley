@@ -65,6 +65,8 @@ struct LiveFake {
     plans_held: AtomicBool,
     /// Sessions whose keyed playlist answers `410`, as a session ended on the server.
     gone: Mutex<Vec<String>>,
+    /// Each watch's body.
+    bodies: Mutex<Vec<WatchRequest>>,
 }
 
 /// What the pretend server's stream.ts sends.
@@ -91,6 +93,7 @@ impl LiveFake {
             plans: Mutex::new(0),
             plans_held: AtomicBool::new(false),
             gone: Mutex::default(),
+            bodies: Mutex::default(),
         })
     }
 
@@ -155,6 +158,9 @@ impl PlayerServer for LiveFake {
     fn collection(&self, _: i64) -> Result<CollectionDetail, ApiError> {
         not_here()
     }
+    fn merged_collection(&self, _: &[i64]) -> Result<MergedCollection, ApiError> {
+        not_here()
+    }
     fn play(&self, _: &PlaybackRequest) -> Result<PlaybackInfo, ApiError> {
         not_here()
     }
@@ -210,6 +216,7 @@ impl PlayerServer for LiveFake {
         not_here()
     }
     fn watch_channel(&self, id: i64, req: &WatchRequest) -> Result<LiveWatching, ApiError> {
+        self.bodies.lock().unwrap().push(req.clone());
         let taking = req.take_over.map(|t| format!(" taking {t}")).unwrap_or_default();
         self.log(format!("watch {id} {}{taking}", req.client_id.as_deref().unwrap_or("")));
         let n = {
@@ -651,6 +658,140 @@ fn a_take_over_leaves_the_words_of_a_stop_that_came_first() {
     assert_eq!(w.c.state().trouble.as_ref(), Some(&shown));
 }
 
+// ---- the user's remote, on another device
+
+fn command(session: &str, command: Control) -> ServerEvent {
+    ServerEvent::PlayerCommand {
+        session_id: session.into(),
+        command,
+        position_ms: None,
+        offset_ms: None,
+        stream_index: None,
+        quality: None,
+    }
+}
+
+fn stopped(session: &str, message: Option<&str>, by_admin: bool) -> ServerEvent {
+    ServerEvent::SessionStopped { session_id: session.into(), message: message.map(Into::into), by_admin }
+}
+
+#[test]
+fn a_channel_says_it_plays_on_a_tv_and_obeys_only_stop_unless_its_owner_goes_through_channels() {
+    let mut w = Live::new(LiveFake::new());
+    w.c.tune(channel(1));
+    w.settle();
+    w.first_frame();
+    let body = w.fake.bodies.lock().unwrap()[0].clone();
+    assert_eq!((body.controls, body.device_kind), (vec![], Some(DeviceKind::Tv)));
+    assert_eq!(w.c.server_event(&command("s1", Control::Next)), None);
+
+    w.c.set_steps(true);
+    w.c.tune(channel(2));
+    w.settle();
+    w.first_frame();
+    assert_eq!(w.fake.bodies.lock().unwrap()[1].controls, [Control::Next, Control::Previous]);
+    // Next and previous are channel up and down, for the session watched only; live has no pause or seek.
+    assert_eq!(w.c.server_event(&command("s2", Control::Next)), Some(1));
+    assert_eq!(w.c.server_event(&command("s2", Control::Previous)), Some(-1));
+    assert_eq!(w.c.server_event(&command("s1", Control::Next)), None);
+    for c in [Control::Pause, Control::Play, Control::Seek, Control::Skip] {
+        assert_eq!(w.c.server_event(&command("s2", c)), None, "{c}");
+    }
+    assert_eq!(w.c.state().phase, LivePhase::Playing);
+    // A channel in trouble changes nothing.
+    w.c.taken_over(2, Some("Watching moved to Two HD on another device."));
+    assert_eq!(w.c.server_event(&command("s2", Control::Next)), None);
+}
+
+#[test]
+fn a_channel_stopped_from_another_device_or_by_an_administrator_stops_saying_who_and_why() {
+    let mut w = Live::new(LiveFake::new());
+    w.c.tune(channel(1));
+    w.settle();
+    w.first_frame();
+    // Another session's stop changes nothing.
+    w.c.server_event(&stopped("s9", None, false));
+    assert_eq!(w.c.state().phase, LivePhase::Playing);
+    // The message as given, trimmed, with no full stop added, as Android's.
+    w.c.server_event(&stopped("s1", Some(" Server maintenance "), true));
+    let t = w.c.state().trouble.clone().unwrap();
+    assert_eq!(
+        (w.c.state().phase, t.kind, t.title.as_str(), t.message.as_str(), t.can_retry),
+        (
+            LivePhase::Error,
+            TroubleKind::Stopped,
+            "Live TV stopped",
+            "Live TV was stopped by the server's administrator.\nServer maintenance",
+            true
+        )
+    );
+    assert_eq!(w.sim.commands().last().map(String::as_str), Some("unload"));
+    // Its session is gone on the server: nothing to leave, and it isn't watched again by itself.
+    w.advance(60_000);
+    assert!(!w.fake.asked().contains(&"leave s1".to_string()));
+    assert_eq!(w.fake.watches().len(), 1);
+
+    let mut w = Live::new(LiveFake::new());
+    w.c.tune(channel(1));
+    w.settle();
+    w.first_frame();
+    w.c.server_event(&stopped("s1", None, false));
+    let t = w.c.state().trouble.clone().unwrap();
+    assert_eq!((t.kind, t.message.as_str()), (TroubleKind::Stopped, "Live TV was stopped from another device."));
+}
+
+#[test]
+fn the_remote_and_a_stop_are_heard_as_soon_as_the_watch_answers_before_the_channel_plays() {
+    let fake = LiveFake::new();
+    fake.plans_held.store(true, Ordering::SeqCst);
+    let mut w = Live::new(fake.clone());
+    w.c.set_steps(true);
+    w.c.tune(channel(1));
+    // The watch answered, and the tune waits on the session's plan: the server lists the session,
+    // and the remote acts on it.
+    let until = Instant::now() + Duration::from_secs(5);
+    while *fake.plans.lock().unwrap() == 0 {
+        assert!(Instant::now() < until);
+        thread::sleep(Duration::from_millis(1));
+    }
+    w.c.tick(w.now);
+    assert_eq!((w.c.state().phase, w.c.session()), (LivePhase::Tuning, Some("s1")));
+    assert_eq!(w.c.server_event(&command("s1", Control::Next)), Some(1));
+    w.c.server_event(&stopped("s1", Some("Bedtime"), false));
+    let t = w.c.state().trouble.clone().unwrap();
+    assert_eq!(
+        (t.kind, t.message.as_str()),
+        (TroubleKind::Stopped, "Live TV was stopped from another device.\nBedtime")
+    );
+    // The tune's late answer plays nothing, and the session, gone on the server, isn't let go.
+    fake.plans_held.store(false, Ordering::SeqCst);
+    w.settle();
+    assert_eq!(fake.asked(), ["watch 1 webos-tv"]);
+    assert!(w.sim.loads().is_empty());
+}
+
+#[test]
+fn a_stops_words_replace_a_410_without_any_that_came_first() {
+    let mut w = Live::new(LiveFake::new());
+    w.c.tune(channel(1));
+    w.settle();
+    w.first_frame();
+    w.fake.end("s1", "");
+    w.sim.fail(2, "the playlist went");
+    w.settle();
+    assert_eq!(
+        w.c.state().trouble.as_ref().map(|t| t.message.as_str()),
+        Some("This channel isn't being watched any more.")
+    );
+    w.c.server_event(&stopped("s1", None, false));
+    let t = w.c.state().trouble.clone().unwrap();
+    assert_eq!((t.kind, t.message.as_str()), (TroubleKind::Stopped, "Live TV was stopped from another device."));
+    // Words already said stay.
+    let version = w.c.version();
+    w.c.server_event(&stopped("s1", Some("Bedtime"), true));
+    assert_eq!(w.c.version(), version);
+}
+
 #[test]
 fn a_take_overs_card_stays_through_the_background_and_nothing_is_watched_until_watch_again() {
     let mut w = Live::new(LiveFake::new());
@@ -905,6 +1046,29 @@ fn a_session_the_watch_made_is_let_go_when_the_player_closes_before_it_plays() {
     }
     // Nor is its playlist asked for.
     assert_eq!(fake.asked(), ["watch 1 webos-tv", "leave s1"]);
+    assert!(w.sim.loads().is_empty());
+}
+
+#[test]
+fn a_tune_done_but_not_yet_taken_in_is_let_go_when_the_player_closes() {
+    let fake = LiveFake::new();
+    let mut w = Live::new(fake.clone());
+    w.c.tune(channel(1));
+    // The tune has its playlist and is done, and the player hasn't ticked since: it closes.
+    let until = Instant::now() + Duration::from_secs(5);
+    while !fake.asked().iter().any(|a| a.starts_with("GET ")) {
+        assert!(Instant::now() < until);
+        thread::sleep(Duration::from_millis(1));
+    }
+    // The job hands its answer back right after the playlist: the wait lets it, so the close comes
+    // between that answer and the tick that would take it in. A job not done yet lets go itself.
+    thread::sleep(Duration::from_millis(50));
+    w.c.close();
+    while !fake.asked().contains(&"leave s1".to_string()) {
+        assert!(Instant::now() < until, "the session was never let go: {:?}", fake.asked());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(fake.asked(), ["watch 1 webos-tv", "GET /api/live/media/pley_mk_1/index.m3u8", "leave s1"]);
     assert!(w.sim.loads().is_empty());
 }
 

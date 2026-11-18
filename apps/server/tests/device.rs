@@ -15,7 +15,8 @@ use axum::http::{Method, StatusCode, header};
 use serde_json::json;
 
 use common::{
-    ANDROID_APP, DESKTOP_APP, HOST, IOS_APP, ISSUER, KODI_APP, MACOS_APP, ROKU_APP, Reply, TVOS_APP, TestApp, WEBOS_APP,
+    ANDROID_APP, DESKTOP_APP, HOMEASSISTANT_APP, HOST, IOS_APP, ISSUER, KODI_APP, MACOS_APP, ROKU_APP, Reply, TVOS_APP,
+    TestApp, WEBOS_APP,
 };
 use pley::oauth::fetch::Source;
 
@@ -488,6 +489,11 @@ async fn only_pleys_own_apps_sign_in_with_a_code() {
     for scope in ["openid", "library admin", "Library"] {
         assert_eq!(oauth_error(&ask(&app, ANDROID_APP, Some(scope), &[]).await).1, "invalid_scope", "{scope}");
     }
+    // Managing the server is never allowed with a code, which anyone in
+    // front of the screen can pass on, even to the app whose phones may.
+    let server = ask(&app, ANDROID_APP, Some("library play server"), &[]).await;
+    assert_eq!(oauth_error(&server).1, "invalid_scope");
+    assert!(server.text().contains("managing the server"), "{}", server.text());
     let everything = ask(&app, ANDROID_APP, Some("library play playlists profiles"), &[]).await;
     assert_eq!(everything.status, StatusCode::OK, "{}", everything.text());
     let unsaid = ask(&app, ANDROID_APP, Some(""), &[]).await;
@@ -876,13 +882,19 @@ async fn device_grants_act_like_other_app_grants() {
 }
 
 #[tokio::test]
-async fn kodi_roku_lg_and_apple_tv_sign_in_only_with_a_code() {
+async fn kodi_roku_lg_apple_tv_and_home_assistant_sign_in_only_with_a_code() {
     let app = TestApp::new().await;
     let admin = app.setup_admin().await;
     for (client_id, name, agent, platform) in [
         (KODI_APP, "Pley for Kodi", "pleyKodi/0.1.0 (Kodi 21.2; Windows)", "Kodi 21.2; Windows"),
         (ROKU_APP, "Pley for Roku", "pleyRoku/0.1.0 (Roku OS 14.5; Roku Ultra)", "Roku OS 14.5; Roku Ultra"),
         (WEBOS_APP, "Pley for LG TV", "pleyLG/0.1.0 (webOS 23; OLED65C3PUA)", "webOS 23; OLED65C3PUA"),
+        (
+            HOMEASSISTANT_APP,
+            "Pley for Home Assistant",
+            "pleyHomeAssistant/0.1.0 (Home Assistant 2026.11.0)",
+            "Home Assistant 2026.11.0",
+        ),
         // An agent pley doesn't know is named as the sign-ins list names it.
         (TVOS_APP, "Pley for Apple TV", "pley-tv/1.0", "pley-tv/1.0"),
     ] {
@@ -932,6 +944,11 @@ async fn kodi_roku_lg_and_apple_tv_sign_in_only_with_a_code() {
                 app.browser_call(Method::POST, "/api/oauth/requests", &admin, Some(json!({"query": query})), &[]).await;
             assert_eq!(page.status, StatusCode::BAD_REQUEST, "{redirect_uri}: {}", page.text());
         }
+    }
+    // Home Assistant may ask for no more than its description allows.
+    for scope in ["profiles", "library playlists", "requests"] {
+        let refused = ask(&app, HOMEASSISTANT_APP, Some(scope), &[]).await;
+        assert_eq!(oauth_error(&refused), (StatusCode::BAD_REQUEST, "invalid_scope"), "{scope}");
     }
 }
 
@@ -996,4 +1013,51 @@ async fn the_link_page_is_the_web_apps_and_cannot_be_framed() {
     assert_eq!(page.headers[header::X_FRAME_OPTIONS], "DENY");
     let policy = page.headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
     assert!(policy.contains("frame-ancestors 'none'"), "{policy}");
+}
+
+/// A TV asks for `scope`: its device code, and the code it shows.
+async fn tv_asking(app: &TestApp, scope: &str) -> (String, String) {
+    let started = ask(app, ANDROID_APP, Some(scope), &[]).await;
+    assert_eq!(started.status, StatusCode::OK, "{}", started.text());
+    let text = |name: &str| started.body[name].as_str().unwrap().to_owned();
+    (text("device_code"), text("user_code"))
+}
+
+#[tokio::test]
+async fn a_tv_gets_approving_requests_with_the_rest_and_nothing_to_tick() {
+    let app = TestApp::new().await;
+    let admin = app.setup_admin().await;
+    let (bob, _) = app.user(&admin, "bob", json!({})).await;
+    let asked = "library play requests approvals";
+
+    // An administrator gives all of it: a TV never manages the server, the
+    // one right the page offers to leave out.
+    let (device_code, user_code) = tv_asking(&app, asked).await;
+    let shown = verify(&app, &admin, &user_code).await;
+    assert_eq!(shown.body["scopes"], json!(["library", "play", "requests", "approvals"]), "{}", shown.text());
+    assert_eq!(shown.body["optional"], json!([]));
+    let id = shown.body["id"].as_str().unwrap();
+    // Not without what the app needs, approving requests included: without
+    // it the TV would ask to sign in again on every requests screen.
+    for chosen in [json!(["library", "approvals"]), json!(["library", "play", "requests"])] {
+        let body = json!({"allow": true, "scopes": chosen});
+        let refused =
+            app.browser_call(Method::POST, &format!("/api/oauth/requests/{id}"), &admin, Some(body), &[]).await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{chosen}: {}", refused.text());
+    }
+    let body = json!({"allow": true, "scopes": ["library", "play", "requests", "approvals"]});
+    let decided = app.browser_call(Method::POST, &format!("/api/oauth/requests/{id}"), &admin, Some(body), &[]).await;
+    assert_eq!((decided.status, &decided.body), (StatusCode::OK, &json!({"done": true})), "{}", decided.text());
+    let tokens = poll(&app, &device_code, &[]).await;
+    assert_eq!(tokens.body["scope"], asked, "{}", tokens.text());
+    let (access, _) = pair(&tokens);
+    assert_eq!(app.get("/api/auth/me", &access).await.body["scope"], asked);
+
+    // Never asked of, nor given by, an account that isn't an administrator's.
+    let (device_code, user_code) = tv_asking(&app, asked).await;
+    let shown = verify(&app, &bob, &user_code).await;
+    assert_eq!((&shown.body["scopes"], &shown.body["optional"]), (&json!(["library", "play", "requests"]), &json!([])));
+    allow(&app, &bob, &user_code).await;
+    let tokens = poll(&app, &device_code, &[]).await;
+    assert_eq!(tokens.body["scope"], "library play requests", "{}", tokens.text());
 }

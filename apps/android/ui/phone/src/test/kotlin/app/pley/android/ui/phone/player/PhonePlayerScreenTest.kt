@@ -1,5 +1,9 @@
 package app.pley.android.ui.phone.player
 
+import android.view.View
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.getBoundsInRoot
@@ -11,6 +15,9 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
+import androidx.core.graphics.Insets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import app.pley.android.model.Marker
 import app.pley.android.model.MarkerKind
 import app.pley.android.model.MarkerSource
@@ -135,6 +142,54 @@ class PhonePlayerScreenTest {
 
     private fun androidx.compose.ui.test.junit4.ComposeContentTestRule.onAllNodesWithTextCount(text: String): Int =
         onAllNodes(androidx.compose.ui.test.hasText(text)).fetchSemanticsNodes().size
+
+    @Test
+    fun aPauseFromAnywhereShowsTheControlsButTheRemotesSaysSoInAToast() {
+        val fake = FakePlaybackController(playing())
+        compose.mainClock.autoAdvance = false
+        show(fake)
+        compose.mainClock.advanceTimeBy(4_000)
+        assertTrue(compose.onAllNodesWithTextCount("Fixture Show") == 0)
+
+        // The remote, on another device, pauses: its toast, not the controls.
+        fake.update { it.copy(phase = PlayerPhase.Paused, pausedByRemote = true, remoteNotice = "Paused") }
+        compose.mainClock.advanceTimeBy(500)
+        compose.onNodeWithText("Paused").assertIsDisplayed()
+        assertTrue(compose.onAllNodesWithTextCount("Fixture Show") == 0)
+        assertEquals(1, fake.calls("dismissRemoteNotice").size)
+
+        // Played again, then paused here (a headset): the controls show, and stay.
+        fake.update { it.copy(phase = PlayerPhase.Playing, pausedByRemote = false) }
+        compose.mainClock.advanceTimeBy(500)
+        fake.update { it.copy(phase = PlayerPhase.Paused) }
+        compose.mainClock.advanceTimeBy(500)
+        compose.onNodeWithText("Fixture Show").assertIsDisplayed()
+        compose.mainClock.advanceTimeBy(10_000)
+        compose.onNodeWithText("Fixture Show").assertIsDisplayed()
+    }
+
+    @Test
+    fun theRemotesPauseKeepsNoControlsUntilATouchMakesThePauseThePersons() {
+        val fake = FakePlaybackController(playing())
+        compose.mainClock.autoAdvance = false
+        show(fake)
+        compose.mainClock.advanceTimeBy(500)
+        compose.onNodeWithText("Fixture Show").assertIsDisplayed()
+
+        // Showing as the remote pauses: they go after their time, as while playing.
+        fake.update { it.copy(phase = PlayerPhase.Paused, pausedByRemote = true) }
+        compose.mainClock.advanceTimeBy(4_000)
+        assertTrue(compose.onAllNodesWithTextCount("Fixture Show") == 0)
+
+        // A tap brings them back; the pause is the person's now, and they stay.
+        compose.mainClock.autoAdvance = true
+        compose.onNodeWithTag(TAG_PLAYER).performTouchInput { click(center) }
+        compose.waitForIdle()
+        compose.mainClock.autoAdvance = false
+        compose.onNodeWithText("Fixture Show").assertIsDisplayed()
+        compose.mainClock.advanceTimeBy(10_000)
+        compose.onNodeWithText("Fixture Show").assertIsDisplayed()
+    }
 
     @Test
     fun theNextItemShowsTheControlsWithItsTitleAsItBegins() {
@@ -452,6 +507,81 @@ class PhonePlayerScreenTest {
         compose.waitForIdle()
         assertEquals(1, asked.size)
         bar.performTouchInput { up() }
+    }
+
+    @Test
+    fun theBottomButtonsShowInTheirPlaceAsThePlayerOpens() {
+        // The screen opens before the server has answered: nothing is known of the item yet.
+        val fake = FakePlaybackController(PlayerUiState())
+        show(fake)
+        val seekBar = compose.onNodeWithContentDescription("Position").getBoundsInRoot()
+        val locks = mutableListOf<Rect>()
+        fun look() {
+            compose.waitForIdle()
+            assertEquals(seekBar, compose.onNodeWithContentDescription("Position").getBoundsInRoot())
+            locks += compose.onAllNodes(hasText("Lock")).fetchSemanticsNodes().map { it.boundsInRoot }
+        }
+        look()
+
+        // The item's details: its title, chapters, tracks and qualities.
+        fake.update { playing { s -> s.copy(phase = PlayerPhase.Preparing, method = null) } }
+        look()
+        // The server's answer, then the first frame.
+        fake.update { it.copy(method = "Direct play") }
+        look()
+        fake.update { it.copy(phase = PlayerPhase.Playing) }
+        look()
+
+        // Lock shows, and only ever where it ends up.
+        assertTrue(locks.isNotEmpty())
+        assertEquals("Lock was at $locks", 1, locks.distinct().size)
+    }
+
+    @Test
+    fun theControlsStayPutAsTheSystemBarsHide() {
+        val fake = FakePlaybackController(playing())
+        lateinit var view: View
+        compose.setContent {
+            view = LocalView.current
+            PhoneTheme {
+                PhonePlayerScreen(fake, host, PictureState(), CaptionLook(), SubtitleChoice(), {}, inPip = false)
+            }
+        }
+        compose.waitForIdle()
+        val status = Insets.of(0, 24, 0, 0)
+        val navigation = Insets.of(0, 0, 0, 48)
+        fun bars(shown: Boolean) {
+            val insets = WindowInsetsCompat.Builder()
+                .setInsets(WindowInsetsCompat.Type.statusBars(), if (shown) status else Insets.NONE)
+                .setInsetsIgnoringVisibility(WindowInsetsCompat.Type.statusBars(), status)
+                .setVisible(WindowInsetsCompat.Type.statusBars(), shown)
+                .setInsets(WindowInsetsCompat.Type.navigationBars(), if (shown) navigation else Insets.NONE)
+                .setInsetsIgnoringVisibility(WindowInsetsCompat.Type.navigationBars(), navigation)
+                .setVisible(WindowInsetsCompat.Type.navigationBars(), shown)
+                .build()
+            compose.runOnUiThread { ViewCompat.dispatchApplyWindowInsets(view, insets) }
+            compose.waitForIdle()
+        }
+        fun bounds(node: SemanticsNodeInteraction) = node.fetchSemanticsNode().boundsInRoot
+        fun controls() = listOf(
+            bounds(compose.onNodeWithContentDescription("Back")),
+            bounds(compose.onNodeWithContentDescription("Position")),
+            bounds(compose.onNodeWithText("Lock")),
+        )
+
+        // Where the controls are on a screen without bars.
+        val bare = controls()
+
+        // The player's first frame, before the bars have gone: nothing is where the bars would push it.
+        bars(shown = true)
+        val first = controls()
+        assertEquals(bare, first)
+
+        // The bars go a moment later, and a swipe brings them back over the picture: nothing moves.
+        bars(shown = false)
+        assertEquals(first, controls())
+        bars(shown = true)
+        assertEquals(first, controls())
     }
 
     @Test

@@ -1,10 +1,14 @@
 NOTIFICATION_INFO, NOTIFICATION_WARNING, NOTIFICATION_ERROR = "info", "warning", "error"
 current_window = 10000
-# Notifications shown: (heading, message); boxes shown: (heading, message);
+# Notifications shown: (heading, message), and in `notices` with their icon
+# and how long they show (ms), and in `silent` the messages of those shown
+# without Kodi's sound; boxes shown: (heading, message);
 # lists shown: (heading, [(label, label2)]), each answered by `picks`;
 # questions asked: (heading, message, nolabel, yeslabel), each answered by
 # `answers` (no, without one).
 notified = []
+notices = []
+silent = []
 boxes = []
 lists = []
 picks = []
@@ -124,6 +128,9 @@ class WindowXMLDialog:
 class Dialog:
     def notification(self, heading, message, icon="", time=0, sound=True):
         notified.append((heading, message))
+        notices.append((heading, message, icon, time))
+        if not sound:
+            silent.append(message)
 
     def ok(self, heading, message):
         boxes.append((heading, message))

@@ -67,12 +67,13 @@ with Dev Manager.
 Sign-in, server discovery (a broadcast, then a sweep of the TV's subnet),
 the screens, the player's keys and panels, music and offline behaviour
 follow the Android TV app. The TV shows a code to type on the server's
-`/link` page (or a QR code to it), and asks "Who's watching?" at start
-when the household has more than one profile. With Always start as, a
-start never goes on as a profile with a PIN without it: the TV keeps the
-profile it was left on (`GET /api/auth/me`, with `has_pin`), opens on its
-PIN pad when it has one, and until it knows, asks "Who's watching?". What
-differs on LG:
+`/link` page (or a QR code to it), and starts straight into Home as the
+profile it was left on when that profile has no PIN (`GET /api/auth/me`,
+with `has_pin`, kept from the last launch). In a household of more than
+one profile, a start never goes on as a profile with a PIN without it: it
+asks "Who's watching?", or opens on that profile's PIN pad with Always
+start as, and asks "Who's watching?" too until the TV knows. What differs
+on LG:
 
 ### Remote and Magic Remote
 
@@ -144,6 +145,56 @@ line, a row with what supports it, a field with what it holds), a dialog
 or the ready-to-watch notice as it opens, and toasts. Each control names
 itself as it draws (`Ui::name`); a new reading cuts off the one before,
 as the TV's menus do.
+
+### Language
+
+The app is in English, French and Spanish, in the language
+[API.md](API.md#language) describes, as the Samsung apps choose it: the
+account's, else the one picked on this TV, else the TV's own when Pley has
+it (the language of its menus, `localeInfo` in webOS's system settings;
+fr-CA counts as French), else the server's (`GET /api/server`), else
+English. `packages/tv/test/fixtures/language.json` pins that order for the
+LG app's tests as for the Samsung apps'. Its words are in
+`crates/i18n/locales/<language>/<area>.json`, in i18next's format, built
+into the app; English stands in for a word a language lacks.
+
+Choose your server and typing an address have a small globe at the bottom
+right, on the forget hint's line; the sign-in code has it at the top
+right, on the logo's line. It is 32 tall with no fill until focused, and
+names the language shown by its two letters ("FR"); Down or Up reaches
+it, Left and Right never do. OK opens a side panel: "Automatic (English)"
+(the TV's language where Pley has it, else the server's, else English),
+then English, Français and Español, the choice in force checked. A choice
+shows at once, the screen drawn again in it with the globe focused (an
+address being typed and the code are kept), and is kept on the TV
+(`pley.deviceLanguage`); Automatic forgets it. Signed in, an account's own
+language comes first, and its Automatic is this choice.
+
+The language shown last is kept on the TV (`pley.language`), so a start
+shows it from the first frame rather than the TV's for a moment; once the
+account, or on a TV in a language Pley doesn't have the server, has been
+heard and names another, the app changes to it. A change draws the pages
+again where they were, Settings on the row that had focus, and asks for
+Home's rows again, since the server writes their titles; a film or a
+channel keeps its words until it closes. Diagnostics' lines follow at the
+next check.
+
+Settings → Profile → Language lists "Automatic (Français)" (the one picked
+with the globe, else the TV's language, else the server's), then English,
+Français and Español, each in itself. Choosing one sends
+`PUT /api/me/language`, and the app shows it once the server has it. A
+Pley from before languages keeps no account's language (its
+`GET /api/server` names none, and the route answers 404 or 405): there the
+row is this TV's, as the globe picks it, with Automatic the TV's own
+language, and a choice shows at once and is kept on the TV, as the Android
+and Samsung apps have it.
+
+Requests carry `Accept-Language` with the language shown, so what the
+server writes itself (Home's rows, its refusals) comes in it. Dates,
+times, numbers and counts follow the language shown (`pley_i18n::number`
+and `decimal`; counts by CLDR's plural forms, one and other in English,
+one, many and other in French and Spanish), times of day in the TV's
+12- or 24-hour clock.
 
 ### Audio and subtitles
 
@@ -281,6 +332,147 @@ app and, if it was playing, plays on from there when the app is back. The
 remote's media keys work it from every page but a player's: play, pause
 and Stop (which pauses), play/pause, next, previous, and ◀◀ and ▶▶ 10 s.
 
+### Remote control
+
+The TV obeys the remote on the profile's other devices (the web app, the
+Android phone app, the Apple apps; [API.md](API.md#remote-control)) and
+shows no remote of its own. Its players say what they obey when they
+start (`controls`) and that they play on a TV (`device_kind: "tv"`, on the
+`stream.ts` it reads too); webOS gives the app no name of the set's own,
+so the server names the TV from its `User-Agent`. They obey:
+
+- **Movies and episodes:** play, pause, seek and skip, and next where
+  something can come next (an episode, a playlist or collection). Next at
+  the end does nothing, and says nothing on the TV; a video has no
+  previous.
+- **Audio and subtitles** of a movie or episode (`audio`, `subtitles`,
+  declared where its file has tracks of that kind), picked as the
+  player's own Audio and Subtitles panels pick them, and kept for the
+  show or movie as those are: an audio track the TV's pipeline switches
+  in place, else in a new session; text subtitles, and picture ones drawn
+  from the server's `.mks`, at once; burned-in ones in a new session.
+  Every progress report says which play (`audio_index`, and
+  `subtitle_index`, -1 for none), so a pick played in place, or one that
+  is playing already, is said at once; a new session says its tracks as
+  it starts.
+- **Quality** of a movie or episode (`quality`, declared by every video the
+  server sends; one on a USB drive has no Quality menu), one of the ids
+  its Quality menu offers for the file, picked as a pick in that menu is
+  and kept for the next titles: a new session where it asks for another
+  stream, which says the pick as it begins, else said at once. Every
+  progress report says which quality the menu has picked (`quality`:
+  `auto`, `original`, `8m`…); one the menu doesn't offer does nothing.
+- **Music:** play, pause, seek, skip, next and previous, as the buttons:
+  previous more than 3 s into a track, or on the first, goes back to its
+  start. Music has no tracks to pick, and its reports name none. Music
+  playing behind the other pages obeys too; music that gave way to a
+  video or a channel has no session, and obeys nothing until it plays
+  again.
+- **Live TV:** next and previous, channel up and down through the
+  category the player was opened from, round its ends, as CH+ and CH− go.
+  A channel obeys from the moment the server answers its watch, as on
+  Android, not only once it plays. It has no pause or seek. Stopped from
+  another device or by an administrator (`session_stopped`), it shows
+  **Live TV stopped** with who stopped it and, on a line of its own,
+  their message, with Watch again, as for a connection taken over.
+
+Only the player of the session named acts on a command, a seek stays
+within the title, and a skip counts from where it is. Each change is
+reported at once, so the remote sees it; another title, track or channel
+tells the server with its own session. A play on a player already
+playing, or a pause on one already paused, says so again at once, so a
+remote a little behind settles. The rule is `crates/player/src/remote.rs`,
+pinned by the TV apps' shared fixture `packages/tv/test/fixtures/remote.json`
+(and a video's tracks and quality, which the fixture doesn't have, by its
+own tests).
+
+A command never brings up the video player's controls, as on Android TV:
+the person watching didn't press anything. What it changed shows for 2 s
+as the player's toast at the top right: "Paused", "Playing", "+30 s" or
+"−10 s" for a skip (the seconds asked for), "Jumped to 12:34" for a seek,
+"Audio: …", "Subtitles: …" or "Subtitles off", and "Quality: …", each
+named as the player's menu names it. The next title shows its banner as
+it begins, as it does by itself, and a command that changes nothing says
+nothing. Controls the person brought up stay as they were, hiding 5 s
+after their last key even when the remote pauses; a key on the TV after
+the remote's pause shows them as it does, and from then on the pause
+keeps them, as any pause does, until something plays it again. Music and
+Live TV show nothing new for a command: Now Playing is the music's
+controls already, and Live TV's channel up and down show the channel
+tuning, as the keys do, never its controls or what's on.
+
+**Casts.** The TV is one of the devices the profile's remotes play things
+on ([API.md](API.md#casting)) while its event stream is open, so while
+the app shows and is signed in. The stream names it a receiver by its
+install id (the `client_id` its plays send), a TV (`device_kind=tv`)
+taking titles and playlists (`casts=item`) and, where the profile has Live
+TV, channels (`live`), and switching to the profile of a remote of another
+profile that casts to it (`switch`). Until the server first says whether it has, the TV
+takes channels too, and the stream opens again when Live TV comes or goes.
+It sends no name, so the server names it from its `User-Agent`, as it
+does its players. What a remote sends plays as the TV's own Play would,
+in place of what plays, over whatever page shows (a player showing gives
+way to it):
+
+- a movie or an episode in the player, from the place sent, else where
+  Play resumes, with the audio and subtitles picked on the remote's page
+  (`audio_index`, `subtitle_index`, -1 for none) for that play, in place of
+  the saved ones, which stay for a track its file doesn't have; the
+  quality is the TV's own. A show or a season its next episode, where
+  Play resumes it;
+- an album or an artist as the music's queue, in order or shuffled from a
+  random track, with Now Playing; a track its album from it, at the place
+  sent;
+- a playlist: music as the music's queue (the playlist page's own Play
+  opens the entry's album instead, as Android TV's does), video in the
+  player through the playlist (shuffled: from a random entry);
+- a channel in the live player, channel up and down going through All
+  channels.
+
+"Playing from" and the remote's device ("another device" when the server
+couldn't name it) shows at the top right for 4 s, as the app's other
+notices do, over the player too, and the dimmed screen wakes. A show,
+album or playlist with nothing to play says "Nothing to play", and what
+can't be fetched says why, as Play does. A cast for another device, or
+one that comes while the app is hidden, signing in or asking who's
+watching, does nothing, so a remote never gets past a profile's PIN; of
+two sent close together, the later plays. The rules are
+`crates/shell/src/cast.rs`.
+
+A remote on another profile of the household casts to the TV too (the
+server lists it to the household's remotes with the profile it is on).
+Its cast carries the remote's profile (`profile_id`) and a ticket
+(`switch_ticket`): the TV switches to that profile first. What plays ends,
+and its last reports (where it stopped, and the end of its session) go out
+as the profile it played as, within 5 s: what hasn't gone out by then is
+dropped, never sent as the new profile. Then the TV switches, with the
+switch-profile grant and the ticket in place of a PIN, as a switch on
+"Who's watching?" does: Home shows as the new profile and the event stream
+opens again as its. Then the cast plays as above, once: it waits in the
+app, not on the stream. Any other cast heard until the switch is done is
+dropped; after it, casts play as above, the new profile's own too. A
+switch the server refuses (the ticket expired, was spent or isn't this
+TV's) says so and plays nothing; a cast from another
+profile without a ticket is ignored. Hidden as the switch ends, the TV
+switches all the same, as the server has, but plays nothing. "Who's
+watching?" still ignores casts, as in the other TV apps: there the person
+at the TV picks.
+
+### Collections
+
+A library's Collections tab groups its collections under their
+categories, in the order administrators chose, Other among them: a row
+for each category, or one grid without a heading when only one group
+shows. Its Category chip, shown when there are categories to choose
+between, opens a side panel as the Library tab's chips do; how a
+collection was made is left to the web. A collection's page names its
+category beside "Collection", unless it is Other. A row of Home or of a
+library's Recommended tab is a collection: its See all opens the
+collection's page, and a Home row of same-titled collections from
+several libraries opens them together, with a button for each library's
+own. Managing categories, a collection's category and which collections
+are rows, and in what order, is on the web ([API.md](API.md#categories)).
+
 ### Requests
 
 Where the server takes requests, they work as in the Samsung app
@@ -394,9 +586,13 @@ them), the next episode, and Find subtitles.
   build (`video-plane.json` in the data folder).
 - **Playing.** By address, through uMediaServer
   (`luna://com.webos.media`), the pipeline the web app's `<video>` used;
-  LG documents it only for webOS OSE. The pipeline takes only an address,
-  no request headers, so the app plays from
-  [keyed addresses](API.md#keyed-urls), and a live channel's `stream.ts`
+  LG documents it only for webOS OSE. The app calls it from a registration
+  of its own, with a name of the form LG's media clients take
+  (`com.webos.media.client.pley<process id>`), or anonymously where the
+  hub refuses that name; the log says which. Each pipeline loaded is
+  marked foreground (`notifyForeground`), as the TV's native players do.
+  The pipeline takes only an address, no request headers, so the app
+  plays from [keyed addresses](API.md#keyed-urls), and a live channel's `stream.ts`
   from the app's own relay on the loopback address. The start position
   goes in the load (`option.transmission.playTime.start`), since a seek
   after loading buffers from the beginning first; a live channel gets
@@ -408,8 +604,9 @@ them), the next episode, and Find subtitles.
   declared, and refuses an H.264 stream declared at 4K 60.
 - **The TV's services** (settings, configuration, Home, the screen saver)
   go through luna-service2 on a thread of the app's own, with one
-  anonymous registration, every call bounded by a timeout. The main thread
-  never waits on luna, the network or the disk.
+  anonymous registration (LG's SDL holds the app's id), every call bounded
+  by a timeout; the media pipeline has its own, on a thread of its own. The
+  main thread never waits on luna, the network or the disk.
 - **Coming and going.** When the TV hides the app, a video stops where it
   was and, when the app shows, comes back there paused, with the controls
   showing, as in the Samsung and Android apps; music pauses and plays
@@ -461,7 +658,7 @@ The code, by crate:
 | `crates/local` | Videos on a USB drive: folders, MKV and MP4 heads, subtitle files and tracks, resume points, and the player's server for a file |
 | `crates/player` | Playback: the controller, Automatic, recovery, Up Next, music, Live TV sessions |
 | `crates/webos` | The TV: SDL2, luna-service2, its facts, the capability report, the uMediaServer engine, the data folder, the log |
-| `crates/shell` | Routes, the back stack, the rail, the app's state |
+| `crates/shell` | Routes, the back stack, the rail, the app's state, what a remote casts |
 | `crates/screens/*` | The screens: onboarding, Home, browsing, a title, search, music, settings, Live TV, the player |
 | `crates/screens/storage` | The USB drive's page: a folder's folders and videos |
 | `crates/host`, `crates/app` | The frame loop and the command line; the binary `pley` (package `pley-lg`) |
@@ -612,6 +809,7 @@ but keeps time, seeks, changes speed, waits and ends as the TV's does.
 | `--keys "<script>"` | Keys to press once the first page shows: `up down left right ok back menu info play pause playpause stop ff rew next prev chup chdown red green yellow blue`, digits, `hold:<key>:<ms>` (held, repeating as the remote does), `wait:<ms>`, `text:<chars>`, `point:<x>,<y>` (dp), `click`, and `drive:out` and `drive:in` (the drive pulled out and plugged in again) |
 | `--screenshot <file>` | After the keys (and a `wait:` at their end), once the frames go quiet, write the frame as PNG and leave |
 | `--screenshot-after <ms>` | Take the screenshot this long after the keys instead: a playing video never goes quiet, and otherwise the shot comes 15 s after the last key |
+| `--locale <tag>` | The language of the TV's menus (`en-US` by default): `fr-FR`, `es-MX`… |
 | `--tier low\|mid\|high` | Act as a TV of that tier |
 | `--reduced-motion` | As Settings' Reduce motion |
 | `--stats` | Print the time to the first frame and the frame times on leaving |
@@ -627,7 +825,8 @@ The fake server listens on 127.0.0.1: a demo household with profiles
 draws itself, Live TV with a guide, the code sign-in approved at once
 (and the proofs that tell the server apart, keyed the same on every run),
 playback of the Android app's test media, subtitles, seek previews and
-the event stream.
+the event stream, with the remote's commands and its casts to the TV,
+from another profile with the ticket its switch-profile grant takes.
 
 ### The TV build
 
@@ -694,6 +893,9 @@ keep a release's.
   sign-in lasts until the TV restarts.
 - **No subtitle upload or delete:** the TV has no files to send, so
   subtitles are searched for and downloaded only.
+- **No audiobooks:** the server gives the app no audiobook library, nor
+  their books on Home, in search or in history. They are in the web and
+  desktop apps.
 
 ## References
 

@@ -1,6 +1,7 @@
 //! Playing: the play request and its answer, sessions, progress, tracks,
 //! qualities, the network memory and speed test, subtitles and seek previews.
 
+use pley_i18n::t;
 use serde::de::Error as _;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -34,6 +35,40 @@ wire_enum! {
         Transcode = "transcode",
         #[default]
         Unknown = "unknown",
+    }
+}
+
+wire_enum! {
+    /// A command of the user's remote, on another of their devices (docs/API.md, "Remote control").
+    pub enum Control or Unknown {
+        Play = "play",
+        Pause = "pause",
+        Seek = "seek",
+        Skip = "skip",
+        Next = "next",
+        Previous = "previous",
+        /// Another audio track, by its stream index.
+        Audio = "audio",
+        /// Other subtitles, by their stream index; -1 turns them off.
+        Subtitles = "subtitles",
+        /// Another quality of the Quality menu, by its id.
+        Quality = "quality",
+        /// A command a newer server knows: nothing obeys it.
+        #[default]
+        Unknown = "unknown",
+    }
+}
+
+wire_enum! {
+    /// What kind of device a player plays on, as remotes show it (docs/API.md, "Remote control").
+    pub enum DeviceKind or Other {
+        Tv = "tv",
+        Phone = "phone",
+        Tablet = "tablet",
+        Computer = "computer",
+        Browser = "browser",
+        #[default]
+        Other = "other",
     }
 }
 
@@ -72,6 +107,13 @@ pub struct PlaybackRequest {
     /// The TV's player sends no headers: addresses carry a key of their own.
     #[serde(default, deserialize_with = "nd", skip_serializing_if = "is_false")]
     pub keyed_urls: bool,
+    /// The remote's commands this player obeys; left out: none, only Stop.
+    #[serde(default, deserialize_with = "nd", skip_serializing_if = "Vec::is_empty")]
+    pub controls: Vec<Control>,
+    /// Always a TV from this app: remotes tell the TVs among the user's devices by it. The server
+    /// names the TV from the `User-Agent`, webOS giving the app no name of the set's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_kind: Option<DeviceKind>,
     #[serde(default, deserialize_with = "nd")]
     pub caps: ClientCaps,
 }
@@ -146,6 +188,10 @@ pub struct PlaybackInfo {
     pub live_bitrate: bool,
     /// 1400 for HLS sessions: segment timestamps are file time plus this.
     pub pts_offset_ms: Option<i64>,
+    /// The server converts no video: the Quality menu offers the original
+    /// alone, and Automatic stays there.
+    #[serde(default, deserialize_with = "nd")]
+    pub original_only: bool,
 }
 
 wire_enum! {
@@ -264,6 +310,17 @@ pub struct ProgressReport {
     /// How long ago a late report was made.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub age_ms: Option<i64>,
+    /// The audio track a video plays, by stream index, for the user's remotes; left out while it
+    /// isn't known, and by music.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_index: Option<i64>,
+    /// The subtitles a video shows, by stream index, -1 for none; left out by music.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitle_index: Option<i64>,
+    /// The quality a video's Quality menu has picked, by id (`auto`, `original`, `8m`…), for the
+    /// user's remotes; left out by music.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
 }
 
 /// What a track choice says of the audio.
@@ -536,9 +593,6 @@ pub struct ConversionInfo {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QualityPreset {
     pub id: &'static str,
-    pub label: &'static str,
-    /// What Settings says under it, where it says anything.
-    pub hint: Option<&'static str>,
     pub max_bitrate_kbps: Option<u32>,
     pub max_height: Option<u32>,
 }
@@ -548,62 +602,47 @@ impl QualityPreset {
     pub fn mode(&self) -> PlaybackMode {
         if self.max_bitrate_kbps.is_some() { PlaybackMode::Transcode } else { PlaybackMode::Auto }
     }
+
+    /// Its name in the language shown: "Original", "Automatic", "8 Mbps 1080p".
+    pub fn label(&self) -> String {
+        match (self.max_bitrate_kbps, self.max_height) {
+            (Some(kbps), Some(lines)) => quality_name(f64::from(kbps) / 1000.0, lines),
+            _ if self.id == "auto" => t!("player.quality.automatic").to_string(),
+            _ => t!("player.quality.original").to_string(),
+        }
+    }
+
+    /// What Settings says under it, where it says anything (the Android app's Settings).
+    pub fn hint(&self) -> Option<&'static str> {
+        match self.id {
+            "original" => Some(t!("player.quality.hints.original")),
+            "auto" => Some(t!("player.quality.hints.automatic")),
+            _ => None,
+        }
+    }
 }
 
-/// Every quality, in the menu's order (apps/server/src/playback.rs `QUALITIES`;
-/// hints from the Android app's Settings).
+/// A conversion's name in the language shown, its bitrate written as short as it is ("4.6",
+/// not "4.60") and its lines as qualities name them: "8 Mbps 1080p", "4.6 Mbps 720p", "30 Mbps
+/// 4K".
+pub fn quality_name(mbps: f64, lines: u32) -> String {
+    let written = format!("{mbps}");
+    let places = written.split_once('.').map_or(0, |(_, f)| f.len());
+    let lines = if lines >= 2160 { "4K".to_string() } else { format!("{lines}p") };
+    t!("player.quality.preset", mbps = pley_i18n::decimal(mbps, places), lines = lines)
+}
+
+/// Every quality, in the menu's order (apps/server/src/playback.rs `QUALITIES`).
 pub const QUALITY_PRESETS: &[QualityPreset] = &[
-    QualityPreset {
-        id: "original",
-        label: "Original",
-        hint: Some("Full quality. May buffer on a slow connection."),
-        max_bitrate_kbps: None,
-        max_height: None,
-    },
-    QualityPreset {
-        id: "auto",
-        label: "Automatic",
-        hint: Some("Dynamically adjust to conditions."),
-        max_bitrate_kbps: None,
-        max_height: None,
-    },
-    QualityPreset {
-        id: "30m",
-        label: "30 Mbps 4K",
-        hint: None,
-        max_bitrate_kbps: Some(30_000),
-        max_height: Some(2160),
-    },
-    QualityPreset {
-        id: "15m",
-        label: "15 Mbps 4K",
-        hint: None,
-        max_bitrate_kbps: Some(15_000),
-        max_height: Some(2160),
-    },
-    QualityPreset {
-        id: "20m",
-        label: "20 Mbps 1080p",
-        hint: None,
-        max_bitrate_kbps: Some(20_000),
-        max_height: Some(1080),
-    },
-    QualityPreset {
-        id: "12m",
-        label: "12 Mbps 1080p",
-        hint: None,
-        max_bitrate_kbps: Some(12_000),
-        max_height: Some(1080),
-    },
-    QualityPreset {
-        id: "8m",
-        label: "8 Mbps 1080p",
-        hint: None,
-        max_bitrate_kbps: Some(8_000),
-        max_height: Some(1080),
-    },
-    QualityPreset { id: "4m", label: "4 Mbps 720p", hint: None, max_bitrate_kbps: Some(4_000), max_height: Some(720) },
-    QualityPreset { id: "2m", label: "2 Mbps 480p", hint: None, max_bitrate_kbps: Some(2_000), max_height: Some(480) },
+    QualityPreset { id: "original", max_bitrate_kbps: None, max_height: None },
+    QualityPreset { id: "auto", max_bitrate_kbps: None, max_height: None },
+    QualityPreset { id: "30m", max_bitrate_kbps: Some(30_000), max_height: Some(2160) },
+    QualityPreset { id: "15m", max_bitrate_kbps: Some(15_000), max_height: Some(2160) },
+    QualityPreset { id: "20m", max_bitrate_kbps: Some(20_000), max_height: Some(1080) },
+    QualityPreset { id: "12m", max_bitrate_kbps: Some(12_000), max_height: Some(1080) },
+    QualityPreset { id: "8m", max_bitrate_kbps: Some(8_000), max_height: Some(1080) },
+    QualityPreset { id: "4m", max_bitrate_kbps: Some(4_000), max_height: Some(720) },
+    QualityPreset { id: "2m", max_bitrate_kbps: Some(2_000), max_height: Some(480) },
 ];
 
 /// The quality with `id`.

@@ -1,19 +1,16 @@
 package app.pley.android.ui.phone.player
 
-import android.app.AppOpsManager
 import android.app.PictureInPictureParams
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
-import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Rect
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
-import android.os.Process
 import android.provider.Settings as SystemSettings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -34,6 +31,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import app.pley.android.common.AppLanguage
 import app.pley.android.data.AppSettings
 import app.pley.android.data.SessionState
 import app.pley.android.data.Settings
@@ -43,11 +41,11 @@ import app.pley.android.player.PlaybackServices
 import app.pley.android.player.PlayerEngine
 import app.pley.android.player.PlayerPhase
 import app.pley.android.player.PlayerUiState
+import app.pley.android.player.PlayerWindows
 import app.pley.android.player.engine.VideoMediaSession
 import app.pley.android.player.session.SavedPlaybackState
 import app.pley.android.screens.PleyGraphOwner
 import app.pley.android.ui.phone.theme.PhoneTheme
-import java.lang.ref.WeakReference
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -70,9 +68,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  * - picture in picture by itself when leaving while it plays (Android 12
  *   and later; Home on older ones), growing from the video, with play and
  *   pause; never while paused;
- * - leaving otherwise pauses, reports and lets go of the decoders; back
- *   within 90 s it carries on with the same server session, later with a
- *   new one at the same place.
+ * - leaving otherwise pauses, reports and lets go of the decoders, and
+ *   the remote isn't obeyed meanwhile; back within 90 s it carries on with
+ *   the same server session, later with a new one at the same place.
  */
 class PhonePlayerActivity : ComponentActivity(), PlayerHost {
     private lateinit var services: PlaybackServices
@@ -102,12 +100,14 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
         }
     }
 
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(AppLanguage.wrap(newBase))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // One player at a time, as one video plays at a time: an older one (in picture in picture) goes.
-        live.mapNotNull { it.get() }.filter { it !== this }.forEach { it.finish() }
-        live.removeAll { it.get() == null || it.get()?.isFinishing == true }
-        live += WeakReference(this)
+        // One player at a time, as one thing plays at a time: an older one (in picture in picture, or Live TV's) goes.
+        PlayerWindows.opened(this)
 
         immersive()
         if (resources.configuration.smallestScreenWidthDp < TABLET_DP) {
@@ -236,6 +236,7 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
             // Within 90 s: the same session, at the same place, still paused.
             controller.value?.engine?.player?.prepare()
         }
+        controller.value?.setAway(false)
         decodersReleased = false
         attachEngine()
         immersive()
@@ -250,6 +251,7 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
         // picture in picture (onPictureInPictureModeChanged).
         val c = controller.value ?: return
         c.pause()
+        c.setAway(true)
         // Lets go of the decoders and the buffers; the session stays for 90 s.
         c.engine?.player?.let {
             it.stop()
@@ -272,7 +274,7 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
     }
 
     override fun onDestroy() {
-        live.removeAll { it.get() == null || it.get() === this }
+        PlayerWindows.closed(this)
         runCatching { unregisterReceiver(pipReceiver) }
         detachEngine()
         if (isFinishing) {
@@ -284,17 +286,7 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
 
     // ---------------------------------------------------------------- picture in picture
 
-    override val pipSupported: Boolean by lazy {
-        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return@lazy false
-        val ops = getSystemService(AppOpsManager::class.java) ?: return@lazy true
-        @Suppress("DEPRECATION")
-        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ops.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_PICTURE_IN_PICTURE, Process.myUid(), packageName)
-        } else {
-            ops.checkOpNoThrow(AppOpsManager.OPSTR_PICTURE_IN_PICTURE, Process.myUid(), packageName)
-        }
-        mode == AppOpsManager.MODE_ALLOWED
-    }
+    override val pipSupported: Boolean by lazy { PictureInPicture.allowed(this) }
 
     override fun enterPip() {
         if (!pipSupported) return
@@ -319,46 +311,24 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
     private fun updatePip(s: PlayerUiState) {
         if (!pipSupported) return
         val playing = isPlaying(s.phase)
-        val next = listOf(playing, aspect(), sourceHint())
+        val next = listOf(playing, PictureInPicture.aspect(picture.videoAspect), sourceHint())
         if (next == pipKey) return
         pipKey = next
         runCatching { setPictureInPictureParams(pipParams(playing)) }
     }
 
-    private fun pipParams(playing: Boolean): PictureInPictureParams {
-        val builder = PictureInPictureParams.Builder()
-            .setAspectRatio(aspect())
-            .setActions(listOf(PipActions.playPause(this, playing)))
-        sourceHint()?.let(builder::setSourceRectHint)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // Only while playing: a paused video doesn't shrink into a corner.
-            builder.setAutoEnterEnabled(playing)
-            builder.setSeamlessResizeEnabled(false)
-        }
-        return builder.build()
-    }
+    // Enters by itself only while playing: a paused video doesn't shrink into a corner.
+    private fun pipParams(playing: Boolean): PictureInPictureParams =
+        PictureInPicture.params(picture.videoAspect, sourceHint(), listOf(PipActions.playPause(this, playing)), autoEnter = playing)
 
-    /**
-     * Where picture in picture grows from: the whole picture, fitted to this
-     * window (picture in picture shows all of it, however it was zoomed).
-     */
+    /** Where picture in picture grows from: the whole picture, fitted to this window. */
     private fun sourceHint(): Rect? {
         // In picture in picture the window is the small one: the hint for coming back stays as it was.
         if (inPip.value) return lastHint
-        val root = window.decorView
-        if (root.width == 0 || root.height == 0) return null
-        val r = PictureGeometry.place(root.width, root.height, picture.videoAspect, 1f, keepBottom = false)
-        return Rect(r.left, r.top, r.right, r.bottom).takeIf { !it.isEmpty }.also { lastHint = it }
+        return PictureInPicture.hint(window.decorView, picture.videoAspect).also { lastHint = it }
     }
 
     private var lastHint: Rect? = null
-
-    /** The video's shape, within what picture in picture allows (2.39:1 either way). */
-    private fun aspect(): android.util.Rational {
-        val video = picture.videoAspect.takeIf { it > 0f } ?: (16f / 9f)
-        val clamped = video.coerceIn(1f / 2.39f + 0.001f, 2.39f - 0.001f)
-        return android.util.Rational((clamped * 1000).roundToInt(), 1000)
-    }
 
     // ---------------------------------------------------------------- the host's other parts
 
@@ -436,9 +406,6 @@ class PhonePlayerActivity : ComponentActivity(), PlayerHost {
         private const val MIN_BRIGHTNESS = 0.01f
 
         internal const val ACTION_PLAY_PAUSE = "app.pley.android.player.PLAY_PAUSE"
-
-        /** The player screens alive, so a new one ends an older one. */
-        private val live = mutableListOf<WeakReference<PhonePlayerActivity>>()
 
         fun intent(context: Context, playback: String): Intent =
             Intent(context, PhonePlayerActivity::class.java).putExtra(EXTRA_PLAYBACK, playback)

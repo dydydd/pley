@@ -5,7 +5,7 @@ import SwiftUI
 
 /// An artist's page (docs/APPLE.md, Music): their picture, "4 albums · 40
 /// tracks", what the server says of them, Play and Shuffle (every album's
-/// tracks, newest album first), and their albums, newest first.
+/// tracks, newest album first) with Play on…, and their albums, newest first.
 struct ArtistView: View {
     @ObservedObject private var app: AppModel
     @StateObject private var model: ArtistModel
@@ -34,7 +34,9 @@ struct ArtistView: View {
         case .notFound:
             StateView(kind: .empty(symbol: "music.mic", text: ItemModel.notFoundTitle, action: nil))
         case .failed(let why):
-            StateView(kind: .failed(title: "Couldn't load this artist", why: why) { Task { await model.load() } })
+            StateView(kind: .failed(title: localized("Couldn't load this artist"), why: why) {
+                Task { await model.load() }
+            })
         case .loaded:
             if let page = model.page {
                 loaded(page)
@@ -72,7 +74,8 @@ struct ArtistView: View {
                 if model.canPlay {
                     PlayShuffleButtons(prefix: "artist", canPlay: !model.starting, canShuffle: !model.starting,
                                        play: { Task { await model.play() } },
-                                       shuffle: { Task { await model.play(shuffle: true) } })
+                                       shuffle: { Task { await model.play(shuffle: true) } },
+                                       remote: app.remote, cast: .item(model.itemId))
                 }
                 if let summary = page.summary {
                     Text(summary).frame(maxWidth: 760, alignment: .leading)
@@ -100,8 +103,9 @@ struct ArtistView: View {
 /// to their page), the year, "10 tracks · 42m", the profile's rating, and
 /// its tracks, with disc headings on albums of several discs. Opened from
 /// a track, that track is marked and scrolled to. Play and Shuffle play
-/// the album; a track plays the album from it, or pauses and plays on
-/// while it is the one playing, which a speaker marks.
+/// the album, and Play on… plays it on another device; a track plays the
+/// album from it, or pauses and plays on while it is the one playing,
+/// which a speaker marks, and its menu has Play on… too.
 struct AlbumView: View {
     @ObservedObject private var app: AppModel
     @ObservedObject private var music: MusicPlayback
@@ -132,7 +136,9 @@ struct AlbumView: View {
         case .notFound:
             StateView(kind: .empty(symbol: "music.note", text: ItemModel.notFoundTitle, action: nil))
         case .failed(let why):
-            StateView(kind: .failed(title: "Couldn't load this album", why: why) { Task { await model.load() } })
+            StateView(kind: .failed(title: localized("Couldn't load this album"), why: why) {
+                Task { await model.load() }
+            })
         case .loaded:
             if let page = model.page {
                 loaded(page)
@@ -205,7 +211,8 @@ struct AlbumView: View {
             if model.canPlay {
                 PlayShuffleButtons(prefix: "album", canPlay: true, canShuffle: model.canShuffle,
                                    play: { Task { await model.play() } },
-                                   shuffle: { Task { await model.play(shuffle: true) } })
+                                   shuffle: { Task { await model.play(shuffle: true) } },
+                                   remote: app.remote, cast: .item(model.itemId))
                     .padding(.top, 8)
             }
         }
@@ -269,9 +276,13 @@ struct AlbumView: View {
         }
         .buttonStyle(.plain)
         .overlay(alignment: .bottom) { Divider().padding(.leading, 44) }
+        .contextMenu { PlayOnMenu(remote: app.remote, target: .item(track.id), prefix: "album.track") }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(track.spoken + (current ? (playing ? ", playing" : ", paused") : ""))
-        .accessibilityHint(current ? (playing ? "Pauses" : "Plays on") : "Plays the album from this track")
+        .accessibilityLabel(current
+            ? (playing ? localized("\(track.spoken), playing") : localized("\(track.spoken), paused"))
+            : track.spoken)
+        .accessibilityHint(current ? (playing ? localized("Pauses") : localized("Plays on"))
+            : localized("Plays the album from this track"))
         .accessibilityAddTraits(highlighted ? [.isButton, .isSelected] : .isButton)
         .accessibilityIdentifier("album.track.\(track.id)")
     }

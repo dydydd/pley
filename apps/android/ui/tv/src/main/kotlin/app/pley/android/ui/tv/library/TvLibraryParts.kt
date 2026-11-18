@@ -32,21 +32,23 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import app.pley.android.common.sentenceOf
 import app.pley.android.data.Loadable
 import app.pley.android.data.valueOrNull
 import app.pley.android.designsystem.PleyColors
 import app.pley.android.designsystem.PleyShape
 import app.pley.android.designsystem.PleyTv
 import app.pley.android.designsystem.PleyType
+import app.pley.android.designsystem.text.formatWords
 import app.pley.android.designsystem.tile.ArtworkTileModel
 import app.pley.android.designsystem.tile.TileKind
 import app.pley.android.designsystem.tile.rememberSkeleton
 import app.pley.android.designsystem.tile.skeleton
+import app.pley.android.model.DynamicRangeFilter
 import app.pley.android.model.HubKeys
 import app.pley.android.model.LibraryKind
 import app.pley.android.model.SortOrder
-import app.pley.android.screens.LibraryTab
+import app.pley.android.model.format.dynamicRangeFilterLabel
+import app.pley.android.screens.collection.CategoryChoice
 import app.pley.android.screens.library.LibraryUiState
 import app.pley.android.screens.library.LibraryViewModel
 import app.pley.android.screens.library.TileLook
@@ -107,15 +109,11 @@ internal fun TvMessage(
     }
 }
 
-/** An error's sentence, capitalised and ended. */
-internal fun sentence(error: Throwable): String =
-    sentenceOf(error)
-
 /**
  * The Recommended tab (the web's RecommendedTab): the library's hubs as
- * rows from y = 80, Continue Watching as stills and the rest as posters,
- * then the collections, whose "See all" opens the Collections tab. The
- * focused row's header comes up to y = 80 as focus moves down.
+ * rows from y = 80, Continue Watching as stills and the rest as posters;
+ * a row's "See all" opens the collection it shows. The focused row's
+ * header comes up to y = 80 as focus moves down.
  */
 @Composable
 internal fun TvRecommendedTab(
@@ -147,7 +145,6 @@ internal fun TvRecommendedTab(
             focusInstead = tabFocus,
         )
         else -> {
-            val collections = stringResource(R.string.tv_library_tab_collections)
             val seeAll = stringResource(R.string.tv_library_see_all)
             // A tile its actions took away (Remove from Continue Watching): focus comes back to its neighbour.
             memory.settle { key -> hasTile(rows, key) }
@@ -160,25 +157,18 @@ internal fun TvRecommendedTab(
                     item(key = row.key, contentType = row.look) {
                         TvRow(
                             rowKey = row.key,
-                            title = row.title ?: collections,
+                            title = row.title,
                             tiles = row.tiles,
                             kind = row.tileKind,
                             onOpen = { tile -> row.opens.getOrNull(row.tiles.indexOf(tile))?.let(navigator::open) },
-                            onActions = if (row.key == TileRow.COLLECTIONS) {
-                                null
-                            } else {
-                                { tile ->
-                                    memory.mayLeave("${row.key}/${tile.id}", standIn(rows, row.key, tile.id))
-                                    actions.open(tile.id, continueWatching = HubKeys.isContinueWatching(row.key))
-                                }
+                            onActions = { tile ->
+                                memory.mayLeave("${row.key}/${tile.id}", standIn(rows, row.key, tile.id))
+                                actions.open(tile.id, continueWatching = HubKeys.isContinueWatching(row.key))
                             },
                             memory = memory,
                             initialFocus = initial && at == 0,
-                            seeAll = if (row.key == TileRow.COLLECTIONS) {
-                                SeeAll(seeAll) { vm.select(LibraryTab.Collections) }
-                            } else {
-                                row.seeAll?.let { view -> SeeAll(seeAll) { vm.seeAll(view) } }
-                            },
+                            seeAll = row.collection?.let { key -> SeeAll(seeAll) { navigator.open(key) } }
+                                ?: row.seeAll?.let { view -> SeeAll(seeAll) { vm.seeAll(view) } },
                         )
                     }
                 }
@@ -231,8 +221,12 @@ private fun SkeletonRows() {
     }
 }
 
+/** A dynamic range's name: "Any HDR" in the language shown, the others the formats' own names. */
+@Composable
+internal fun tvRangeLabel(range: DynamicRangeFilter): String = dynamicRangeFilterLabel(range, formatWords())
+
 /** The side panels the chips open. */
-internal enum class TvPanel { Sort, Filter, Genre, Year, Resolution, DynamicRange }
+internal enum class TvPanel { Sort, Filter, Genre, Year, Resolution, DynamicRange, CollectionCategory }
 
 /**
  * The side panel (design spec §2.7) of the chip pressed: the sorts and
@@ -323,7 +317,7 @@ internal fun TvLibraryPanel(
                         item(key = "dynamic_range", contentType = PANEL_ROW) {
                             PanelRow(
                                 stringResource(R.string.tv_library_dynamic_range),
-                                value = params.dynamicRange?.label ?: stringResource(R.string.tv_library_all_dynamic_ranges),
+                                value = params.dynamicRange?.let { tvRangeLabel(it) } ?: stringResource(R.string.tv_library_all_dynamic_ranges),
                                 opens = true,
                                 onClick = { onPanel(TvPanel.DynamicRange) },
                             )
@@ -423,8 +417,30 @@ internal fun TvLibraryPanel(
                 }
                 items(state.dynamicRanges, key = { "d/${it.wire}" }, contentType = { PANEL_ROW }) { range ->
                     val on = range == params.dynamicRange
-                    PanelRow(range.label, checked = on, onClick = {
+                    PanelRow(tvRangeLabel(range), checked = on, onClick = {
                         vm.dynamicRange(range)
+                        close()
+                    }, modifier = Modifier.chosenIf(on))
+                }
+            }
+            TvPanel.CollectionCategory -> PanelList(stringResource(R.string.tv_library_collections_category), chosen) {
+                val view = state.collections.valueOrNull
+                val category = view?.category ?: CategoryChoice.All
+                item(key = "all", contentType = PANEL_ROW) {
+                    PanelRow(
+                        stringResource(R.string.tv_library_collections_all_categories),
+                        checked = category == CategoryChoice.All,
+                        onClick = {
+                            vm.collectionCategory(CategoryChoice.All)
+                            close()
+                        },
+                        modifier = Modifier.chosenIf(category == CategoryChoice.All),
+                    )
+                }
+                items(view?.choices.orEmpty(), key = { "c/${it.key}" }, contentType = { PANEL_ROW }) { group ->
+                    val on = group.choice == category
+                    PanelRow(group.category?.title.orEmpty(), checked = on, onClick = {
+                        group.choice?.let(vm::collectionCategory)
                         close()
                     }, modifier = Modifier.chosenIf(on))
                 }

@@ -1,7 +1,8 @@
 //! What an app may do with its token: the scopes a person allows on pley's
 //! own page, and the routes each one opens. Everything else stays closed to
-//! apps (administration, sign-in settings, devices, the Jellyfin-compatible API):
-//! there is no scope for it.
+//! apps (one's own sign-in settings and devices, the Jellyfin-compatible API):
+//! there is no scope for it. Administration opens only to pley's own apps,
+//! with `server`, on an administrator's account.
 
 use std::fmt;
 
@@ -27,12 +28,33 @@ pub enum Scope {
     /// (pley's own apps only, like `profiles`; it does nothing for other
     /// accounts).
     Approvals,
+    /// See what's playing and stop it: the profile's own streams, and
+    /// everyone's where the account is an administrator (pley's own apps
+    /// only, see `AuthUser::oversees_playback`; other apps see and stop
+    /// only the profile's own).
+    Activity,
+    /// Manage the server where the account is an administrator: its
+    /// libraries, accounts, invitations and the dashboard (pley's own apps
+    /// only, never with a TV's code; it does nothing for other accounts, see
+    /// `AuthUser::administers`). What holds keys and passwords stays in the
+    /// web app: the server's settings, its network, the transcoder's
+    /// settings, Radarr and Sonarr, backups and Live TV's sources; and Live
+    /// TV's lineup and tuners are managed there with its sources.
+    Server,
 }
 
 impl Scope {
     /// Every scope, in the order they are written and shown.
-    pub const ALL: [Scope; 6] =
-        [Scope::Library, Scope::Play, Scope::Playlists, Scope::Profiles, Scope::Requests, Scope::Approvals];
+    pub const ALL: [Scope; 8] = [
+        Scope::Library,
+        Scope::Play,
+        Scope::Playlists,
+        Scope::Profiles,
+        Scope::Requests,
+        Scope::Approvals,
+        Scope::Activity,
+        Scope::Server,
+    ];
 
     /// The name in `scope` parameters and answers.
     pub fn name(self) -> &'static str {
@@ -43,6 +65,8 @@ impl Scope {
             Scope::Profiles => "profiles",
             Scope::Requests => "requests",
             Scope::Approvals => "approvals",
+            Scope::Activity => "activity",
+            Scope::Server => "server",
         }
     }
 
@@ -58,7 +82,28 @@ impl Scope {
             Scope::Profiles => "switch to the household's other profiles",
             Scope::Requests => "ask for movies and shows the libraries don't have, and follow the profile's requests",
             Scope::Approvals => "approve and decline what people ask for, where the account is an administrator",
+            Scope::Activity => {
+                "see what's playing and stop it: the profile's streams, and everyone's where the account is an administrator"
+            }
+            Scope::Server => {
+                "manage the server's libraries, accounts and invitations, and see its dashboard, where the account is an administrator"
+            }
         }
+    }
+
+    /// An administrator's right (`approvals`, `server`): what an account that
+    /// isn't an administrator never gives ([`Scopes::for_account`]).
+    pub fn administrators(self) -> bool {
+        matches!(self, Scope::Approvals | Scope::Server)
+    }
+
+    /// Whether the person may leave it out on the consent page, the app
+    /// working without it: managing the server (`server`), which an
+    /// administrator may keep to the web app. Every other scope asked for is
+    /// one the app needs: without `approvals`, Pley's own apps on an
+    /// administrator's account ask to sign in again on every requests screen.
+    pub fn optional(self) -> bool {
+        self == Scope::Server
     }
 
     pub fn from_name(name: &str) -> Option<Scope> {
@@ -101,6 +146,24 @@ impl Scopes {
         Scopes(self.0 | scope.bit())
     }
 
+    pub fn without(self, scope: Scope) -> Scopes {
+        Scopes(self.0 & !scope.bit())
+    }
+
+    /// What an account can give of these: all of them on an administrator's,
+    /// none of an administrator's rights (`approvals`, `server`) on another.
+    /// Given by an account that isn't one, they would do nothing until it
+    /// became one, and then wake without anyone being asked. `activity`
+    /// stays: it covers the profile's own streams, and everyone's once the
+    /// account is an administrator who allowed the app
+    /// (`AuthUser::oversees_playback`).
+    pub fn for_account(self, administrator: bool) -> Scopes {
+        if administrator {
+            return self;
+        }
+        Scope::ALL.into_iter().filter(|scope| scope.administrators()).fold(self, Scopes::without)
+    }
+
     pub fn contains(self, scope: Scope) -> bool {
         self.0 & scope.bit() != 0
     }
@@ -131,10 +194,12 @@ pub enum Need {
     /// Any app token (who it acts as, and pictures of its household).
     AnyApp,
     Scope(Scope),
+    /// Either scope opens it; a token with neither is told of the first.
+    Either(Scope, Scope),
 }
 
 use Need::AnyApp;
-use Scope::{Approvals, Library, Play, Playlists, Profiles, Requests};
+use Scope::{Activity, Approvals, Library, Play, Playlists, Profiles, Requests, Server};
 
 /// The routes apps may use: (method, path as routed, with `/api`, what the
 /// token needs). HEAD is looked up as GET.
@@ -159,6 +224,8 @@ pub const APP_ROUTES: &[(&str, &str, Need)] = &[
     ("GET", "/api/libraries/{id}/collections", Need::Scope(Library)),
     ("GET", "/api/collections/{id}", Need::Scope(Library)),
     ("GET", "/api/collections/{id}/images/{kind}", Need::Scope(Library)),
+    ("GET", "/api/collections/merged", Need::Scope(Library)),
+    ("GET", "/api/collection-categories", Need::Scope(Library)),
     ("GET", "/api/playlists", Need::Scope(Library)),
     ("GET", "/api/playlists/{id}", Need::Scope(Library)),
     ("GET", "/api/items/{id}", Need::Scope(Library)),
@@ -226,10 +293,24 @@ pub const APP_ROUTES: &[(&str, &str, Need)] = &[
     ("PUT", "/api/watchlist/{id}", Need::Scope(Play)),
     ("DELETE", "/api/watchlist/{id}", Need::Scope(Play)),
     // the profile's own sessions: an app acts as a viewer, so never another's
-    ("DELETE", "/api/sessions/{id}", Need::Scope(Play)),
+    // (stopping one excepted: see `activity` below, which stops them too)
+    ("GET", "/api/sessions", Need::Scope(Play)),
+    ("DELETE", "/api/sessions/{id}", Need::Either(Play, Activity)),
+    // remote control of the profile's own players: never another's, an
+    // administrator's profile included
+    ("POST", "/api/sessions/{id}/command", Need::Scope(Play)),
+    // casting to the profile's own devices, and for one of Pley's own apps
+    // allowed `profiles`, to the household's other profiles' devices that
+    // switch to it (checked in the handlers); never one outside the
+    // household, an administrator's profile included
+    ("GET", "/api/remote/devices", Need::Scope(Play)),
+    ("POST", "/api/remote/devices/{id}/cast", Need::Scope(Play)),
+    ("POST", "/api/remote/devices/{id}/pairing", Need::Scope(Play)),
     // the profile's track choices for every title (its name, picture and
     // sign-in stay in the web app)
     ("PUT", "/api/me/track-defaults", Need::Scope(Play)),
+    // the language the profile sees Pley in, as its track choices
+    ("PUT", "/api/me/language", Need::Scope(Play)),
     // the order the profile sees its libraries in
     ("PUT", "/api/me/libraries/order", Need::Scope(Play)),
     ("DELETE", "/api/me/libraries/order", Need::Scope(Play)),
@@ -262,6 +343,54 @@ pub const APP_ROUTES: &[(&str, &str, Need)] = &[
     ("POST", "/api/requests/{id}/decline", Need::Scope(Approvals)),
     ("POST", "/api/requests/{id}/handled", Need::Scope(Approvals)),
     ("GET", "/api/requests/options", Need::Scope(Approvals)),
+    // activity: what plays, the profile's own, and on an administrator's
+    // account everyone's, as the dashboard shows it (see
+    // AuthUser::oversees_playback). Of others' sessions it reaches only
+    // stopping them (`DELETE /api/sessions/{id}`), never remote control or
+    // casting. With `server`, the dashboard's too: everyone's, with the
+    // administrators' counters.
+    ("GET", "/api/activity", Need::Either(Activity, Server)),
+    // server: the parts of the web app's Settings a phone has, for pley's
+    // own apps on an administrator's account (see AuthUser::administers);
+    // the routes are administrators' (`AdminUser`), which answer such an
+    // app as they answer an administrator's own sign-in. What holds keys,
+    // passwords or providers' addresses stays with the web app: the
+    // server's settings and their tests, the network, the transcode folder,
+    // backups, the library work's schedule, Live TV's settings and sources,
+    // and with them its lineup and tuners.
+    // One's own name, password, PIN, two-step sign-in, devices and apps
+    // stay in Account, as for every app, and other administrators' accounts
+    // with the web app (see api::accounts::not_another_administrator).
+    // libraries
+    ("POST", "/api/libraries", Need::Scope(Server)),
+    ("POST", "/api/libraries/scan", Need::Scope(Server)),
+    ("PUT", "/api/libraries/order", Need::Scope(Server)),
+    ("PATCH", "/api/libraries/{id}", Need::Scope(Server)),
+    ("DELETE", "/api/libraries/{id}", Need::Scope(Server)),
+    ("POST", "/api/libraries/{id}/scan", Need::Scope(Server)),
+    ("POST", "/api/fs", Need::Scope(Server)),
+    // accounts and invitations
+    ("GET", "/api/users", Need::Scope(Server)),
+    ("POST", "/api/users", Need::Scope(Server)),
+    ("PATCH", "/api/users/{id}", Need::Scope(Server)),
+    ("DELETE", "/api/users/{id}", Need::Scope(Server)),
+    ("GET", "/api/users/{id}/devices", Need::Scope(Server)),
+    ("DELETE", "/api/users/{id}/devices", Need::Scope(Server)),
+    ("GET", "/api/users/{id}/apps", Need::Scope(Server)),
+    ("DELETE", "/api/users/{id}/apps/{grant}", Need::Scope(Server)),
+    ("DELETE", "/api/users/{id}/two-step", Need::Scope(Server)),
+    ("GET", "/api/invites", Need::Scope(Server)),
+    ("POST", "/api/invites", Need::Scope(Server)),
+    ("DELETE", "/api/invites/{code}", Need::Scope(Server)),
+    // what an age limit and its exceptions are picked from
+    ("GET", "/api/ratings/systems", Need::Scope(Server)),
+    ("GET", "/api/labels", Need::Scope(Server)),
+    // the dashboard and storage
+    ("GET", "/api/system", Need::Scope(Server)),
+    ("GET", "/api/system/resources", Need::Scope(Server)),
+    ("GET", "/api/system/storage", Need::Scope(Server)),
+    ("POST", "/api/system/storage/clean", Need::Scope(Server)),
+    ("GET", "/api/transcoder", Need::Scope(Server)),
 ];
 
 /// What an app's token needs for `method` on the routed `path`; `None`:
@@ -286,8 +415,13 @@ mod tests {
         assert_eq!(Scopes::parse("Library"), Err("Library".to_owned()), "names are lower case");
         assert_eq!(Scopes::parse("library\tplay"), Err("library\tplay".to_owned()), "spaces only");
         assert_eq!(Scopes::from_stored("library future play"), Scopes::parse("library play").unwrap());
-        assert_eq!(Scopes::all().to_string(), "library play playlists profiles requests approvals");
-        assert_eq!(Scopes::all().names(), ["library", "play", "playlists", "profiles", "requests", "approvals"]);
+        assert_eq!(Scopes::all().to_string(), "library play playlists profiles requests approvals activity server");
+        assert_eq!(
+            Scopes::all().names(),
+            ["library", "play", "playlists", "profiles", "requests", "approvals", "activity", "server"]
+        );
+        assert_eq!(Scopes::parse("server library").unwrap().to_string(), "library server");
+        assert_eq!(Scopes::parse("activity library").unwrap().to_string(), "library activity");
         assert_eq!(Scopes::parse("profiles library").unwrap().to_string(), "library profiles");
         assert_eq!(Scopes::parse("approvals requests").unwrap().to_string(), "requests approvals");
         assert_eq!(
@@ -308,10 +442,23 @@ mod tests {
     }
 
     #[test]
+    fn only_administrators_give_administrators_rights() {
+        let asked = Scopes::parse("library play requests approvals activity server").unwrap();
+        assert_eq!(asked.for_account(true), asked);
+        assert_eq!(asked.for_account(false).to_string(), "library play requests activity");
+        assert_eq!(asked.without(Scope::Server).to_string(), "library play requests approvals activity");
+        assert_eq!(asked.without(Scope::Profiles), asked, "without one it hasn't changes nothing");
+        let administrators: Vec<_> = Scope::ALL.into_iter().filter(|scope| scope.administrators()).collect();
+        assert_eq!(administrators, [Scope::Approvals, Scope::Server]);
+        let optional: Vec<_> = Scope::ALL.into_iter().filter(|scope| scope.optional()).collect();
+        assert_eq!(optional, [Scope::Server], "approving requests is one an app needs");
+    }
+
+    #[test]
     fn every_app_route_is_on_a_real_path() {
         // Whether each names a route of api/mod.rs is checked by
         // tests/app_tokens.rs, which reads it.
-        assert_eq!(APP_ROUTES.len(), 99);
+        assert_eq!(APP_ROUTES.len(), 134);
         for (i, (method, path, _)) in APP_ROUTES.iter().enumerate() {
             assert!(["GET", "POST", "PUT", "PATCH", "DELETE"].contains(method), "{method} {path}");
             assert!(path.starts_with("/api/") && !path.ends_with('/'), "{path}");
@@ -330,11 +477,28 @@ mod tests {
         assert_eq!(required(&Method::POST, "/api/requests/{id}/approve"), Some(Need::Scope(Scope::Approvals)));
         assert_eq!(required(&Method::DELETE, "/api/requests/{id}/watch"), Some(Need::Scope(Scope::Requests)));
         assert_eq!(required(&Method::GET, "/api/requests/options"), Some(Need::Scope(Scope::Approvals)));
+        assert_eq!(required(&Method::GET, "/api/activity"), Some(Need::Either(Scope::Activity, Scope::Server)));
+        assert_eq!(required(&Method::DELETE, "/api/sessions/{id}"), Some(Need::Either(Scope::Play, Scope::Activity)));
         assert_eq!(required(&Method::PUT, "/api/me/track-defaults"), Some(Need::Scope(Scope::Play)));
+        assert_eq!(required(&Method::POST, "/api/remote/devices/{id}/cast"), Some(Need::Scope(Scope::Play)));
         assert_eq!(required(&Method::PATCH, "/api/me"), None, "name and picture stay in the web app");
         assert_eq!(required(&Method::POST, "/api/auth/switch"), None, "the web's switch makes sessions");
-        assert_eq!(required(&Method::POST, "/api/libraries"), None, "creating libraries is administration");
-        assert_eq!(required(&Method::GET, "/api/settings"), None);
+        assert_eq!(required(&Method::POST, "/api/libraries"), Some(Need::Scope(Scope::Server)), "administration");
+        assert_eq!(required(&Method::GET, "/api/settings"), None, "the server's settings hold its keys");
+        assert_eq!(required(&Method::GET, "/api/live/sources"), None, "sources hold providers' passwords");
+        assert_eq!(required(&Method::PATCH, "/api/live/lineup"), None, "the lineup stays in the web app");
+        assert_eq!(required(&Method::DELETE, "/api/live/tuners/{channel}"), None, "and the tuners");
+        assert_eq!(required(&Method::DELETE, "/api/users/{id}/two-step"), Some(Need::Scope(Scope::Server)));
+        assert_eq!(required(&Method::PUT, "/api/auth/password"), None, "one's own password stays in Account");
+        assert_eq!(required(&Method::PUT, "/api/me/pin"), None, "one's own PIN too");
+        assert_eq!(required(&Method::GET, "/api/me/devices"), None, "and one's own devices");
+        for (method, path, need) in APP_ROUTES {
+            // Every administrator's route an app may use goes by `server`
+            // alone, so no other scope reaches administration.
+            if path.starts_with("/api/users") && *path != "/api/users/{id}/avatar" || path.starts_with("/api/system") {
+                assert_eq!(*need, Need::Scope(Scope::Server), "{method} {path}");
+            }
+        }
         assert_eq!(required(&Method::GET, "/api/libraries/1"), None, "routed paths, not request paths");
         assert_eq!(required(&Method::OPTIONS, "/api/libraries"), None);
     }

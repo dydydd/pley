@@ -12,6 +12,7 @@ use crate::auth::AuthUser;
 use crate::catalog::{self, ItemRow, ItemSummary, VISIBLE, me_cte};
 use crate::db::Db;
 use crate::error::AppError;
+use crate::library::LibraryKind;
 use crate::util::now;
 
 /// Most entries a playlist can hold.
@@ -47,7 +48,22 @@ impl Kind {
             _ => None,
         }
     }
+
+    /// The kind of a smart playlist of a library of `kind`: `None` for
+    /// audiobooks, whose parts no playlist holds, so that it would play
+    /// nothing.
+    pub fn of_library(kind: LibraryKind) -> Option<Kind> {
+        match kind {
+            LibraryKind::Movies | LibraryKind::Shows => Some(Kind::Video),
+            LibraryKind::Music => Some(Kind::Audio),
+            LibraryKind::Audiobooks => None,
+        }
+    }
 }
+
+/// Why a smart playlist of a library without a kind of its own
+/// ([`Kind::of_library`]) is refused.
+pub const SMART_LIBRARIES: &str = "smart playlists are for movie, TV and music libraries";
 
 #[derive(Debug, Clone, FromRow)]
 struct PlaylistRow {
@@ -150,6 +166,12 @@ async fn smart_entries(db: &Db, user: &AuthUser, row: &PlaylistRow) -> sqlx::Res
     }
     leaves.truncate(usize::try_from(MAX_ENTRIES).unwrap_or(usize::MAX));
     Ok(leaves.into_iter().map(|item| (item.id, item)).collect())
+}
+
+/// Whether playlist `id` is the user's: playlists are private, so it is
+/// the only one who sees it.
+pub async fn is_theirs(db: &Db, user: &AuthUser, id: i64) -> sqlx::Result<bool> {
+    Ok(owned(db, user, id).await?.is_some())
 }
 
 /// Whether the user's playlist is a smart one (it holds no entries).
@@ -395,6 +417,109 @@ pub async fn add(db: &Db, user: &AuthUser, id: i64, item_ids: &[i64]) -> Result<
             .bind(leaf.id)
             .bind(next + offset as i64)
             .bind(now)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("UPDATE playlists SET updated_at = ? WHERE id = ?").bind(now).bind(id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(leaves.len() as u64)
+}
+
+/// Appends `item_ids` to playlist `id` in their order, as the Plex import
+/// brings a playlist: those of its kind that play (movies and episodes, or
+/// tracks), others left out, up to the most a playlist holds. How many were
+/// added.
+pub async fn append_leaves(db: &Db, id: i64, item_ids: &[i64]) -> sqlx::Result<u64> {
+    let mut tx = db.write.begin().await?;
+    let Some(kind) = sqlx::query_scalar::<_, String>("SELECT kind FROM playlists WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+    else {
+        return Ok(0);
+    };
+    let kinds = if kind == "audio" { "('track')" } else { "('movie', 'episode')" };
+    let (mut count, mut next): (i64, i64) =
+        sqlx::query_as("SELECT COUNT(*), COALESCE(MAX(position) + 1, 0) FROM playlist_items WHERE playlist_id = ?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let now = now();
+    let mut added = 0;
+    // `kinds` is one of the two lists above.
+    let sql = format!(
+        "INSERT INTO playlist_items (playlist_id, item_id, position, added_at)
+         SELECT ?, id, ?, ? FROM items WHERE id = ? AND kind IN {kinds}"
+    );
+    for item in item_ids {
+        if count >= MAX_ENTRIES {
+            break;
+        }
+        let done = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(id)
+            .bind(next)
+            .bind(now)
+            .bind(item)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        count += done as i64;
+        next += done as i64;
+        added += done;
+    }
+    if added > 0 {
+        sqlx::query("UPDATE playlists SET updated_at = ? WHERE id = ?").bind(now).bind(id).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(added)
+}
+
+/// Puts the leaves of `item_ids` in place of the entries the user sees, in
+/// that order, as apps that edit a playlist as a whole send it: entries the
+/// user can't see stay, after them. Refused, changing nothing, as [`add`]
+/// refuses.
+pub async fn replace(db: &Db, user: &AuthUser, id: i64, item_ids: &[i64]) -> Result<u64, AppError> {
+    let row = owned(db, user, id).await?.ok_or_else(|| AppError::not_found("playlist not found"))?;
+    if row.smart_filter.is_some() {
+        return Err(AppError::bad_request("a smart playlist is filled by its filter"));
+    }
+    let kind = Kind::parse(&row.kind).unwrap_or(Kind::Video);
+    let leaves = expand(db, user, item_ids).await?;
+    if leaves.iter().any(|l| Kind::of_item(&l.kind) != Some(kind)) {
+        return Err(AppError::bad_request(match kind {
+            Kind::Video => "only movies and episodes can go in a video playlist",
+            Kind::Audio => "only music can go in a music playlist",
+        }));
+    }
+    let seen: HashSet<i64> =
+        get_rows(db, user, id).await?.map(|(_, entries)| entries).unwrap_or_default().iter().map(|(e, _)| *e).collect();
+    let hidden: Vec<i64> = entry_order(db, id).await?.into_iter().filter(|e| !seen.contains(e)).collect();
+    if (hidden.len() + leaves.len()) as i64 > MAX_ENTRIES {
+        return Err(AppError::bad_request(format!("a playlist holds at most {MAX_ENTRIES} items")));
+    }
+    let now = now();
+    let mut tx = db.write.begin().await?;
+    for entry in &seen {
+        sqlx::query("DELETE FROM playlist_items WHERE id = ? AND playlist_id = ?")
+            .bind(entry)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    for (position, leaf) in leaves.iter().enumerate() {
+        sqlx::query("INSERT INTO playlist_items (playlist_id, item_id, position, added_at) VALUES (?, ?, ?, ?)")
+            .bind(id)
+            .bind(leaf.id)
+            .bind(position as i64)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+    }
+    for (offset, entry) in hidden.iter().enumerate() {
+        sqlx::query("UPDATE playlist_items SET position = ? WHERE id = ? AND playlist_id = ?")
+            .bind((leaves.len() + offset) as i64)
+            .bind(entry)
+            .bind(id)
             .execute(&mut *tx)
             .await?;
     }

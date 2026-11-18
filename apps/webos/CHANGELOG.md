@@ -8,6 +8,152 @@ describes how they are made.
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-11-18
+
+### Added
+
+- A library's Collections tab groups collections by category and filters
+  them by category, and a collection's page shows its category.
+- See all on a row of Home or Recommended opens its collection; a Home
+  row of collections from several libraries opens them together.
+
+### Changed
+
+- A library's Recommended tab no longer ends with a row of all its
+  collections.
+
+### Fixed
+
+- For TVs where pressing Play failed at once with "the TV's player gave
+  up (Message status unknown.)", the app talks to the TV's media pipeline
+  the way LG's own media apps do.
+
+## [0.1.10] - 2026-11-16
+
+### Fixed
+
+- A movie or episode with several versions plays the same version from
+  its page as from Home and Continue Watching: the one this TV plays
+  best, unless you pick another. The page's badges and tracks are that
+  version's.
+
+## [0.1.9] - 2026-11-12
+
+### Added
+
+- When the server has video transcoding turned off, the Quality menu
+  offers only Original.
+
+## [0.1.8] - 2026-11-08
+
+### Fixed
+
+- Watch history, opened while the server is out of reach, shows the plays
+  saved from last time with focus on the newest, without "Can't reach your
+  server" showing for a moment first and leaving focus on a play further
+  down.
+- Marking a title watched no longer goes back to unwatched for a moment
+  when the page was being refreshed as you marked it.
+- Use the server's order in Sort libraries no longer puts your own order
+  back when the libraries were being refreshed as you chose it, and an
+  order saved on another device while they were being refreshed shows.
+
+## [0.1.7] - 2026-11-06
+
+### Added
+
+- Pley in French and Spanish: the app shows your profile's language, else
+  the one picked on this TV, else the TV's, else the server's, and starts
+  in the last one it showed. A globe at the bottom right of Choose your
+  server and the address screen, and at the top right of the sign-in code,
+  picks the TV's language before anyone signs in: Automatic (the TV's
+  own), English, Français or Español. Settings → Profile → Language
+  chooses it for your profile on every device, or Automatic; on a server
+  from before languages, the row keeps your choice on this TV.
+- Someone on another profile of the household plays something on the TV
+  from their phone or browser: the TV switches to their profile first
+  (their own device asked for its PIN), then plays it. A switch that fails
+  says so and plays nothing.
+- What your phone or browser does to the film or episode on the TV is
+  said there for 2 s at the top right ("Paused", "+30 s", "Jumped to
+  12:34", "Audio: French"), without bringing up the player's controls; a
+  pause sent from it doesn't keep them up either.
+
+### Changed
+
+- Choose your server's logo is the size of the sign-in code's, the word
+  closer to the mark, as on the other TVs.
+- The TV starts straight into Home as the profile it was left on when it
+  has no PIN, where a household of several profiles was asked "Who's
+  watching?" each time. A profile with a PIN still asks first, and Switch
+  profile still shows every profile. Settings' Always start as
+  calls this Profile used last, where it said Ask who's watching.
+
+### Fixed
+
+- OK on a film or episode left untouched for a few seconds brings up the
+  player's controls for 5 s; they went again at once.
+- Your phone or browser changes Live TV's channel, or stops it, while the
+  channel is still starting on the TV, as it does once it plays.
+- Leaving Live TV, or the TV hiding the app, just as a channel starts lets
+  its connection go at once, not 45 s later.
+- On Requests, the first card is as far from the second as the others are
+  from each other, so its focus ring shows whole rather than under the
+  second card, and the last card of a long list scrolls up clear of the
+  screen's bottom edge.
+
+## [0.1.6] - 2026-11-05
+
+### Added
+
+- Your phone or browser changes the quality of the film or episode on
+  the TV, as the player's Quality menu does (the pick is kept for the
+  next ones), and shows which is picked. A film or episode sent from a
+  title's page plays with the audio and subtitles picked there.
+- Your phone or browser plays a film, an episode, a show, an album, an
+  artist, a track, a playlist or a Live TV channel on the TV ("Play on…"):
+  it starts as the TV's own Play would, in place of what plays, and the
+  TV says "Playing from" the device it came from.
+- Your phone or browser controls what plays on the TV: a film or episode
+  plays, pauses, seeks and skips, and goes on to the next one; music does
+  the same, and goes back a track; Live TV changes channel. Live TV
+  stopped from another device, or by the server's administrator, stops
+  on the TV and says who, with their message.
+- Your phone or browser changes the audio and subtitles of the film or
+  episode on the TV, as the player's own menu does, and shows which
+  play.
+
+### Changed
+
+- Requests: a sign-in from before the app could ask says "Sign in again to ask for movies
+  and shows" without a second line, and its button reads Sign in.
+- When the server can't be reached, the app says "Pley is offline", where
+  it said "Showing what Pley had saved. Reconnecting…". It still shows
+  what it saved and reconnects by itself.
+- A movie or show in Discover, its See all and Search's Discover row that
+  a library has whole opens its library page, where it plays, not a page
+  with only Open on it. A show partly there still opens its Discover page,
+  with Request more seasons.
+- A programme's details in Live TV have Watch and the favourite side by
+  side, the favourite a star as in the live player, where Remove from
+  favourites was a wide button under Watch. In the live player, the star
+  no longer shows its words under it, which ran under Channels; Audio
+  Guidance still reads them.
+
+### Fixed
+
+- Live TV's channel up or down, still finding the next channel when
+  another is picked from the list, Watch again is pressed or the app is
+  hidden, no longer changes channel a moment later.
+
+## [0.1.5] - 2026-11-04
+
+### Fixed
+
+- A library opens in the sort and filters it was left in, and Live TV in
+  the view it was left in, also while the server is slow to answer or
+  right after they were changed.
+
 ## [0.1.4] - 2026-11-03
 
 ### Added
@@ -337,7 +483,14 @@ describes how they are made.
 - First release with a version of its own (builds before it carried 0.2.0,
   the version every app shared).
 
-[Unreleased]: https://github.com/pley-media-server/pley/compare/release-2026-11-03...HEAD
+[Unreleased]: https://github.com/pley-media-server/pley/compare/release-2026-11-18...HEAD
+[0.1.11]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-18
+[0.1.10]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-16
+[0.1.9]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-12
+[0.1.8]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-08
+[0.1.7]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-06
+[0.1.6]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-05
+[0.1.5]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-04
 [0.1.4]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-03
 [0.1.3]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-02.2
 [0.1.2]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-02

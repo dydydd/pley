@@ -1,9 +1,9 @@
 //! The Jellyfin-compatible API (docs/COMPATIBILITY.md): Jellyfin's apps and
 //! the apps built for it (Plezy, Findroid, Jellyfin for Android TV and for
 //! Kodi, Feishin, Infuse, Streamyfin) sign in to Pley and browse, play and
-//! keep their watch state in it, as each user may. It is off unless an
-//! administrator turns it on (Settings → Network), on Pley's own port or on
-//! a port of its own.
+//! keep their watch state in it, as each user may. It is on Pley's own port
+//! by default; Settings → Network turns it off or gives it a port of its
+//! own.
 //!
 //! Its clients sign in with a password (`/Users/AuthenticateByName`) for a
 //! token for other apps ([`crate::auth::compatibility`]): such tokens work
@@ -13,11 +13,16 @@
 pub mod ids;
 
 mod dto;
+mod editing;
 mod items;
+mod lists;
 mod playback;
+mod profile;
 mod socket;
 mod system;
 mod users;
+
+pub(crate) use socket::Remotes;
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -69,10 +74,14 @@ impl From<AppError> for JfError {
             | AppError::CompatibilityToken => JfError::Unauthorized,
             AppError::Forbidden(_) | AppError::ForbiddenAs(..) | AppError::InsufficientScope(_) => JfError::Forbidden,
             AppError::NotFound(_) | AppError::SessionStopped(_) => JfError::NotFound,
-            AppError::BadRequest(m) | AppError::Conflict(m) | AppError::ConflictWith(m, _) => JfError::BadRequest(m),
-            AppError::Unavailable(m) | AppError::TooManyRequests(m) | AppError::NotImplemented(m) => {
-                JfError::Unavailable(m)
-            }
+            AppError::BadRequest(m)
+            | AppError::Conflict(m)
+            | AppError::ConflictWith(m, _)
+            | AppError::ConflictAs(_, m) => JfError::BadRequest(m),
+            AppError::Unavailable(m)
+            | AppError::StreamsFull(_, m)
+            | AppError::TooManyRequests(m)
+            | AppError::NotImplemented(m) => JfError::Unavailable(m),
             AppError::Internal(e) => JfError::Internal(e),
         }
     }
@@ -239,7 +248,8 @@ async fn token_user(
 }
 
 /// A token's user as this API takes it: never as an administrator, whatever
-/// its scopes allow on the Plex-compatible API.
+/// its scopes allow on the Plex-compatible API, and whatever
+/// `Policy.IsAdministrator` says to activity monitors.
 pub(crate) fn this_apis(user: AuthUser) -> AuthUser {
     AuthUser { is_admin: false, ..user }
 }
@@ -279,6 +289,30 @@ impl FromRequestParts<AppState> for JfUser {
         let user = state.auth.validate_compatibility(&token, Some(&used)).await.ok_or(JfError::Unauthorized)?;
         Ok(JfUser { user: this_apis(user), client })
     }
+}
+
+/// A caller that changes what only administrators change in Pley
+/// (collections, metadata): a token that may manage libraries (`manage`),
+/// on an account that is an administrator now, as on the Plex-compatible
+/// API. It acts with an administrator's rights for that change alone, and
+/// `Policy.IsAdministrator` (which `activity` sets) has no part in it.
+pub struct JfManager(pub AuthUser);
+
+impl FromRequestParts<AppState> for JfManager {
+    type Rejection = JfError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+        let JfUser { user, .. } = JfUser::from_request_parts(parts, state).await?;
+        Ok(JfManager(manager(user)?))
+    }
+}
+
+/// The caller as [`JfManager`] takes it: `403` without `manage`.
+pub(crate) fn manager(user: AuthUser) -> JfResult<AuthUser> {
+    if !user.compatibility_allows(compatibility::Scope::Manage) {
+        return Err(JfError::Forbidden);
+    }
+    Ok(AuthUser { is_admin: true, ..user })
 }
 
 /// The client as it names itself, signed in or not.
@@ -436,7 +470,9 @@ fn router(state: AppState, jellyfin: Arc<Jellyfin>) -> Router {
     Router::new()
         .merge(system::routes())
         .merge(users::routes())
+        .merge(editing::routes())
         .merge(items::routes())
+        .merge(lists::routes())
         .merge(playback::routes())
         .merge(socket::routes())
         .fallback(|| async { JfError::NotFound })
@@ -613,9 +649,10 @@ fn is_jellyfin_request(request: &Request) -> bool {
 
 /// While the API answers on Pley's port, its requests go to it and the
 /// rest to Pley. Answers to the shared paths vary with what decides. A
-/// request that names itself the Plex-compatible API's (`X-Plex-…`) is left
-/// to that API while it is on Pley's port too: its paths and this one's
-/// meet (`/library`, `/system`, `/devices`).
+/// request that names itself the Plex-compatible API's (`X-Plex-…`, or a
+/// path with its `:` segments) is left to that API while it is on Pley's
+/// port too: its paths and this one's meet (`/library`, `/system`,
+/// `/devices`, `/audio`).
 pub async fn on_web_port(State(api): State<OnWebPort>, request: Request, next: Next) -> Response {
     if !api.state.network.jellyfin_on_web() || (api.state.network.plex_on_web() && crate::plex::names_itself(&request))
     {

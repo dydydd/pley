@@ -135,18 +135,21 @@ struct DiagnosticsView: View {
     }
 }
 
-/// About on Apple TV: the version, that the app holds no third-party code, and Pley's licence.
+/// About on Apple TV: the version, that the app holds no third-party code,
+/// Pley's licence, and that the details of titles to ask for come from TMDB.
 struct AboutView: View {
     private let model = AboutModel()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 32) {
-            Text("Pley").font(.title.bold())
+            Text(verbatim: "Pley").font(.title.bold())
             Text(model.title)
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("about.version")
             Text(AboutModel.licences)
             Text(AboutModel.licence)
+            Text(RequestWords.creditAbout)
+                .accessibilityIdentifier("about.tmdb")
         }
         // One focusable block, so the focus stays on the page and Menu goes
         // back to Settings.

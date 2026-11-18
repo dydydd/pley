@@ -4,6 +4,7 @@ import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-quer
 import type HlsType from "hls.js";
 import {
   ArrowLeft,
+  Cast,
   ChevronDown,
   ChevronUp,
   List,
@@ -18,9 +19,10 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { ApiError, errorMessage, isApiError } from "@/api/client";
 import { onServerEvent } from "@/api/events";
-import type { ServerEvent } from "@/api/types";
+import type { Control, ServerEvent } from "@/api/types";
 import {
   busyConnections,
   CHANNEL_PAGE,
@@ -39,11 +41,14 @@ import {
   type LiveCategory,
 } from "@/api/livetv";
 import { useOptionalAudioPlayer } from "@/audio/AudioPlayer";
+import { PlayOn } from "@/components/PlayOn";
 import { Slider } from "@/components/Slider";
+import { t } from "@/i18n";
 import { cn } from "@/lib/cn";
 import { canPlayNativeHls } from "@/lib/caps";
 import { loadHls } from "@/lib/hls";
 import { loadMpegts } from "@/lib/mpegts";
+import { playingHere } from "@/lib/playingHere";
 import { useDocumentTitle, useLocalStorage } from "@/lib/hooks";
 import { clientId } from "@/lib/progress";
 import { ChannelLogo, formatSpan, formatTime, liveUrl, setLastWatched, timeLeft, useNow } from "@/pages/livetv/common";
@@ -59,6 +64,8 @@ const BANNER_FOR = 5000;
 const TAKEN_OVER_GRACE = 1000;
 /** Digits typed for a channel number wait this long for more. */
 const NUMBER_WAIT = 1400;
+/** The remote's commands Live TV obeys: channel up and down. It doesn't go back in a channel, so no pause or seek. */
+const LIVE_CONTROLS: Control[] = ["next", "previous"];
 
 type Trouble = {
   kind: "busy" | "unavailable" | "stopped" | "missing" | "other";
@@ -70,18 +77,28 @@ type Trouble = {
 
 function trouble(err: unknown, channel: string): Trouble {
   if (isApiError(err, 409)) {
-    return { kind: "busy", title: "All connections are in use", message: errorMessage(err), connections: busyConnections(err) };
+    return { kind: "busy", title: t("player.busy", { ns: "livetv" }), message: errorMessage(err), connections: busyConnections(err) };
   }
   if (isApiError(err, 410)) return stopped(errorMessage(err));
-  if (isApiError(err, 404)) return { kind: "missing", title: "This channel isn't here any more", message: errorMessage(err) };
-  if (isApiError(err, 403)) return { kind: "other", title: "Live TV isn't open to this account", message: errorMessage(err) };
-  if (isApiError(err, 503)) return { kind: "unavailable", title: `${channel} isn't playing`, message: errorMessage(err) };
-  return { kind: "other", title: `${channel} didn't start`, message: errorMessage(err) };
+  if (isApiError(err, 404)) return { kind: "missing", title: t("player.gone", { ns: "livetv" }), message: errorMessage(err) };
+  if (isApiError(err, 403)) return { kind: "other", title: t("notOpen", { ns: "livetv" }), message: errorMessage(err) };
+  if (isApiError(err, 503)) return { kind: "unavailable", title: t("player.notPlaying", { ns: "livetv", channel }), message: errorMessage(err) };
+  return { kind: "other", title: t("player.didntStart", { ns: "livetv", channel }), message: errorMessage(err) };
 }
 
 /** The channel stopped being watched on the server (its connection taken over, say): why, as it says. */
 function stopped(message: string | null | undefined): Trouble {
-  return { kind: "stopped", title: "Live TV stopped", message: message || "This channel isn't being watched any more." };
+  return { kind: "stopped", title: t("player.stopped", { ns: "livetv" }), message: message || t("player.notWatched", { ns: "livetv" }) };
+}
+
+/** The stream broke off for good: what hls.js says of it. */
+function brokeOff(channel: string, details: string): Trouble {
+  return { kind: "other", title: t("player.channelStopped", { ns: "livetv", channel }), message: details };
+}
+
+/** Neither hls.js nor the browser itself plays the stream. */
+function cantPlay(): Trouble {
+  return { kind: "other", title: t("player.cantPlay", { ns: "livetv" }), message: t("player.cantPlayHint", { ns: "livetv" }) };
 }
 
 /** An HLS error answered by the server: its status and its own words. */
@@ -93,10 +110,12 @@ function hlsTrouble(response: { code?: number; text?: string } | undefined, chan
   } catch {
     // not the server's JSON
   }
-  return trouble(new ApiError(response.code, "hls", message || `the server answered ${response.code}`), channel);
+  const said = message || t("player.serverAnswered", { ns: "livetv", code: response.code });
+  return trouble(new ApiError(response.code, "hls", said), channel);
 }
 
 export function LivePlayerPage() {
+  const { t } = useTranslation("livetv");
   const { channelId, sourceUid } = useParams();
   const id = Number(channelId);
   const [params] = useSearchParams();
@@ -106,7 +125,7 @@ export function LivePlayerPage() {
   const current = useQuery(liveQueries.channel(id));
   const channel = current.data ?? null;
   const zap = useZap(category, id);
-  useDocumentTitle(channel ? `${channel.name} · Live TV` : "Live TV");
+  useDocumentTitle(channel ? t("player.documentTitle", { channel: channel.name }) : t("liveTv"));
   // An address without its source's id (or an old one): the channel's own.
   useEffect(() => {
     if (channel && channel.source_uid && channel.source_uid !== sourceUid) {
@@ -122,10 +141,12 @@ export function LivePlayerPage() {
     },
     [navigate, qc, category],
   );
+  /** Channel up or down; false where there is no channel to go to (yet). */
   const step = useCallback(
     (by: 1 | -1) => {
       const next = zap(by);
       if (next) tune(next);
+      return next !== null;
     },
     [zap, tune],
   );
@@ -142,8 +163,8 @@ export function LivePlayerPage() {
         <TroubleCard
           trouble={
             missing
-              ? { kind: "missing", title: "This channel isn't here", message: "It may have been hidden, or its source removed." }
-              : { kind: "other", title: "Live TV didn't load", message: errorMessage(current.error) }
+              ? { kind: "missing", title: t("player.missing"), message: t("player.missingHint") }
+              : { kind: "other", title: t("didntLoad"), message: errorMessage(current.error) }
           }
           onRetry={missing ? undefined : () => void current.refetch()}
           onBack={() => void navigate("/live")}
@@ -232,16 +253,22 @@ function LivePlayer({
   channel: Channel;
   category: LiveCategory;
   onTune: (c: Channel, category?: LiveCategory) => void;
-  onStep: (by: 1 | -1) => void;
+  onStep: (by: 1 | -1) => boolean;
   byNumber: (digits: string) => Promise<Channel | null>;
 }) {
+  const { t } = useTranslation(["livetv", "common"]);
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<HlsType | null>(null);
   // A channel sent as it is plays straight from its stream (mpegts.js).
   const directRef = useRef<{ destroy: () => void } | null>(null);
-  const sessionRef = useRef<{ id: string; url: string } | null>(null);
+  // `leave`: no longer this tab's, for the remote.
+  const sessionRef = useRef<{ id: string; url: string; leave: () => void } | null>(null);
+  const forgetSession = () => {
+    sessionRef.current?.leave();
+    sessionRef.current = null;
+  };
   // Someone took the channel's connection over (`live_taken_over`): why,
   // until it is tuned again. Nothing tunes it again by itself meanwhile.
   const takenOver = useRef<Trouble | null>(null);
@@ -260,7 +287,15 @@ function LivePlayer({
   const [muted, setMuted] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [panel, setPanel] = useState(false);
+  // Watch on…'s menu is open: the controls it hangs from stay.
+  const [watchOn, setWatchOn] = useState(false);
   const [showControls, setShowControls] = useState(true);
+  /**
+   * Tuned from the user's remote, on another device: the tuning screen
+   * shows, but not the controls, which nobody here asked for. Over once
+   * the channel plays, or someone here moves the mouse, taps or presses a key.
+   */
+  const [remoteTune, setRemoteTune] = useState(false);
   const [banner, setBanner] = useState(false);
   const [digits, setDigits] = useState("");
   const [notFound, setNotFound] = useState<string | null>(null);
@@ -284,10 +319,10 @@ function LivePlayer({
     setProblem(null);
     setBanner(false);
     takenOver.current = null;
-    const fail = (t: Trouble) => {
+    const fail = (why: Trouble) => {
       if (cancelled) return;
       // Whatever broke as the connection was taken, that's why it stopped.
-      setProblem(takenOver.current ?? t);
+      setProblem(takenOver.current ?? why);
       setStatus("error");
       hlsRef.current?.destroy();
       hlsRef.current = null;
@@ -306,12 +341,13 @@ function LivePlayer({
       try {
         const taking = takeOver.current;
         takeOver.current = undefined;
-        const watching = await watchChannel(channel.id, clientId(), taking);
+        const watching = await watchChannel(channel.id, clientId(), taking, LIVE_CONTROLS);
         if (cancelled) {
           void leaveChannel(watching.session_id);
           return null;
         }
-        sessionRef.current = { id: watching.session_id, url: watching.url };
+        sessionRef.current?.leave();
+        sessionRef.current = { id: watching.session_id, url: watching.url, leave: playingHere(watching.session_id) };
         return watching;
       } catch (err) {
         fail(trouble(err, channel.name));
@@ -345,16 +381,18 @@ function LivePlayer({
         },
       );
       let failed = false;
-      let played = false;
-      video.addEventListener("playing", () => (played = true), { once: true });
+      // Played from its stream, as the server or the stream said it could be.
+      let chosen = false;
       player.on(mpegts.Events.ERROR, () => {
         failed = true;
         player.destroy();
         if (directRef.current === player) directRef.current = null;
-        if (cancelled || !played) return;
-        // It broke off while playing: the transcoder's segments from now,
-        // unless its connection was taken over (that's told as the stream
-        // ends, and tuning again would only find every connection in use).
+        // Not chosen yet: the transcoder's segments play once the plan comes, below.
+        if (cancelled || !chosen) return;
+        // It broke off, playing or before its first picture: the transcoder's
+        // segments from now, unless its connection was taken over (that's
+        // told as the stream ends, and tuning again would only find every
+        // connection in use).
         window.setTimeout(() => {
           if (cancelled || takenOver.current) return;
           void watch().then((w) => w && playHls(w.url));
@@ -365,12 +403,16 @@ function LivePlayer({
       player.load();
       const known = await plan;
       if (cancelled) return true;
+      // Let go already (mpegts.js throws when let go twice): it failed, and
+      // the transcoder's segments play, or watching ended, which says why.
+      if (directRef.current !== player) return !failed;
       // What the server says goes; not known in time, what the stream turned out to be.
-      if (failed || (known ? !playsAsSent(known) : !hasPlayableTracks(player))) {
+      if (known ? !playsAsSent(known) : !hasPlayableTracks(player)) {
         player.destroy();
-        if (directRef.current === player) directRef.current = null;
+        directRef.current = null;
         return false;
       }
+      chosen = true;
       start();
       return true;
     };
@@ -409,7 +451,7 @@ function LivePlayer({
             mediaRetries++;
             hls.recoverMediaError();
           } else {
-            fail(answered ?? { kind: "other", title: `${channel.name} stopped`, message: data.details });
+            fail(answered ?? brokeOff(channel.name, data.details));
           }
         });
         hls.loadSource(url);
@@ -418,7 +460,7 @@ function LivePlayer({
         video.src = url;
         start();
       } else {
-        fail({ kind: "other", title: "This browser can't play live TV", message: "It plays neither HLS nor Media Source Extensions." });
+        fail(cantPlay());
       }
     };
     void (async () => {
@@ -437,21 +479,22 @@ function LivePlayer({
       video.removeAttribute("src");
       video.load();
       if (sessionRef.current) void leaveChannel(sessionRef.current.id);
-      sessionRef.current = null;
+      forgetSession();
     };
   }, [channel.id, channel.name, attempt]);
 
-  // Someone else took the channel's connection: it stops here at once, and says why.
-  const onEvent = useEffectEvent((ev: ServerEvent) => {
-    if (ev.type !== "live_taken_over" || ev.channel_id !== channel.id || takenOver.current) return;
-    const why = stopped(ev.message);
+  /**
+   * Watching ended on the server (its connection taken over, or stopped
+   * from another device): it stops here at once, and says why.
+   */
+  const endHere = (why: Trouble) => {
     takenOver.current = why;
     hlsRef.current?.destroy();
     hlsRef.current = null;
     directRef.current?.destroy();
     directRef.current = null;
     // Already ended on the server: nothing to leave.
-    sessionRef.current = null;
+    forgetSession();
     // Its stream let go too, the picture kept: the browser's own HLS keeps a
     // source the players above don't, and with it Live TV's "plays on"
     // (onPause) would play the seconds it has buffered. The source goes
@@ -466,8 +509,51 @@ function LivePlayer({
     setBuffering(false);
     setProblem(why);
     setStatus("error");
+  };
+  const onEvent = useEffectEvent((ev: ServerEvent) => {
+    if (takenOver.current) return;
+    switch (ev.type) {
+      // Someone else took the channel's connection.
+      case "live_taken_over":
+        if (ev.channel_id === channel.id) endHere(stopped(ev.message));
+        break;
+      case "session_stopped":
+        if (ev.session_id === sessionRef.current?.id) {
+          const what = ev.by_admin ? t("player.stoppedByAdmin") : t("player.stoppedElsewhere");
+          endHere(stopped(ev.message ? `${what} ${ev.message}` : what));
+        }
+        break;
+      // The user's remote, on another device: channel up and down, as here.
+      // The new channel's watch tells the server, and so the remote.
+      case "player_command":
+        if (ev.session_id !== sessionRef.current?.id) break;
+        if (ev.command !== "next" && ev.command !== "previous") break;
+        if (onStep(ev.command === "next" ? 1 : -1)) setRemoteTune(true);
+        break;
+    }
   });
   useEffect(() => onServerEvent(onEvent), []);
+
+  // Next and previous track change channel, as up and down do: the buttons
+  // of the browser's picture in picture window, and the keyboard's media keys.
+  const onTrack = useEffectEvent((by: 1 | -1) => onStep(by));
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    const session = navigator.mediaSession;
+    const set = (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
+      try {
+        session.setActionHandler(action, handler);
+      } catch {
+        // A browser without that action.
+      }
+    };
+    set("nexttrack", () => onTrack(1));
+    set("previoustrack", () => onTrack(-1));
+    return () => {
+      set("nexttrack", null);
+      set("previoustrack", null);
+    };
+  }, []);
 
   // Leaving the page (a closed tab) lets the connection go at once.
   useEffect(() => {
@@ -506,6 +592,7 @@ function LivePlayer({
     };
     const onPlaying = () => {
       setStatus("playing");
+      setRemoteTune(false);
       going();
       setPlaying(true);
       // The last channel's picture, kept while this one tuned, is done with.
@@ -541,6 +628,7 @@ function LivePlayer({
   // Controls hide while playing and untouched.
   const poke = useCallback(() => {
     setShowControls(true);
+    setRemoteTune(false);
     window.clearTimeout(hideTimer.current);
     hideTimer.current = window.setTimeout(() => setShowControls(false), HIDE_CONTROLS_AFTER);
   }, []);
@@ -548,7 +636,8 @@ function LivePlayer({
     hideTimer.current = window.setTimeout(() => setShowControls(false), HIDE_CONTROLS_AFTER);
     return () => window.clearTimeout(hideTimer.current);
   }, []);
-  const controlsVisible = showControls || !playing || panel || status !== "playing";
+  const controlsVisible =
+    showControls || panel || watchOn || status === "error" || (!remoteTune && (!playing || status === "tuning"));
 
   useEffect(() => {
     const onChange = () => setFullscreen(document.fullscreenElement != null);
@@ -668,7 +757,6 @@ function LivePlayer({
           ref={videoRef}
           className="absolute inset-0 size-full object-contain"
           playsInline
-          disablePictureInPicture
           onClick={() => (panel ? setPanel(false) : poke())}
           onDoubleClick={toggleFullscreen}
         />
@@ -677,13 +765,13 @@ function LivePlayer({
         {status === "tuning" ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-6 bg-black/70 backdrop-blur-sm animate-fade-in">
             <ChannelLogo channel={channel} width={240} className="h-28 w-48 rounded-2xl bg-white/[0.06]" />
-            <LoaderCircle className="size-7 animate-spin text-accent" aria-label="Tuning" />
+            <LoaderCircle className="size-7 animate-spin text-accent" aria-label={t("player.tuning")} />
             <div className="text-center">
               <div className="text-lg font-semibold">
                 {channel.number ? <span className="mr-2 tabular-nums text-white/60">{channel.number}</span> : null}
                 {channel.name}
               </div>
-              <div className="mt-1 text-sm text-white/60">{on ? on.title : "Tuning…"}</div>
+              <div className="mt-1 text-sm text-white/60">{on ? on.title : t("player.tuningNow")}</div>
             </div>
           </div>
         ) : null}
@@ -713,7 +801,7 @@ function LivePlayer({
         {/* A channel number being typed. */}
         {digits || notFound ? (
           <div className="absolute right-6 top-6 z-30 rounded-xl bg-black/85 px-5 py-3 text-4xl font-bold tabular-nums tracking-widest shadow-2xl animate-pop-in">
-            {digits || <span className="text-xl tracking-normal text-white/70">No channel {notFound}</span>}
+            {digits || <span className="text-xl tracking-normal text-white/70">{t("player.noChannel", { number: notFound })}</span>}
           </div>
         ) : null}
 
@@ -724,7 +812,7 @@ function LivePlayer({
             controlsVisible ? "opacity-100" : "pointer-events-none opacity-0",
           )}
         >
-          <button type="button" aria-label="Back" onClick={goBack} className={cn(button, "shrink-0")}>
+          <button type="button" aria-label={t("common:actions.back")} onClick={goBack} className={cn(button, "shrink-0")}>
             <ArrowLeft className="size-6" />
           </button>
           <ChannelLogo channel={channel} width={80} showName={false} className="mt-0.5 hidden h-10 w-16 shrink-0 rounded-md bg-white/10 sm:flex" />
@@ -737,14 +825,36 @@ function LivePlayer({
           </div>
           <button
             type="button"
-            aria-label={channel.favorite ? "Remove from favourites" : "Add to favourites"}
+            aria-label={channel.favorite ? t("favourites.remove") : t("favourites.add")}
             aria-pressed={channel.favorite}
             onClick={() => favorite.mutate({ id: channel.id, favorite: !channel.favorite })}
             className={button}
           >
             <Star className={cn("size-5", channel.favorite && "fill-accent text-accent")} />
           </button>
-          <button type="button" aria-label="Channels" title="Channels (G)" onClick={() => setPanel((p) => !p)} className={cn(button, panel && "bg-white/15")}>
+          {/* The channel moves to the device: this one leaves it, for the remote on the device to show. */}
+          <PlayOn
+            kind="live"
+            label={t("watchOn")}
+            align="right"
+            cast={() => ({ channel_id: channel.id })}
+            onOpenChange={setWatchOn}
+            onCast={goBack}
+            trigger={({ open, toggle, label }) => (
+              <button
+                type="button"
+                aria-label={label}
+                title={label}
+                aria-haspopup="menu"
+                aria-expanded={open}
+                onClick={toggle}
+                className={cn(button, open && "bg-white/15")}
+              >
+                <Cast className="size-5" />
+              </button>
+            )}
+          />
+          <button type="button" aria-label={t("channels")} title={t("player.channelsKey")} onClick={() => setPanel((p) => !p)} className={cn(button, panel && "bg-white/15")}>
             <List className="size-5" />
           </button>
         </div>
@@ -771,11 +881,11 @@ function LivePlayer({
                   </div>
                 </>
               ) : (
-                <div className="pt-1 text-sm text-white/70">{channel.has_guide ? "Nothing in the guide now" : "No guide for this channel"}</div>
+                <div className="pt-1 text-sm text-white/70">{channel.has_guide ? t("nothingNow") : t("player.noGuideHere")}</div>
               )}
               {next ? (
                 <div className="mt-2 truncate text-xs text-white/55">
-                  Next <span className="tabular-nums">{formatTime(next.start)}</span> · {next.title}
+                  {t("player.next")} <span className="tabular-nums">{formatTime(next.start)}</span> · {next.title}
                 </div>
               ) : null}
             </div>
@@ -791,12 +901,12 @@ function LivePlayer({
         >
           <div className="flex items-center gap-0.5 sm:gap-1.5">
             <div className="group/vol hidden items-center sm:flex">
-              <button type="button" aria-label={muted ? "Unmute" : "Mute"} onClick={() => setMuted((m) => !m)} className={button}>
+              <button type="button" aria-label={muted ? t("player.unmute") : t("player.mute")} onClick={() => setMuted((m) => !m)} className={button}>
                 <VolumeIcon className="size-5" />
               </button>
               <div className="hidden w-0 overflow-hidden transition-[width] duration-200 group-hover/vol:w-24 group-focus-within/vol:w-24 sm:block">
                 <Slider
-                  label="Volume"
+                  label={t("player.volume")}
                   value={muted ? 0 : volume}
                   max={1}
                   onPreview={(v) => {
@@ -809,7 +919,7 @@ function LivePlayer({
             </div>
             <span className="ml-1 flex h-7 shrink-0 items-center gap-1.5 rounded-full bg-danger/90 px-2.5 text-xs font-bold uppercase tracking-wide text-white sm:ml-2">
               <span className="size-1.5 animate-pulse rounded-full bg-white" />
-              Live
+              {t("live")}
             </span>
             {on ? (
               <div className="ml-2 hidden min-w-0 truncate text-sm text-white/70 md:block">
@@ -817,13 +927,19 @@ function LivePlayer({
               </div>
             ) : null}
             <div className="flex-1" />
-            <button type="button" aria-label="Channel up" title="Channel up (↑)" onClick={() => onStep(1)} className={button}>
+            <button type="button" aria-label={t("player.channelUp")} title={t("player.channelUpKey")} onClick={() => onStep(1)} className={button}>
               <ChevronUp className="size-5" />
             </button>
-            <button type="button" aria-label="Channel down" title="Channel down (↓)" onClick={() => onStep(-1)} className={button}>
+            <button type="button" aria-label={t("player.channelDown")} title={t("player.channelDownKey")} onClick={() => onStep(-1)} className={button}>
               <ChevronDown className="size-5" />
             </button>
-            <button type="button" aria-label={fullscreen ? "Exit full screen" : "Full screen"} title="Full screen (F)" onClick={toggleFullscreen} className={button}>
+            <button
+              type="button"
+              aria-label={fullscreen ? t("player.exitFullScreen") : t("player.fullScreen")}
+              title={t("player.fullScreenKey")}
+              onClick={toggleFullscreen}
+              className={button}
+            >
               {fullscreen ? <Minimize className="size-5" /> : <Maximize className="size-5" />}
             </button>
           </div>
@@ -871,9 +987,9 @@ function keepPicture(video: HTMLVideoElement) {
 
 /** Who holds a connection: "You, on another device", their names, or how many. */
 function holders(c: BusyConnection): string {
-  if (c.yours) return "You, on another device";
+  if (c.yours) return t("player.you", { ns: "livetv" });
   if (c.watchers.length) return c.watchers.join(", ");
-  return c.people === 1 ? "Someone else" : `${c.people} people`;
+  return c.people === 1 ? t("player.someoneElse", { ns: "livetv" }) : t("player.people", { ns: "livetv", count: c.people });
 }
 
 function TroubleCard({
@@ -891,6 +1007,7 @@ function TroubleCard({
   onBack: () => void;
   onChannels?: () => void;
 }) {
+  const { t } = useTranslation(["livetv", "common"]);
   const Icon = trouble.kind === "busy" ? Tv2 : TriangleAlert;
   const connections = trouble.connections ?? [];
   const anyToTake = connections.some((c) => c.can_take_over);
@@ -905,7 +1022,7 @@ function TroubleCard({
       {connections.length ? (
         <>
           <p className="mt-2 text-sm text-muted [text-wrap:pretty]">
-            {connections.length === 1 ? "Its one connection is watching:" : `Its ${connections.length} connections are watching:`}
+            {t("player.connectionsWatching", { count: connections.length })}
           </p>
           <ul className="mt-4 space-y-2 text-left">
             {connections.map((c) => (
@@ -920,7 +1037,7 @@ function TroubleCard({
                     onClick={() => onTakeOver(c.channel_id)}
                     className="h-8 shrink-0 rounded-md bg-accent px-3 text-xs font-semibold text-accent-fg hover:bg-accent-hover"
                   >
-                    Watch here instead
+                    {t("player.watchHere")}
                   </button>
                 ) : null}
               </li>
@@ -928,7 +1045,7 @@ function TroubleCard({
           </ul>
           {!anyToTake ? (
             <p className="mt-3 text-xs text-subtle [text-wrap:pretty]">
-              A channel already being watched can be joined, or try again once one is stopped.
+              {t("player.joinHint")}
             </p>
           ) : null}
         </>
@@ -938,16 +1055,16 @@ function TroubleCard({
       <div className="mt-6 flex flex-wrap justify-center gap-2">
         {onRetry ? (
           <button type="button" onClick={onRetry} className="flex h-10 items-center gap-2 rounded-md bg-accent px-4 text-sm font-medium text-accent-fg hover:bg-accent-hover">
-            <RefreshCw className="size-4" /> {trouble.kind === "stopped" ? "Watch again" : "Try again"}
+            <RefreshCw className="size-4" /> {trouble.kind === "stopped" ? t("player.watchAgain") : t("common:actions.tryAgain")}
           </button>
         ) : null}
         {onChannels ? (
           <button type="button" onClick={onChannels} className="flex h-10 items-center gap-2 rounded-md bg-surface-3 px-4 text-sm font-medium hover:bg-border">
-            <List className="size-4" /> Other channels
+            <List className="size-4" /> {t("player.otherChannels")}
           </button>
         ) : null}
         <button type="button" onClick={onBack} className="flex h-10 items-center rounded-md px-4 text-sm font-medium text-muted hover:bg-white/5 hover:text-fg">
-          Back to the guide
+          {t("player.backToGuide")}
         </button>
       </div>
     </div>

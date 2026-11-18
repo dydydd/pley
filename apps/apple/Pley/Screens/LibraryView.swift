@@ -2,13 +2,12 @@ import PleyModel
 import PleyScreens
 import SwiftUI
 
-/// A library's page: Recommended (its own rows, then its collections),
-/// Library (every title, sorted and filtered, in a grid read 100 at a time)
-/// and Collections (not for music). Sort is a menu with the order beside
-/// it; the filters are a sheet on iPhone and a menu on iPad and Mac; More
-/// has Save as Smart Playlist. Sorted by title, a strip of letters down the
-/// side jumps through the grid. The page opens as it was left, or as See
-/// all asks.
+/// A library's page: Recommended (its rows, the collections administrators put
+/// there), Library (every title, sorted and filtered, in a grid read 100 at a
+/// time) and Collections (not for music). Sort is a menu with the order beside
+/// it; the filters are a sheet on iPhone and a menu on iPad and Mac; More has
+/// Save as Smart Playlist. Sorted by title, a strip of letters down the side
+/// jumps through the grid. The page opens as it was left, or as See all asks.
 struct LibraryView: View {
     @ObservedObject private var app: AppModel
     @StateObject private var model: LibraryModel
@@ -100,7 +99,7 @@ struct LibraryView: View {
 
     @ViewBuilder private var recommended: some View {
         if let rows = model.rows {
-            if rows.isEmpty && model.collections.cards.isEmpty {
+            if rows.isEmpty {
                 StateView(kind: .empty(symbol: "sparkles", text: LibraryModel.emptyTitle, action: nil))
             } else {
                 ScrollView {
@@ -111,7 +110,6 @@ struct LibraryView: View {
                                 app.shell.open(item: tile.item)
                             }
                         }
-                        CollectionsRow(app: app, model: model.collections)
                     }
                     .padding(.vertical)
                 }
@@ -141,8 +139,7 @@ struct LibraryView: View {
                     Label("Sort", systemImage: "arrow.up.arrow.down")
                 }
                 .accessibilityLabel("Sort")
-                .accessibilityValue("\(model.params.sort.title), "
-                    + (model.params.effectiveOrder == .ascending ? "ascending" : "descending"))
+                .accessibilityValue(sorting)
                 .accessibilityIdentifier("library.sort")
 
                 if model.filterable {
@@ -183,11 +180,16 @@ struct LibraryView: View {
         }
     }
 
+    /// How the titles are sorted: "Year, descending".
+    private var sorting: String {
+        let sort = model.params.sort.title
+        return model.params.effectiveOrder == .ascending ? localized("\(sort), ascending")
+            : localized("\(sort), descending")
+    }
+
     /// How the titles are listed: "Year, descending · Unwatched".
     private var listing: String {
-        let order = model.params.effectiveOrder == .ascending ? "ascending" : "descending"
-        return (["\(model.params.sort.title), \(order)", model.filterSummary]).filter { !$0.isEmpty }
-            .joined(separator: " · ")
+        [sorting, model.filterSummary].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     private var filterLabel: some View {
@@ -208,7 +210,7 @@ private struct LibraryGridView: View {
             if total == 0 {
                 if model.params.filtered {
                     StateView(kind: .empty(symbol: "line.3.horizontal.decrease.circle", text: LibraryModel.noMatchTitle,
-                                           action: ("Clear filters", { model.clearFilters() })))
+                                           action: (localized("Clear filters"), { model.clearFilters() })))
                 } else {
                     StateView(kind: .empty(symbol: "film.stack", text: LibraryModel.emptyTitle, action: nil))
                 }

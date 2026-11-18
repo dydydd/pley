@@ -109,7 +109,13 @@ pub async fn section_collections(
 ) -> PlexResult<Node> {
     let (lib, _) = library_for(&state, &user, &id).await?;
     let search = Search::parse(&params)?;
-    let all = collections::list(&state.db, &super::collections_viewer(&user), lib.id).await?;
+    let all = collections::list_shared(
+        &state.db,
+        &super::collections_viewer(&user),
+        lib.id,
+        crate::i18n::server_language(&state.settings.get().language),
+    )
+    .await?;
     let ids: Vec<i64> = all.iter().map(|c| c.id).collect();
     let labels = labels::for_collections(&state.db, &ids).await?;
     let (rows, total) = page.apply(search.apply(all, &labels));
@@ -128,7 +134,13 @@ pub async fn section_collections(
 
 /// Labels of the collections of `lib` the user sees (filter choices).
 pub(super) async fn collection_labels(state: &AppState, user: &AuthUser, lib: &LibraryRow) -> PlexResult<Vec<String>> {
-    let all = collections::list(&state.db, &super::collections_viewer(user), lib.id).await?;
+    let all = collections::list_shared(
+        &state.db,
+        &super::collections_viewer(user),
+        lib.id,
+        crate::i18n::server_language(&state.settings.get().language),
+    )
+    .await?;
     let ids: Vec<i64> = all.iter().map(|c| c.id).collect();
     let mut found: Vec<String> = labels::for_collections(&state.db, &ids).await?.into_values().flatten().collect();
     found.sort_by_key(|l| l.to_lowercase());
@@ -141,8 +153,14 @@ pub(super) async fn collection_for(
     user: &AuthUser,
     id: i64,
 ) -> PlexResult<(CollectionDto, Vec<ItemRow>, LibraryRow, Vec<LibraryRow>)> {
-    let (collection, items) =
-        collections::get(&state.db, &super::collections_viewer(user), id).await?.ok_or(PlexError::NotFound)?;
+    let (collection, items) = collections::get(
+        &state.db,
+        &super::collections_viewer(user),
+        id,
+        crate::i18n::server_language(&state.settings.get().language),
+    )
+    .await?
+    .ok_or(PlexError::NotFound)?;
     let libraries = visible_libraries(state, user).await?;
     let lib = libraries.iter().find(|l| l.id == collection.library_id).cloned().ok_or(PlexError::NotFound)?;
     Ok((collection, items, lib, libraries))
@@ -458,7 +476,7 @@ pub async fn create_collection(
         params.parse("sectionId").ok_or_else(|| PlexError::BadRequest("sectionId is required".into()))?;
     let lib =
         visible_libraries(&state, &admin).await?.into_iter().find(|l| l.id == section).ok_or(PlexError::NotFound)?;
-    if lib.kind() == LibraryKind::Music {
+    if lib.kind().is_audio() {
         return Err(PlexError::BadRequest("collections are for movie and TV libraries".into()));
     }
     let uri = params.get("uri").unwrap_or_default();
@@ -469,8 +487,10 @@ pub async fn create_collection(
             .1;
         collections::create_smart(&state.db, section, &title, &filter).await?
     } else {
+        // Read first: a list refused leaves no empty collection behind.
+        let items = uri_items_whole(uri)?;
         let id = collections::create(&state.db, section, &title, None).await?;
-        collections::add_items(&state.db, id, section, &uri_items(uri)).await?;
+        collections::add_items(&state.db, id, section, &items).await?;
         id
     };
     state.events.send(crate::events::ServerEvent::LibraryChanged { library_id: section });
@@ -497,7 +517,7 @@ pub async fn collection_add(
             .1;
         collections::set_smart_filter(&state.db, id, &filter).await?;
     } else {
-        collections::add_items(&state.db, id, library_id, &uri_items(uri)).await?;
+        collections::add_items(&state.db, id, library_id, &uri_items_whole(uri)?).await?;
     }
     state.events.send(crate::events::ServerEvent::LibraryChanged { library_id });
     collection_details(&state, &admin, &info, id, &Params::default()).await
@@ -559,46 +579,6 @@ pub async fn collection_refresh(
     Ok(Node::container().attr("size", 0))
 }
 
-/// `/hubs/sections/{id}/manage`: the hubs a section's collections are
-/// promoted to. Pley shows collections on no home page or recommendations,
-/// so there are none.
-pub async fn managed_hubs(
-    State(state): State<AppState>,
-    PlexUser(user): PlexUser,
-    Path(id): Path<String>,
-) -> PlexResult<Node> {
-    let (lib, _) = library_for(&state, &user, &id).await?;
-    Ok(Node::container().attr("size", 0).attr("allowSync", false).attr("librarySectionID", lib.id))
-}
-
-/// `POST /hubs/sections/{id}/manage?metadataItemId=…&promotedTo…=…`: a
-/// collection promoted nowhere stays so; promoting it answers `400`, as Pley
-/// has no hubs to promote it to.
-pub async fn promote_hub(
-    State(state): State<AppState>,
-    PlexAdmin(admin): PlexAdmin,
-    Path(id): Path<String>,
-    params: Params,
-) -> PlexResult<Node> {
-    library_for(&state, &admin, &id).await?;
-    if params.0.iter().any(|(k, v)| k.starts_with("promoted") && v.trim() != "0") {
-        return Err(PlexError::BadRequest("Pley shows collections on no home page or recommendations".into()));
-    }
-    Ok(Node::container().attr("size", 0))
-}
-
-/// `PUT /hubs/sections/{id}/manage/{identifier}[/move]` and `DELETE …`:
-/// there are no hubs to change.
-pub async fn change_hub(
-    State(state): State<AppState>,
-    PlexAdmin(admin): PlexAdmin,
-    Path(path): Path<Vec<(String, String)>>,
-) -> PlexResult<Node> {
-    let id = path.iter().find(|(name, _)| name == "id").map(|(_, id)| id.as_str()).unwrap_or_default();
-    library_for(&state, &admin, id).await?;
-    Err(PlexError::BadRequest("Pley has no hubs of collections to change".into()))
-}
-
 /// `DELETE /library/collections/{key}`
 pub async fn collection_delete(
     State(state): State<AppState>,
@@ -612,15 +592,37 @@ pub async fn collection_delete(
     Ok(StatusCode::OK)
 }
 
-/// Item ids in a Plex `uri` (`server://…/library/metadata/1,2,3`,
-/// `library://…/item/%2Flibrary%2Fmetadata%2F1`), as many as a playlist or
-/// a play queue holds at most: each id costs a lookup.
-pub(super) fn uri_items(uri: &str) -> Vec<i64> {
-    const MAX_IDS: usize = 5000;
-    let Some(start) = uri.find("/library/metadata/") else { return Vec::new() };
+/// The most items a `uri` gives, as many as a playlist or a play queue holds:
+/// each id costs a lookup.
+const MAX_IDS: usize = 5000;
+
+/// The comma-separated item ids of a Plex `uri`
+/// (`server://…/library/metadata/1,2,3`,
+/// `library://…/item/%2Flibrary%2Fmetadata%2F1`); empty for one that names
+/// no items.
+fn uri_ids(uri: &str) -> &str {
+    let Some(start) = uri.find("/library/metadata/") else { return "" };
     let rest = &uri[start + "/library/metadata/".len()..];
-    let ids = rest.split(['/', '?', '&']).next().unwrap_or_default();
-    ids.split(',').filter_map(|id| id.trim().parse().ok()).take(MAX_IDS).collect()
+    rest.split(['/', '?', '&']).next().unwrap_or_default()
+}
+
+/// Item ids in a Plex `uri`, the first as many as a play queue holds.
+pub(super) fn uri_items(uri: &str) -> Vec<i64> {
+    uri_ids(uri).split(',').filter_map(|id| id.trim().parse().ok()).take(MAX_IDS).collect()
+}
+
+/// The items a `uri` adds to a collection or a playlist, every one of them:
+/// a list Pley can't take in full (more than [`MAX_IDS`], or an id that
+/// isn't a number) is refused, rather than cut short as if it were all.
+fn uri_items_whole(uri: &str) -> PlexResult<Vec<i64>> {
+    let pieces = uri_ids(uri).split(',').map(str::trim).filter(|id| !id.is_empty());
+    // One past the most is enough to refuse the list.
+    let ids: Option<Vec<i64>> = pieces.take(MAX_IDS + 1).map(|id| id.parse().ok()).collect();
+    match ids {
+        Some(ids) if ids.len() <= MAX_IDS => Ok(ids),
+        Some(_) => Err(PlexError::BadRequest(format!("at most {MAX_IDS} items are added at once"))),
+        None => Err(PlexError::BadRequest("the item ids in `uri` are numbers".into())),
+    }
 }
 
 /// `POST /playlists?type=video&title=…&uri=…`
@@ -637,14 +639,15 @@ pub async fn create(State(state): State<AppState>, PlexUser(user): PlexUser, par
             .ok_or_else(|| PlexError::BadRequest("a smart playlist needs a section listing as uri".into()))?;
         let lib =
             visible_libraries(&state, &user).await?.into_iter().find(|l| l.id == section).ok_or(PlexError::NotFound)?;
+        let kind =
+            Kind::of_library(lib.kind()).ok_or_else(|| PlexError::BadRequest(playlists::SMART_LIBRARIES.into()))?;
         if !crate::listing::valid_smart_filter(&lib, &filter) {
             return Err(PlexError::BadRequest("that listing finds nothing to play".into()));
         }
-        let kind = if lib.kind() == LibraryKind::Music { Kind::Audio } else { Kind::Video };
         let id = playlists::create_smart(&state.db, &user, &title, kind, section, &filter).await?;
         return playlist_container_of(&state, &user, id).await;
     }
-    let items = params.get("uri").map(uri_items).unwrap_or_default();
+    let items = params.get("uri").map(uri_items_whole).transpose()?.unwrap_or_default();
     let kind = match params.get("type") {
         Some(kind) => Kind::parse(kind),
         None => playlists::kind_of_first(&state.db, &user, &items).await?,
@@ -775,7 +778,7 @@ pub async fn add(
         playlists::set_smart_filter(&state.db, &user, id, &filter).await?;
         return playlist_container_of(&state, &user, id).await;
     }
-    let items = params.get("uri").map(uri_items).unwrap_or_default();
+    let items = params.get("uri").map(uri_items_whole).transpose()?.unwrap_or_default();
     if items.is_empty() {
         return Err(PlexError::BadRequest("uri is required".into()));
     }
@@ -879,5 +882,18 @@ mod tests {
         assert_eq!(uri_items("server://abc/com.plexapp.plugins.library/library/metadata/12,13"), vec![12, 13]);
         assert_eq!(uri_items("library://uuid/item//library/metadata/7"), vec![7]);
         assert_eq!(uri_items("library://uuid/directory//library/sections/1/all"), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn a_list_added_is_taken_whole_or_refused() {
+        let uri = |ids: &str| format!("server://abc/com.plexapp.plugins.library/library/metadata/{ids}");
+        assert_eq!(uri_items_whole(&uri("12, 13,")).unwrap(), vec![12, 13]);
+        assert_eq!(uri_items_whole("library://uuid/directory//library/sections/1/all").unwrap(), Vec::<i64>::new());
+        assert!(uri_items_whole(&uri("12,x")).is_err());
+        let most = (1..=MAX_IDS).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        assert_eq!(uri_items_whole(&uri(&most)).unwrap().len(), MAX_IDS);
+        assert!(uri_items_whole(&uri(&format!("{most},5001"))).is_err());
+        // A play queue takes the first ones.
+        assert_eq!(uri_items(&uri(&format!("{most},5001,x"))).len(), MAX_IDS);
     }
 }

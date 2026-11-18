@@ -32,6 +32,7 @@
     <string name="tv_library_all_resolutions">All resolutions</string>
     <string name="tv_library_dynamic_range">Dynamic range</string>
     <string name="tv_library_all_dynamic_ranges">All dynamic ranges</string>
+    <!-- The dynamic range that takes any HDR format; the others are the formats' own names. -->
     <string name="tv_library_clear_filters">Clear filters</string>
     <string name="tv_library_save_as">Save as…</string>
 
@@ -82,6 +83,8 @@
     <string name="tv_library_collections_empty_title">No collections yet</string>
     <string name="tv_library_collections_empty_movies">Movies of the same TMDB collection are grouped here once two of them are in this library.</string>
     <string name="tv_library_collections_empty_shows">There are no collections in this library yet.</string>
+    <string name="tv_library_collections_category">Category</string>
+    <string name="tv_library_collections_all_categories">All categories</string>
     <string name="tv_library_retry">Retry</string>
     <string name="tv_library_see_all">See all</string>
 
@@ -97,4 +100,5 @@
     <string name="tv_collection_empty">Nothing in this collection yet.</string>
     <string name="tv_collection_failed">Couldn\'t load this collection</string>
     <string name="tv_collection_nothing_to_play">Nothing to play: this show has no episodes yet</string>
+    <string name="tv_collection_from">From</string>
 </resources>

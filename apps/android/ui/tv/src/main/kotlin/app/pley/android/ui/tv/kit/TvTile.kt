@@ -12,8 +12,6 @@ import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
@@ -41,6 +39,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -84,6 +83,11 @@ import kotlinx.coroutines.launch
  *
  * [focusModifier] goes on the focusable itself: a FocusRequester,
  * [initialFocus] or [rememberedFocus].
+ *
+ * A [current] tile is the one its page is about (an episode's page, in
+ * its season's row): at rest it has a thin ring in the text's colour at
+ * the well's edge and its caption in bold, so it is found without focus;
+ * with focus it looks like any focused tile.
  */
 @Composable
 fun TvTile(
@@ -93,6 +97,7 @@ fun TvTile(
     modifier: Modifier = Modifier,
     onLongClick: (() -> Unit)? = null,
     focusModifier: Modifier = Modifier,
+    current: Boolean = false,
 ) {
     TvTileFrame(
         kind = kind,
@@ -100,7 +105,8 @@ fun TvTile(
         onLongClick = onLongClick,
         modifier = modifier,
         focusModifier = focusModifier,
-        caption = { focused -> TileCaption(model.title, model.subtitle, TileStyle.Tv, emphasized = focused) },
+        current = current,
+        caption = { focused -> TileCaption(model.title, model.subtitle, TileStyle.Tv, emphasized = focused || current) },
     ) {
         ArtworkTile(model, kind, TileStyle.Tv, Modifier.tvTileSize(kind))
     }
@@ -140,7 +146,8 @@ fun TvSeeAllTile(
  * A focusable well of [kind]'s size with the TV's focus look, and a
  * caption under it that [caption] draws (told whether it is emphasized:
  * focused, and not quiet). In a row sliding or a grid gliding under a held
- * key the tile keeps its resting look ([TileQuiet], [LocalTileQuiet]).
+ * key the tile keeps its resting look ([TileQuiet], [LocalTileQuiet]),
+ * which for a [current] tile has its ring ([drawCurrentRing]).
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -150,6 +157,7 @@ fun TvTileFrame(
     onLongClick: (() -> Unit)?,
     modifier: Modifier = Modifier,
     focusModifier: Modifier = Modifier,
+    current: Boolean = false,
     caption: @Composable (focused: Boolean) -> Unit,
     well: @Composable () -> Unit,
 ) {
@@ -162,11 +170,17 @@ fun TvTileFrame(
     look.reduced = reduced
     look.tier = tier
     val presses = remember(look) { TilePresses(look) }
-    Column(modifier.width(kind.tvWidth).focusedOnTop(look)) {
+    // The whole tile on a layer of its own: a row or grid scrolling moves its
+    // recorded drawing instead of drawing its caption and well again in every
+    // frame (on a Google TV Streamer, a held Down through a library re-drew
+    // some fifty tiles' text each frame, about 9 ms of it).
+    // The caption's gap is the column's spacing rather than a Spacer: a node less in each tile.
+    Column(modifier.width(kind.tvWidth).focusedOnTop(look).graphicsLayer(), verticalArrangement = Arrangement.spacedBy(TileStyle.Tv.captionGap)) {
         Box(
             focusModifier
                 .onFocusChanged { look.focus(it.isFocused) }
                 .menuKey(onLongClick)
+                .semantics { if (current) selected = true }
                 .combinedClickable(
                     interactionSource = presses,
                     indication = null,
@@ -176,8 +190,11 @@ fun TvTileFrame(
                 // The ring outside the well's layer: a focus animation's frames draw it again, not the well.
                 .drawWithCache {
                     val ring = Stroke(PleyFocus.RingStroke.toPx())
+                    val mark = if (current) Stroke(CurrentRingStroke.toPx()) else null
                     onDrawWithContent {
                         drawContent()
+                        // The current tile's ring gives way to the focus ring as it comes in.
+                        if (mark != null) drawCurrentRing(kind, 1f - look.shown(), look.scale(), mark)
                         drawFocusRing(kind, look.shown(), look.scale(), ring)
                     }
                 }
@@ -189,7 +206,6 @@ fun TvTileFrame(
         ) {
             well()
         }
-        Spacer(Modifier.height(TileStyle.Tv.captionGap))
         caption(look.emphasized)
     }
 }
@@ -209,7 +225,8 @@ internal class TileFocusLook(private val scope: CoroutineScope, private val gate
     /** Whether the caption is bold: focused, and not quiet. Tiles without focus don't read the quiet at all. */
     val emphasized: Boolean by derivedStateOf { focused && quiet?.on != true }
 
-    val progress = Animatable(0f)
+    /** How much of the focus look it has, made at the first focus: most tiles in a grid never have it. */
+    private var progress by mutableStateOf<Animatable<Float, AnimationVector1D>?>(null)
 
     /** The press's scale, made at the first press: most tiles are never pressed. */
     private var pressed by mutableStateOf<Animatable<Float, AnimationVector1D>?>(null)
@@ -230,11 +247,12 @@ internal class TileFocusLook(private val scope: CoroutineScope, private val gate
             on -> TvMotion.FocusIn
             else -> TvMotion.FocusOut
         }
+        val amount = progress ?: Animatable(0f).also { progress = it }
         scope.launch {
             if (snap) {
-                progress.snapTo(target)
+                amount.snapTo(target)
             } else {
-                progress.animateTo(target, spec)
+                amount.animateTo(target, spec)
             }
         }
     }
@@ -247,7 +265,7 @@ internal class TileFocusLook(private val scope: CoroutineScope, private val gate
 
     /** How much of the focus look shows: [progress], none of it while quiet. */
     fun shown(): Float {
-        val p = progress.value
+        val p = progress?.value ?: 0f
         return if (p == 0f || quiet == null) p else p * (1f - quiet.amount)
     }
 
@@ -318,6 +336,32 @@ internal fun DrawScope.drawFocusRing(kind: TileKind, alpha: Float, scale: Float,
         style = stroke,
     )
 }
+
+/**
+ * The ring of a [current][TvTile] tile, around a well scaled by [scale]:
+ * a 2 dp stroke ([stroke], made once) in the text's colour, its inner
+ * edge on the well's, so it frames the picture where the focus ring
+ * stands off it.
+ */
+internal fun DrawScope.drawCurrentRing(kind: TileKind, alpha: Float, scale: Float, stroke: Stroke) {
+    if (alpha <= 0f) return
+    val offset = stroke.width / 2f
+    val width = size.width * scale
+    val height = size.height * scale
+    val radius = if (kind.round) minOf(width, height) / 2f + offset else PleyShape.TileTvRadius.toPx() * scale + offset
+    drawRoundRect(
+        color = PleyColors.Fg,
+        topLeft = Offset((size.width - width) / 2f - offset, (size.height - height) / 2f - offset),
+        size = Size(width + 2 * offset, height + 2 * offset),
+        cornerRadius = CornerRadius(radius, radius),
+        alpha = alpha.coerceIn(0f, 1f) * CURRENT_RING_ALPHA,
+        style = stroke,
+    )
+}
+
+/** The current tile's ring: thinner and quieter than the focus ring, which is the accent's. */
+private val CurrentRingStroke = 2.dp
+private const val CURRENT_RING_ALPHA = 0.85f
 
 /**
  * The focus ring around a resting well of [kind] whose top left is at

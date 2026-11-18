@@ -319,7 +319,8 @@ async fn each_scope_sees_and_changes_what_it_allows() {
     let edited = app.get(&format!("/api/items/{}", w.film), &w.admin).await;
     assert_eq!(edited.body["title"], "Changed");
     let collections = app.get(&format!("/api/libraries/{}/collections", w.movies), &w.admin).await;
-    assert_eq!(common::titles(&collections.body["collections"]), ["Mine"]);
+    let titles = common::titles(&collections.body["collections"]);
+    assert!(titles.contains(&"Mine".to_owned()), "{titles:?}");
     assert_eq!(w.delete_bobs_play(&manage).await, StatusCode::OK);
     assert_eq!(count(&app.plex_json("/status/sessions/history/all", &activity).await), 1);
 
@@ -333,9 +334,10 @@ async fn each_scope_sees_and_changes_what_it_allows() {
     assert_eq!(count(&app.plex_json(&listed, &manage).await), 1);
     assert_eq!(count(&app.plex_json(&listed, &activity).await), 0, "seeing isn't managing");
 
-    // On the Jellyfin-compatible API, none of them administers.
+    // On the Jellyfin-compatible API, `activity` says it is an administrator,
+    // as activity monitors need, and administers nothing (tests/jellyfin.rs).
     let policy = &app.jf_raw(Method::GET, "/Users/Me", &[("x-emby-token", &activity)], None).await.body["Policy"];
-    assert_eq!(policy["IsAdministrator"], json!(false));
+    assert_eq!(policy["IsAdministrator"], json!(true));
     let users = app.jf_raw(Method::GET, "/Users", &[("x-emby-token", &activity)], None).await.body;
     assert_eq!(users.as_array().map(Vec::len), Some(1), "the caller alone");
 }

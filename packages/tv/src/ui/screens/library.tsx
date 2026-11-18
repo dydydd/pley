@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/ho
 import { errorMessage, isApiError } from "../../api/client";
 import type { Collection, Hub, ItemSummary, Library, LibraryFilters, LibraryKind, LibrarySort } from "../../api/types";
 import { formatBitrate, formatBytes, pluralize } from "../../format/format";
+import { formatNumber, t } from "../../i18n";
 import type { AppState } from "../../state";
 import { useUi } from "../context";
 import { nudge } from "../focus";
@@ -17,8 +18,9 @@ import { PanelTitle, SidePanel } from "../kit/panel";
 import { Row, rowHeight, SectionPage, type Section } from "../kit/row";
 import { ArtTile, SeeAllTile, SkeletonTile, Tile, TILES, type TileKind } from "../kit/tile";
 import type { Entry, LibraryTab } from "../shell/navigator";
+import { collectionsView, type CategoryChoice } from "./collection-groups";
 import { ColumnMessage, failedTitle, problem, sentence, useApp, useLoad } from "./common";
-import { seeAllSort } from "./home";
+import { collectionOf, seeAllSort } from "./home";
 import { pageOf, prefetchPlayback } from "./item-actions";
 import {
   AlphaIndex,
@@ -28,7 +30,6 @@ import {
   dynamicRangeLabel,
   fitParams,
   gridStep,
-  grouped,
   hasFilter,
   inOrder,
   LETTERS,
@@ -42,7 +43,7 @@ import {
   showsBadges,
   showsJump,
   smartFilterOf,
-  SORT_LABELS,
+  sortLabel,
   sortsFor,
   withChosen,
   type DynamicRangeFilter,
@@ -64,8 +65,6 @@ export function kindIcon(kind: LibraryKind): IconName {
 function tabsFor(kind: LibraryKind): LibraryTab[] {
   return kind === "music" ? ["recommended", "library"] : ["recommended", "library", "collections"];
 }
-
-const TAB_LABELS: Record<LibraryTab, string> = { recommended: "Recommended", library: "Library", collections: "Collections" };
 
 /** "12 movies", "3 shows" for a collection. */
 export function collectionCount(c: Collection, kind: LibraryKind | null): string {
@@ -107,10 +106,10 @@ export function LibraryScreen(p: { entry: Entry; id: number; tab?: LibraryTab; s
   const tabsRef = useRef<HTMLElement | null>(null);
 
   if (!libraries) return <LibrariesFailed />;
-  if (!library) return <ColumnMessage title="This library isn't here" body="It may have been removed, or this profile may not see it." />;
+  if (!library) return <ColumnMessage title={t("browse.library.missing")} body={t("browse.library.missingHint")} />;
 
-  const showTab = (t: LibraryTab) => {
-    entry.state.tab = t;
+  const showTab = (tab: LibraryTab) => {
+    entry.state.tab = tab;
     setTabState((n) => n + 1);
   };
   // A row's See all: the Library tab in that row's order, until the view is changed there.
@@ -139,20 +138,23 @@ export function LibraryScreen(p: { entry: Entry; id: number; tab?: LibraryTab; s
           onEdge={(dir) => {
             // Recommended's rows are placed in a box of no height of its own, which a move by geometry passes
             // over: Down goes back to the tile focused last in them, else into the nearest row.
+            // The Collections tab's chips come first, above its rows.
+            const chip = dir === "down" && shown === "collections" ? document.querySelector<HTMLElement>(".library-chips [data-f]") : null;
+            if (chip) return ui.focus.focus(chip);
             const rows = dir === "down" ? document.querySelector<HTMLElement>(".library-rows .page-scroll") : null;
             if (!rows) return false;
             const target = ui.focus.rememberedIn(rows) ?? ui.focus.enter(rows, "down", tabsRef.current?.getBoundingClientRect() ?? null);
             return !!target && ui.focus.focus(target);
           }}
         >
-          {tabs.map((t) => (
-            <Tab key={t} fid={`tab/${t}`} label={TAB_LABELS[t]} shown={t === shown} onSelect={() => showTab(t)} />
+          {tabs.map((tab) => (
+            <Tab key={tab} fid={`tab/${tab}`} label={t(`browse.library.tabs.${tab}`)} shown={tab === shown} onSelect={() => showTab(tab)} />
           ))}
         </G>
       </div>
       {shown === "library" && <LibraryGridTab key={`grid-${library.id}`} entry={entry} library={library} asked={asked} initial={initial} focusTab={focusShownTab} />}
       {shown === "recommended" && (
-        <RecommendedTab key={`rec-${library.id}`} entry={entry} library={library} initial={initial} focusTab={focusShownTab} onCollections={() => showTab("collections")} onSeeAll={seeAll} />
+        <RecommendedTab key={`rec-${library.id}`} entry={entry} library={library} initial={initial} focusTab={focusShownTab} onSeeAll={seeAll} />
       )}
       {shown === "collections" && <CollectionsTab key={`col-${library.id}`} entry={entry} library={library} initial={initial} focusTab={focusShownTab} />}
     </div>
@@ -290,26 +292,26 @@ function LibraryGridTab(p: { entry: Entry; library: Library; asked?: LibrarySort
     message = (
       <ColumnMessage
         top={146}
-        title={failedTitle(listing.error, "Couldn't load this library")}
+        title={failedTitle(listing.error, t("browse.library.cantLoad"))}
         body={problem(listing.error)}
-        action={{ label: "Retry", icon: "refresh-cw", onSelect: () => setParams({ ...params }) }}
+        action={{ label: t("common.actions.retry"), icon: "refresh-cw", onSelect: () => setParams({ ...params }) }}
       />
     );
   } else if (total === 0 && filterSet) {
     message = (
       <ColumnMessage
         top={146}
-        title="No matches"
-        body="Nothing in this library matches the current filters."
-        action={{ label: "Clear filters", onSelect: () => setParams(cleared(params)) }}
+        title={t("browse.library.noMatches")}
+        body={t("browse.library.noMatchesHint")}
+        action={{ label: t("browse.library.clearFilters"), onSelect: () => setParams(cleared(params)) }}
       />
     );
   } else if (total === 0) {
     message = (
       <ColumnMessage
         top={146}
-        title="This library is empty"
-        body="Nothing here yet. Titles appear as the server adds them."
+        title={t("browse.library.empty")}
+        body={t("browse.library.emptyHint")}
         focusInstead={p.focusTab}
         takeFocus={p.initial}
       />
@@ -330,19 +332,19 @@ function LibraryGridTab(p: { entry: Entry; library: Library; asked?: LibrarySort
       >
         <Chip
           fid="chip/sort"
-          label={SORT_LABELS[params.sort]}
+          label={sortLabel(params.sort)}
           icon={params.order === "asc" ? "arrow-up-narrow-wide" : "arrow-down-wide-narrow"}
           onSelect={() => openPanel({ kind: "sort" }, "chip/sort")}
         />
-        {!music && <Chip fid="chip/filter" label="Filter" icon="sliders-horizontal" onSelect={() => openPanel({ kind: "filter" }, "chip/filter")} />}
+        {!music && <Chip fid="chip/filter" label={t("browse.library.filter")} icon="sliders-horizontal" onSelect={() => openPanel({ kind: "filter" }, "chip/filter")} />}
         {!music && (
-          <Chip fid="chip/unwatched" label="Unwatched" selected={params.watched === false} onSelect={() => setParams({ ...params, watched: params.watched === false ? null : false })} />
+          <Chip fid="chip/unwatched" label={t("browse.library.unwatched")} selected={params.watched === false} onSelect={() => setParams({ ...params, watched: params.watched === false ? null : false })} />
         )}
         {!music && (genres.length > 0 || params.genre) && (
-          <Chip fid="chip/genre" label={params.genre ?? "Genre"} selected={!!params.genre} maxWidth={220} onSelect={() => openPanel({ kind: "genre", from: "chip" }, "chip/genre")} />
+          <Chip fid="chip/genre" label={params.genre ?? t("browse.library.genre")} selected={!!params.genre} maxWidth={220} onSelect={() => openPanel({ kind: "genre", from: "chip" }, "chip/genre")} />
         )}
         {!music && (years.length > 0 || params.year) && (
-          <Chip fid="chip/year" label={params.year ? String(params.year) : "Year"} selected={!!params.year} onSelect={() => openPanel({ kind: "year", from: "chip" }, "chip/year")} />
+          <Chip fid="chip/year" label={params.year ? String(params.year) : t("browse.library.year")} selected={!!params.year} onSelect={() => openPanel({ kind: "year", from: "chip" }, "chip/year")} />
         )}
         {/* The row has no room for two more filters: these are chosen in the Filter panel, and show here while chosen. */}
         {!music && params.resolution && (
@@ -438,8 +440,8 @@ function LibraryGridTab(p: { entry: Entry; library: Library; asked?: LibrarySort
       )}
       {panel?.kind === "genre" && (
         <ChoicePanel
-          title="Genre"
-          all="All genres"
+          title={t("browse.library.genre")}
+          all={t("browse.library.allGenres")}
           choices={genres}
           current={params.genre}
           onClose={closePanel}
@@ -451,8 +453,8 @@ function LibraryGridTab(p: { entry: Entry; library: Library; asked?: LibrarySort
       )}
       {panel?.kind === "year" && (
         <ChoicePanel
-          title="Year"
-          all="All years"
+          title={t("browse.library.year")}
+          all={t("browse.library.allYears")}
           choices={years.map(String)}
           current={params.year ? String(params.year) : null}
           onClose={closePanel}
@@ -464,8 +466,8 @@ function LibraryGridTab(p: { entry: Entry; library: Library; asked?: LibrarySort
       )}
       {panel?.kind === "resolution" && (
         <ChoicePanel
-          title="Resolution"
-          all="All resolutions"
+          title={t("browse.library.resolution")}
+          all={t("browse.library.allResolutions")}
           choices={withChosen(resolutions, params.resolution)}
           labelOf={(r) => resolutionLabel(r) ?? r}
           current={params.resolution}
@@ -478,8 +480,8 @@ function LibraryGridTab(p: { entry: Entry; library: Library; asked?: LibrarySort
       )}
       {panel?.kind === "dynamicRange" && (
         <ChoicePanel
-          title="Dynamic range"
-          all="All dynamic ranges"
+          title={t("browse.library.dynamicRange")}
+          all={t("browse.library.allDynamicRanges")}
           choices={withChosen(dynamicRanges, params.dynamicRange)}
           labelOf={(d) => dynamicRangeLabel(d) ?? d}
           current={params.dynamicRange}
@@ -516,7 +518,7 @@ function GridRest(p: { at: Signal<number>; itemAt: (index: number) => ItemSummar
 function bitrateLine(item: ItemSummary): string {
   const m = item.media;
   const parts = [m?.bitrate ? formatBitrate(m.bitrate) : "", m?.size ? formatBytes(m.size) : ""].filter(Boolean);
-  return parts.length ? parts.join(" · ") : "Bitrate unknown";
+  return parts.length ? parts.join(" · ") : t("browse.library.bitrateUnknown");
 }
 
 /**
@@ -534,7 +536,7 @@ function JumpControl(p: { alpha: AlphaIndex; focusedIndex: Signal<number>; onJum
       <div class="jump-slot t-caption">{focused ? slot(LETTERS[at - 1]) : null}</div>
       <F
         class="jump-box t-title"
-        label={`Jump to a letter: ${shownLetter}`}
+        label={t("browse.library.jumpTo", { letter: shownLetter })}
         onFocus={() => {
           setLetter(p.alpha.letterAt(p.focusedIndex.peek()));
           setFocused(true);
@@ -566,20 +568,20 @@ function JumpControl(p: { alpha: AlphaIndex; focusedIndex: Signal<number>; onJum
 
 function SortPanel(p: { kind: LibraryKind; params: LibraryParams; onClose: () => void; onPick: (next: LibraryParams) => void }) {
   return (
-    <SidePanel onClose={p.onClose} label="Sort by">
-      <PanelTitle>Sort by</PanelTitle>
+    <SidePanel onClose={p.onClose} label={t("browse.library.sortBy")}>
+      <PanelTitle>{t("browse.library.sortBy")}</PanelTitle>
       {sortsFor(p.kind).map((s: LibrarySort) => (
         <PanelRow
           key={s}
-          label={SORT_LABELS[s]}
+          label={sortLabel(s)}
           checked={s === p.params.sort}
           initial={s === p.params.sort}
           onSelect={() => p.onPick({ ...p.params, sort: s, order: defaultOrder(s) })}
         />
       ))}
-      <div class="panel-heading-small t-caption c-muted">Order</div>
-      <PanelRow label="Ascending" checked={p.params.order === "asc"} onSelect={() => p.onPick({ ...p.params, order: "asc" })} />
-      <PanelRow label="Descending" checked={p.params.order === "desc"} onSelect={() => p.onPick({ ...p.params, order: "desc" })} />
+      <div class="panel-heading-small t-caption c-muted">{t("browse.library.order")}</div>
+      <PanelRow label={t("browse.library.ascending")} checked={p.params.order === "asc"} onSelect={() => p.onPick({ ...p.params, order: "asc" })} />
+      <PanelRow label={t("browse.library.descending")} checked={p.params.order === "desc"} onSelect={() => p.onPick({ ...p.params, order: "desc" })} />
     </SidePanel>
   );
 }
@@ -603,35 +605,39 @@ function FilterPanel(p: {
   const value = (text: string) => <span class="panel-value t-caption">{text}</span>;
   const chevron = <Icon name="chevron-right" size={20} class="check" />;
   return (
-    <SidePanel onClose={p.onClose} label="Filter">
-      <PanelTitle>Filter</PanelTitle>
-      <div class="panel-heading-small t-caption c-muted">Show</div>
-      <PanelRow label="All" checked={w === null} initial={w === null} onSelect={() => p.onChange({ ...p.params, watched: null })} />
-      <PanelRow label="Unwatched" checked={w === false} initial={w === false} onSelect={() => p.onChange({ ...p.params, watched: false })} />
-      <PanelRow label="Watched" checked={w === true} initial={w === true} onSelect={() => p.onChange({ ...p.params, watched: true })} />
+    <SidePanel onClose={p.onClose} label={t("browse.library.filter")}>
+      <PanelTitle>{t("browse.library.filter")}</PanelTitle>
+      <div class="panel-heading-small t-caption c-muted">{t("browse.library.show")}</div>
+      <PanelRow label={t("browse.library.all")} checked={w === null} initial={w === null} onSelect={() => p.onChange({ ...p.params, watched: null })} />
+      <PanelRow label={t("browse.library.unwatched")} checked={w === false} initial={w === false} onSelect={() => p.onChange({ ...p.params, watched: false })} />
+      <PanelRow label={t("browse.library.watched")} checked={w === true} initial={w === true} onSelect={() => p.onChange({ ...p.params, watched: true })} />
       {!p.music && (
         <>
-          <PanelRow label="Genre" trailing={<>{value(p.params.genre ?? "All genres")}{chevron}</>} onSelect={() => p.onList("genre")} />
-          <PanelRow label="Year" trailing={<>{value(p.params.year ? String(p.params.year) : "All years")}{chevron}</>} onSelect={() => p.onList("year")} />
+          <PanelRow label={t("browse.library.genre")} trailing={<>{value(p.params.genre ?? t("browse.library.allGenres"))}{chevron}</>} onSelect={() => p.onList("genre")} />
+          <PanelRow
+            label={t("browse.library.year")}
+            trailing={<>{value(p.params.year ? String(p.params.year) : t("browse.library.allYears"))}{chevron}</>}
+            onSelect={() => p.onList("year")}
+          />
           {/* When the library has two or more to choose from, or one is chosen, to change or clear it. */}
           {(p.resolutions || resolution) && (
             <PanelRow
-              label="Resolution"
-              trailing={<>{value(resolution ? resolutionLabel(resolution)! : "All resolutions")}{chevron}</>}
+              label={t("browse.library.resolution")}
+              trailing={<>{value(resolution ? resolutionLabel(resolution)! : t("browse.library.allResolutions"))}{chevron}</>}
               onSelect={() => p.onList("resolution")}
             />
           )}
           {(p.dynamicRanges || dynamicRange) && (
             <PanelRow
-              label="Dynamic range"
-              trailing={<>{value(dynamicRange ? dynamicRangeLabel(dynamicRange)! : "All dynamic ranges")}{chevron}</>}
+              label={t("browse.library.dynamicRange")}
+              trailing={<>{value(dynamicRange ? dynamicRangeLabel(dynamicRange)! : t("browse.library.allDynamicRanges"))}{chevron}</>}
               onSelect={() => p.onList("dynamicRange")}
             />
           )}
         </>
       )}
-      {hasFilter(p.params) && <PanelRow label="Clear filters" onSelect={p.onClear} />}
-      {hasFilter(p.params) && <PanelRow label="Save as…" icon="save" onSelect={p.onSaveAs} />}
+      {hasFilter(p.params) && <PanelRow label={t("browse.library.clearFilters")} onSelect={p.onClear} />}
+      {hasFilter(p.params) && <PanelRow label={t("browse.library.saveAs")} icon="save" onSelect={p.onSaveAs} />}
     </SidePanel>
   );
 }
@@ -659,26 +665,31 @@ function ChoicePanel(p: {
 
 // ---- Recommended
 
-function RecommendedTab(p: { entry: Entry; library: Library; initial: boolean; focusTab: () => boolean; onCollections: () => void; onSeeAll: (sort: LibrarySort) => void }) {
+function RecommendedTab(p: { entry: Entry; library: Library; initial: boolean; focusTab: () => boolean; onSeeAll: (sort: LibrarySort) => void }) {
   const ui = useUi();
   const lib = p.library;
   const music = lib.kind === "music";
   const hubs = useLoad((c) => ui.api.libraryHubs(lib.id, c), [lib.id]);
-  const collections = useLoad((c) => (music ? Promise.resolve({ collections: [] as Collection[] }) : ui.api.collections(lib.id, c)), [lib.id]);
   const rows = (hubs.data?.hubs ?? []).filter((h) => h.items.length > 0);
-  const cols = collections.data?.collections ?? [];
   const rowIndex = (p.entry.state.recIndex as Record<string, number> | undefined) ?? {};
   p.entry.state.recIndex = rowIndex;
   if (!hubs.data && hubs.error) {
-    return <ColumnMessage top={CHIPS_TOP} title={failedTitle(hubs.error, "Couldn't load recommendations")} body={problem(hubs.error)} action={{ label: "Retry", icon: "refresh-cw", onSelect: hubs.reload }} />;
-  }
-  if (!hubs.data) return <RowsSkeleton top={CHIPS_TOP} />;
-  if (!rows.length && !cols.length) {
     return (
       <ColumnMessage
         top={CHIPS_TOP}
-        title="Nothing to recommend yet"
-        body="Recommendations appear once the library has some items."
+        title={failedTitle(hubs.error, t("browse.library.cantLoadRecommendations"))}
+        body={problem(hubs.error)}
+        action={{ label: t("common.actions.retry"), icon: "refresh-cw", onSelect: hubs.reload }}
+      />
+    );
+  }
+  if (!hubs.data) return <RowsSkeleton top={CHIPS_TOP} />;
+  if (!rows.length) {
+    return (
+      <ColumnMessage
+        top={CHIPS_TOP}
+        title={t("browse.library.nothingToRecommend")}
+        body={t("browse.library.nothingToRecommendHint")}
         focusInstead={p.focusTab}
         takeFocus={p.initial}
       />
@@ -686,7 +697,9 @@ function RecommendedTab(p: { entry: Entry; library: Library; initial: boolean; f
   }
   const sections: Section[] = rows.map((hub: Hub, h) => {
     const kind: TileKind = hub.key.indexOf("continue_watching") === 0 ? "landscape" : music ? "square" : "poster";
-    const sort = seeAllSort(hub);
+    // A row's See all opens the collection it shows; from a server older than collections' rows, the library in its order.
+    const collection = collectionOf(hub);
+    const sort = collection ? null : seeAllSort(hub);
     return {
       key: hub.key,
       height: rowHeight(kind),
@@ -715,46 +728,17 @@ function RecommendedTab(p: { entry: Entry; library: Library; initial: boolean; f
               onActions={() => ui.nav.open({ name: "actions", id: item.id, continueWatching: hub.key.indexOf("continue") === 0 })}
             />
           )}
-          seeAll={sort ? (place) => <SeeAllTile kind={kind} fid={`${hub.key}/all`} onFocus={place.onFocus} onSelect={() => p.onSeeAll(sort)} /> : undefined}
+          seeAll={
+            collection || sort
+              ? (place) => (
+                  <SeeAllTile kind={kind} fid={`${hub.key}/all`} onFocus={place.onFocus} onSelect={() => (collection ? ui.nav.open(collection) : sort && p.onSeeAll(sort))} />
+                )
+              : undefined
+          }
         />
       ),
     };
   });
-  if (cols.length) {
-    sections.push({
-      key: "collections",
-      height: rowHeight("poster"),
-      anchor: CHIPS_TOP,
-      render: (onFocus) => (
-        <Row
-          title="Collections"
-          kind="poster"
-          items={cols}
-          keyOf={(c) => c.id}
-          enterAt={rowIndex.collections}
-          onLeftEdge={ui.toRail}
-          onFocusIndex={(i) => {
-            rowIndex.collections = i;
-            onFocus();
-          }}
-          tile={(c, i, place) => (
-            <ArtTile
-              kind="poster"
-              title={c.title}
-              subtitle={collectionCount(c, lib.kind)}
-              candidates={[c.poster_url]}
-              fid={`collections/${c.id}`}
-              initial={p.initial && !rows.length && i === 0}
-              priority={place.priority}
-              onFocus={place.onFocus}
-              onSelect={() => ui.nav.open({ name: "collection", id: c.id })}
-            />
-          )}
-          seeAll={(place) => <SeeAllTile kind="poster" fid="collections/all" onFocus={place.onFocus} onSelect={p.onCollections} />}
-        />
-      ),
-    });
-  }
   return (
     <div class="library-rows">
       <SectionPage
@@ -783,7 +767,7 @@ export function RowsSkeleton(p: { top: number; kind?: TileKind }) {
     </div>
   );
   return (
-    <div aria-label="Loading" role="status">
+    <div aria-label={t("common.states.loading")} role="status">
       {one(p.top)}
       {one(p.top + 18 + 22 + spec.h + 28)}
     </div>
@@ -792,48 +776,220 @@ export function RowsSkeleton(p: { top: number; kind?: TileKind }) {
 
 // ---- Collections
 
+/** The Category filter's choice as the panel lists it: a category's id. */
+const choiceKey = (c: CategoryChoice): string | null => (c === "all" ? null : String(c));
+const choiceOf = (key: string | null): CategoryChoice => (key === null ? "all" : Number(key));
+
+/**
+ * The Collections tab (the Android app's TvCollectionsTab; apps/web's
+ * CollectionsTab): the Category chip when there are categories to choose,
+ * Clear filters and the count at y = 80; then the collections' posters
+ * with their counts in a grid, or, when they are of more than one
+ * category, a row for each category, titled with its name, in the
+ * categories' order. It waits for the categories (or their failure, when
+ * every collection shows under no heading), so groups don't come in
+ * above what shows.
+ */
 function CollectionsTab(p: { entry: Entry; library: Library; initial: boolean; focusTab: () => boolean }) {
   const ui = useUi();
   const lib = p.library;
   const loaded = useLoad((c) => ui.api.collections(lib.id, c), [lib.id]);
+  const categories = useLoad((c) => ui.api.collectionCategories(c).then((r) => r.categories), []);
+  const [chosen, setChosenState] = useState<CategoryChoice>(() => (p.entry.state.colCategory as CategoryChoice | undefined) ?? "all");
+  const [panel, setPanel] = useState(false);
+  const chipsRef = useRef<HTMLElement | null>(null);
   const list = loaded.data?.collections ?? null;
+  const known = categories.data ?? (categories.error ? [] : null);
+  const view = useMemo(() => (list && known ? collectionsView(list, known, chosen) : null), [list, known, chosen]);
+  const setChosen = (next: CategoryChoice) => {
+    p.entry.state.colCategory = next;
+    p.entry.state.colIndex = 0;
+    p.entry.state.colSection = undefined;
+    p.entry.state.colRowIndex = undefined;
+    setChosenState(next);
+  };
+  const focusChip = () =>
+    setTimeout(() => {
+      const el = chipsRef.current?.querySelector<HTMLElement>('[data-fid="chip/category"]');
+      if (el) ui.focus.focus(el);
+    }, 0);
+  // What had focus in the tab can go from under it: a skeleton when the collections come (the
+  // grid is made anew, or rows take its place), Clear filters when clearing leaves one category
+  // and the chips go. Focus moves to the Category chip if a chip had it, else to the first
+  // collection, else to the tabs, so the remote never lands on nothing.
+  useEffect(() => {
+    const lost = ui.focus.current;
+    if (!lost || lost.isConnected) return;
+    const fid = lost.getAttribute("data-fid") ?? "";
+    const wasChip = fid === "chip/category" || fid === "chip/clear";
+    if (!fid.startsWith("collections/") && !wasChip) return;
+    const page = ui.focus.root;
+    const chip = wasChip ? chipsRef.current?.querySelector<HTMLElement>('[data-fid="chip/category"]') : null;
+    const first = page?.querySelector<HTMLElement>('[data-fid^="collections/"]:not([data-fid^="collections/cell"])') ?? null;
+    if (!(chip && ui.focus.focus(chip)) && !(first && ui.focus.focus(first))) p.focusTab();
+  });
   if (!list && loaded.error) {
-    return <ColumnMessage top={CHIPS_TOP} title={failedTitle(loaded.error, "Couldn't load collections")} body={problem(loaded.error)} action={{ label: "Retry", icon: "refresh-cw", onSelect: loaded.reload }} />;
+    return (
+      <ColumnMessage
+        top={CHIPS_TOP}
+        title={failedTitle(loaded.error, t("browse.collections.cantLoad"))}
+        body={problem(loaded.error)}
+        action={{ label: t("common.actions.retry"), icon: "refresh-cw", onSelect: loaded.reload }}
+      />
+    );
   }
-  if (!list) return null;
-  if (!list.length) {
-    const body =
-      lib.kind === "movies" ? "Movies of the same TMDB collection are grouped here once two of them are in this library." : "There are no collections in this library yet.";
-    return <ColumnMessage top={CHIPS_TOP} title="No collections yet" body={body} focusInstead={p.focusTab} takeFocus={p.initial} />;
+  if (view && !view.total) {
+    const body = lib.kind === "movies" ? t("browse.library.noCollectionsHint") : t("browse.library.noCollectionsHere");
+    return <ColumnMessage top={CHIPS_TOP} title={t("browse.collections.none")} body={body} focusInstead={p.focusTab} takeFocus={p.initial} />;
   }
-  return (
-    <>
-      <div class="t-caption c-muted collections-count">{`${grouped(list.length)} ${list.length === 1 ? "collection" : "collections"}`}</div>
+  const open = (c: Collection) => ui.nav.open({ name: "collection", id: c.id });
+  const chosenLabel = view && view.category !== "all" ? (view.choices.filter((g) => g.choice === view.category)[0] ?? null) : null;
+  // A chip row only when there is something to choose; else the count alone, which takes no focus.
+  const chips = view && (view.offered || view.filtered) && (
+    <G
+      kind="row"
+      class="library-chips"
+      elRef={(el) => (chipsRef.current = el)}
+      onEnter={(dir) => (dir === "down" ? chipsRef.current?.querySelector<HTMLElement>("[data-f]") ?? null : null)}
+      onEdge={(dir) => {
+        // Up goes to the tabs, as from the Library tab's chips: by geometry, the rows' box of no height at the page's top
+        // is nearer, and would take focus back down into them.
+        if (dir === "up") return p.focusTab();
+        // The rows are placed in a box of no height of its own, which a move by geometry passes over, as from the tabs to Recommended's.
+        const rows = dir === "down" ? document.querySelector<HTMLElement>(".collections-rows .page-scroll") : null;
+        if (!rows) return false;
+        const target = ui.focus.rememberedIn(rows) ?? ui.focus.enter(rows, "down", chipsRef.current?.getBoundingClientRect() ?? null);
+        return !!target && ui.focus.focus(target);
+      }}
+    >
+      <Chip
+        fid="chip/category"
+        label={chosenLabel ? chosenLabel.category.title : t("browse.collections.category")}
+        selected={!!chosenLabel}
+        maxWidth={220}
+        onSelect={() => setPanel(true)}
+      />
+      {view.filtered && (
+        <Chip
+          fid="chip/clear"
+          label={t("browse.library.clearFilters")}
+          icon="x"
+          onSelect={() => {
+            setChosen("all");
+            focusChip();
+          }}
+        />
+      )}
+      <div class="t-caption c-muted chips-count">{pluralize(view.count, "collection")}</div>
+    </G>
+  );
+  let content: ComponentChildren;
+  if (view && view.headed) {
+    // Each row's tile focused last, so Back from a collection comes to it, the rows drawn again.
+    const rowIndex = (p.entry.state.colRowIndex as Record<string, number> | undefined) ?? {};
+    p.entry.state.colRowIndex = rowIndex;
+    const sections: Section[] = view.groups.map((g, gi) => ({
+      key: `category/${g.key}`,
+      height: rowHeight("poster"),
+      anchor: GRID_TOP,
+      render: (onFocus) => (
+        <Row
+          title={g.category.title}
+          kind="poster"
+          items={g.collections}
+          keyOf={(c) => c.id}
+          enterAt={rowIndex[g.key]}
+          onLeftEdge={ui.toRail}
+          onFocusIndex={(i) => {
+            rowIndex[g.key] = i;
+            onFocus();
+          }}
+          tile={(c, i, place) => (
+            <ArtTile
+              kind="poster"
+              title={c.title}
+              subtitle={collectionCount(c, lib.kind)}
+              candidates={[c.poster_url]}
+              fid={`collections/${c.id}`}
+              initial={p.initial && gi === 0 && i === 0}
+              priority={place.priority}
+              onFocus={place.onFocus}
+              onSelect={() => open(c)}
+            />
+          )}
+        />
+      ),
+    }));
+    content = (
+      <div class="library-rows collections-rows">
+        <SectionPage
+          sections={sections}
+          top={GRID_TOP}
+          clipAbove={GRID_CLIP}
+          focusedKey={p.entry.state.colSection as string | undefined}
+          onFocusSection={(k) => (p.entry.state.colSection = k)}
+        />
+        <div class="rail-fade" />
+      </div>
+    );
+  } else {
+    // One group, or still loading: a grid, of grey wells until the collections come, so Down from the tabs lands somewhere.
+    const shown = view ? (view.groups[0]?.collections ?? []) : null;
+    content = (
       <PosterGrid
+        key={view ? `col-${view.category}` : "col-loading"}
         kind="grid"
-        count={list.length}
+        count={shown ? shown.length : UNKNOWN_CELLS}
         top={GRID_TOP}
         clipTop={GRID_CLIP}
         startIndex={(p.entry.state.colIndex as number | undefined) ?? 0}
         onFocusIndex={(i) => (p.entry.state.colIndex = i)}
         cell={(i, place) => {
-          const c = list[i]!;
+          const c = shown?.[i];
+          if (!c) return <SkeletonTile kind="grid" fid={`collections/cell${i}`} focusable onFocus={place.onFocus} />;
           return (
             <ArtTile
               kind="grid"
               title={c.title}
               subtitle={collectionCount(c, lib.kind)}
               candidates={[c.poster_url]}
-              badge={String(c.item_count)}
+              badge={formatNumber(c.item_count)}
               fid={`collections/${c.id}`}
               initial={p.initial && i === 0}
               priority={place.priority}
               onFocus={place.onFocus}
-              onSelect={() => ui.nav.open({ name: "collection", id: c.id })}
+              onSelect={() => open(c)}
             />
           );
         }}
       />
+    );
+  }
+  return (
+    <>
+      {chips || (view && <div class="t-caption c-muted collections-count">{pluralize(view.count, "collection")}</div>)}
+      {content}
+      {panel && view && (
+        <ChoicePanel
+          title={t("browse.collections.category")}
+          all={t("browse.collections.allCategories")}
+          choices={view.choices.map((g) => choiceKey(g.choice)!)}
+          labelOf={(k) => {
+            const g = view.choices.filter((x) => choiceKey(x.choice) === k)[0];
+            return g ? g.category.title : k;
+          }}
+          current={choiceKey(view.category)}
+          onClose={() => {
+            setPanel(false);
+            focusChip();
+          }}
+          onPick={(k) => {
+            setChosen(choiceOf(k));
+            setPanel(false);
+            focusChip();
+          }}
+        />
+      )}
     </>
   );
 }
@@ -843,7 +999,7 @@ function CollectionsTab(p: { entry: Entry; library: Library; initial: boolean; f
 /** "412 movies", "38 shows · Scanning…", "120 artists". */
 export function libraryCountLine(l: Library): string {
   const base = l.kind === "music" ? pluralize(l.item_count, "artist") : l.kind === "shows" ? pluralize(l.item_count, "show") : pluralize(l.item_count, "movie");
-  return l.scanning ? `${base} · Scanning…` : base;
+  return l.scanning ? t("browse.libraries.scanning", { counts: base }) : base;
 }
 
 /**
@@ -857,9 +1013,9 @@ export function LibrariesFailed(p: { top?: number }) {
   return (
     <ColumnMessage
       top={p.top}
-      title={failedTitle(error, "Couldn't load your libraries")}
+      title={failedTitle(error, t("browse.libraries.cantLoad"))}
       body={problem(error)}
-      action={{ label: "Retry", icon: "refresh-cw", onSelect: () => void app.loadAccount().catch(() => undefined) }}
+      action={{ label: t("common.actions.retry"), icon: "refresh-cw", onSelect: () => void app.loadAccount().catch(() => undefined) }}
     />
   );
 }
@@ -891,7 +1047,10 @@ export function librarySorting(app: AppState): "yes" | "no" | "older" | "refused
   return noSort.get(app.server.value ?? "") ?? "yes";
 }
 
-export const SORT_NEEDS_NEWER = "Sorting libraries needs a newer Pley on the server.";
+/** What a server too old to sort the libraries is told: on this page, and in Settings. */
+export function sortNeedsNewer(): string {
+  return t("browse.libraries.needsNewer");
+}
 
 /**
  * Every library (TvLibrariesScreen): the rail lists six, and Libraries
@@ -970,14 +1129,14 @@ export function LibrariesScreen(p: { entry: Entry; sort?: boolean }) {
     const server = app.server.value ?? "";
     if (isApiError(e, 404) || isApiError(e, 405)) {
       noSort.set(server, "older");
-      ui.toast(SORT_NEEDS_NEWER, true);
+      ui.toast(sortNeedsNewer(), true);
     } else if (isApiError(e, 403)) {
       noSort.set(server, "refused");
-      ui.toast("This server doesn't let the app sort your libraries: sort them on the web", true);
+      ui.toast(t("browse.libraries.refused"), true);
     } else if (isApiError(e, 409)) {
       // A library came or went since they were listed.
       void app.loadAccount().catch(() => undefined);
-      ui.toast("Your libraries changed meanwhile: try again", true);
+      ui.toast(t("browse.libraries.changed"), true);
     } else ui.toast(sentence(errorMessage(e)), true);
     if (noSort.has(server)) {
       setSorting(false);
@@ -1062,7 +1221,7 @@ export function LibrariesScreen(p: { entry: Entry; sort?: boolean }) {
   }, [inSort, p.sort]);
 
   if (!libraries) return <LibrariesFailed />;
-  if (!libraries.length) return <ColumnMessage title="No libraries yet" body="Ask the server owner to add a library." />;
+  if (!libraries.length) return <ColumnMessage title={t("browse.home.noLibraries")} body={t("browse.home.noLibrariesHint")} />;
   const toTarget = (i: number) => {
     // The pointer, with a card lifted: the card goes where it points (past the last, to the end).
     if (ui.input.pointerMoved) moveTo(Math.min(i, shown.length - 1), true);
@@ -1075,15 +1234,15 @@ export function LibrariesScreen(p: { entry: Entry; sort?: boolean }) {
     <div class="libraries-page">
       <div class="libraries-header">
         <div class="t-page c-fg one-line" style="flex:1;min-width:0">
-          {inSort ? "Sort libraries" : "Libraries"}
+          {inSort ? t("browse.libraries.sort") : t("browse.libraries.title")}
         </div>
         {sortable && (
           <G kind="row" class="libraries-buttons" elRef={(el) => (headerRef.current = el)}>
-            {inSort && <Pill key="server" fid="serverOrder" label="Use the server's order" icon="rotate-ccw" disabled={liftedId !== null} onSelect={serverOrder} />}
+            {inSort && <Pill key="server" fid="serverOrder" label={t("browse.libraries.serverOrder")} icon="rotate-ccw" disabled={liftedId !== null} onSelect={serverOrder} />}
             <Pill
               key="sort"
               fid="sort"
-              label={inSort ? "Done" : "Sort libraries"}
+              label={inSort ? t("common.actions.done") : t("browse.libraries.sort")}
               icon={inSort ? "check" : "arrow-up-down"}
               disabled={liftedId !== null}
               onSelect={inSort ? endSorting : startSorting}
@@ -1131,7 +1290,7 @@ export function LibrariesScreen(p: { entry: Entry; sort?: boolean }) {
       </div>
       {inSort && (
         <div class="moving-hint t-label">
-          {liftedId !== null ? "Arrows to move it, OK to drop it here, Back to put it back" : "Press OK on a library to move it. Your order applies on all your devices."}
+          {liftedId !== null ? t("browse.libraries.liftedHint") : t("browse.libraries.sortHint")}
         </div>
       )}
       {actionsFor && (
@@ -1141,7 +1300,7 @@ export function LibrariesScreen(p: { entry: Entry; sort?: boolean }) {
             <div class="t-caption c-muted one-line">{libraryCountLine(actionsFor)}</div>
           </div>
           <PanelRow
-            label="Open"
+            label={t("common.actions.open")}
             icon="arrow-right"
             initial
             onSelect={() => {
@@ -1150,7 +1309,7 @@ export function LibrariesScreen(p: { entry: Entry; sort?: boolean }) {
             }}
           />
           <PanelRow
-            label="Move"
+            label={t("browse.actions.move")}
             icon="arrow-up-down"
             onSelect={() => {
               setActionsFor(null);
@@ -1159,7 +1318,7 @@ export function LibrariesScreen(p: { entry: Entry; sort?: boolean }) {
             }}
           />
           <PanelRow
-            label="Use the server's order"
+            label={t("browse.libraries.serverOrder")}
             icon="rotate-ccw"
             onSelect={() => {
               setActionsFor(null);
@@ -1201,7 +1360,7 @@ function LibraryCard(p: {
         class={`library-card${p.lifted ? " lifted" : ""}`}
         fid={`library/${l.id}`}
         initial={p.index === 0}
-        label={`${l.name}, ${libraryCountLine(l)}${p.sorting ? `, ${p.index + 1} of ${p.count}` : ""}`}
+        label={`${l.name}, ${libraryCountLine(l)}${p.sorting ? `, ${t("browse.libraries.position", { position: p.index + 1, total: p.count })}` : ""}`}
         onFocus={p.onFocus}
         onBlur={p.lifted ? p.onLeave : undefined}
         onSelect={p.onSelect}

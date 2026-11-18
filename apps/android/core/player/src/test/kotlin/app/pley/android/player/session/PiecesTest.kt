@@ -68,6 +68,8 @@ class PiecesTest {
         assertEquals(saved, back)
         assertEquals(PlayRequest(20_001, fileId = 30_001, startMs = 61_000, audioIndex = 1, queue = PlayQueue.Playlist(1)), back!!.toPlayRequest())
         assertEquals(PlayQueue.Collection(2), SavedPlaybackState.fromBundle(saved.copy(queue = PlayQueue.Collection(2)).toBundle())!!.queue)
+        val merged = PlayQueue.MergedCollection(listOf(2, 7))
+        assertEquals(merged, SavedPlaybackState.fromBundle(saved.copy(queue = merged).toBundle())!!.queue)
         assertNull(SavedPlaybackState.fromBundle(null))
         assertNull(SavedPlaybackState.fromBundle(android.os.Bundle()))
     }
@@ -80,7 +82,7 @@ class PiecesTest {
         assertEquals("TrueHD 7.1", PlaybackDetails.audioLabel(MediaStream(1, StreamKind.Audio, "truehd", channels = 8)))
         assertEquals("H.264 1080p", PlaybackDetails.simplified("H.264 1920×1080"))
         val live = TranscodeInfo(jobId = "j", state = JobState.Running, encoder = "h264_nvenc", pipeline = "gpu")
-        assertEquals("NVIDIA NVENC (GPU)", PlaybackDetails.encoderLabel(live))
+        assertEquals("NVIDIA NVENC (GPU)", PlaybackDetails.encoderLabel(texts, live))
 
         val audio = MediaStream(1, StreamKind.Audio, "eac3", channels = 6, default = true)
         val file = MediaFile(id = 1, path = "a.mkv", bitrate = 62_000_000, streams = listOf(video, audio))

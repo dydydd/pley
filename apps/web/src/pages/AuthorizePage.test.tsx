@@ -31,6 +31,7 @@ function consent(over: Partial<ConsentRequest> = {}): ConsentRequest {
     client: android,
     redirect: { kind: "app", to: "app.pley.android" },
     scopes: ["library", "play"],
+    optional: [],
     ...over,
   };
 }
@@ -140,6 +141,9 @@ async function consentShown() {
 
 const posts = (requests: FakeRequest[], path: string) => requests.filter((r) => r.method === "POST" && r.path === path);
 
+/** What the box for managing the server says under its name. */
+const SERVER_HINT = "Dashboard, libraries, users and invitations. Settings, keys, Live TV and other administrators stay in the web app.";
+
 describe("AuthorizePage", () => {
   it("hands the server its query once, even under StrictMode", async () => {
     const requests = serve();
@@ -182,42 +186,150 @@ describe("AuthorizePage", () => {
     const rows = screen.getAllByRole("listitem").map((li) => li.textContent);
     expect(rows).toEqual([
       "See Admin's libraries, playlists and watch history.",
-      "Play titles, and keep Admin's place, watched marks, ratings, track choices and library order.",
+      "Play titles and keep Admin's progress, ratings and track choices.",
       "Make, change and delete Admin's playlists.",
     ]);
     expect(
-      screen.getByText("It can't change your password, sign-in settings or devices, and it never gets administrator rights."),
+      screen.getByText("It can't change your password, sign-in settings or devices. Everything else stays in Pley's web app."),
     ).toBeInTheDocument();
-    expect(screen.getByText("Your administrator rights stay in Pley's web app.")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.queryByText("Administrator access")).not.toBeInTheDocument();
     expect(screen.getByText("an app on this device")).toBeInTheDocument();
     expect(screen.getByText("Only allow this if you just started signing in to the app.")).toBeInTheDocument();
   });
 
-  it("says what requests let an app do, and which administrator right it gets", async () => {
-    serve({ answer: () => consent({ scopes: ["library", "requests", "approvals"] }) });
+  it("lists approving requests with what the app needs, and offers managing the server as a box, unticked", async () => {
+    serve({ answer: () => consent({ scopes: ["library", "play", "requests", "approvals", "server"], optional: ["server"] }) });
     renderPage();
 
     await consentShown();
     const rows = screen.getAllByRole("listitem").map((li) => li.textContent);
     expect(rows).toEqual([
       "See Admin's libraries, playlists and watch history.",
-      "Ask for movies and shows the libraries don't have, and follow Admin's requests.",
-      "Approve and decline what people ask for, where the account is an administrator.",
+      "Play titles and keep Admin's progress, ratings and track choices.",
+      "Ask for movies and shows, and follow Admin's requests.",
+      "Approve and decline what people ask for.",
     ]);
-    expect(screen.getByText("It can't change your password, sign-in settings or devices.")).toBeInTheDocument();
-    expect(
-      screen.getByText("Of your administrator rights it gets only approving and declining requests: the others stay in Pley's web app."),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: /^Administrator access/ })).toBeInTheDocument();
+    expect(screen.getAllByRole("checkbox")).toHaveLength(1);
+    const server = screen.getByRole("checkbox", { name: "Manage the server" });
+    expect(server).toHaveAccessibleDescription(SERVER_HINT);
+    expect(server).not.toBeChecked();
   });
 
-  it("leaves out the administrator line for others", async () => {
-    serve({ answer: () => consent({ scopes: ["library", "profiles"], redirect: { kind: "loopback", to: "127.0.0.1" } }) });
+  it("allows only what is ticked", async () => {
+    const requests = serve({ answer: () => consent({ scopes: ["library", "play", "requests", "approvals", "server"], optional: ["server"] }) });
+    renderPage();
+    const { allow } = await consentShown();
+
+    attend();
+    const user = userEvent.setup();
+    const server = screen.getByRole("checkbox", { name: "Manage the server" });
+    // The whole row is the label; Space ticks the focused box.
+    await user.click(screen.getByText(SERVER_HINT));
+    expect(server).toBeChecked();
+    await user.click(server);
+    expect(server).not.toBeChecked();
+    server.focus();
+    await user.keyboard(" ");
+    expect(server).toBeChecked();
+
+    fireEvent.click(allow);
+    await waitFor(() => expect(posts(requests, "/api/oauth/requests/r1")).toHaveLength(1));
+    expect(posts(requests, "/api/oauth/requests/r1")[0]?.body).toEqual({
+      allow: true,
+      scopes: ["library", "play", "requests", "approvals", "server"],
+    });
+  });
+
+  // Real time from the page's first render, as for Allow below.
+  it("takes no tick in the box as the page appears, but a second later", async () => {
+    focused = true;
+    serve({ answer: () => consent({ scopes: ["library", "play", "requests", "approvals", "server"], optional: ["server"] }) });
+    renderPage();
+    await consentShown();
+    const server = screen.getByRole("checkbox", { name: "Manage the server" });
+    const row = screen.getByText(SERVER_HINT);
+
+    // The second half of a double click meant for another page lands here as it appears; nor can a key reach the box.
+    expect(server).toBeDisabled();
+    const user = userEvent.setup();
+    await user.click(server);
+    await user.click(row);
+    expect(server).not.toBeChecked();
+    server.focus();
+    expect(server).not.toHaveFocus();
+
+    await waitFor(() => expect(server).toBeEnabled(), { timeout: 3000 });
+    await user.click(row);
+    expect(server).toBeChecked();
+  });
+
+  it("keeps the box off until the page has been seen for a whole second, as Allow", async () => {
+    serve({ answer: () => consent({ scopes: ["library", "play", "requests", "approvals", "server"], optional: ["server"] }) });
+    renderPage();
+    const { allow } = await consentShown();
+    const server = screen.getByRole("checkbox", { name: "Manage the server" });
+
+    expect(server).toBeDisabled();
+    fakeTimers();
+    setFocus(true);
+    wait(999);
+    expect(server).toBeDisabled();
+    wait(1);
+    expect(server).toBeEnabled();
+    expect(allow).toBeEnabled();
+    vi.useRealTimers();
+    const user = userEvent.setup();
+    await user.click(screen.getByText(SERVER_HINT));
+    expect(server).toBeChecked();
+
+    // Leaving the window starts it over, for the box as for Allow; the tick stays.
+    setFocus(false);
+    expect(server).toBeDisabled();
+    await user.click(screen.getByText(SERVER_HINT));
+    expect(server).toBeChecked();
+  });
+
+  it("allows what the app needs without managing the server when its box is left unticked", async () => {
+    const requests = serve({ answer: () => consent({ scopes: ["library", "play", "requests", "approvals", "server"], optional: ["server"] }) });
+    renderPage();
+    const { allow } = await consentShown();
+
+    attend();
+    fireEvent.click(allow);
+    await waitFor(() => expect(posts(requests, "/api/oauth/requests/r1")).toHaveLength(1));
+    expect(posts(requests, "/api/oauth/requests/r1")[0]?.body).toEqual({ allow: true, scopes: ["library", "play", "requests", "approvals"] });
+  });
+
+  it("says Pley's own app allowed activity sees and stops everyone's streams", async () => {
+    serve({ answer: () => consent({ scopes: ["library", "play", "activity"] }) });
+    renderPage();
+
+    await consentShown();
+    const rows = screen.getAllByRole("listitem").map((li) => li.textContent);
+    expect(rows[2]).toBe("See and stop what's playing on the server.");
+  });
+
+  it("gives another publisher's app allowed activity only the profile's own streams", async () => {
+    serve({ answer: () => consent({ client: other, scopes: ["library", "activity"], redirect: { kind: "web", to: "apps.example.com" } }) });
+    renderPage();
+
+    await consentShown();
+    expect(screen.getByText("See and stop Admin's streams.")).toBeInTheDocument();
+  });
+
+  it("asks someone who isn't an administrator nothing about an administrator's rights", async () => {
+    // The server leaves them out for such an account.
+    serve({ answer: () => consent({ scopes: ["library", "profiles", "activity"], redirect: { kind: "loopback", to: "127.0.0.1" } }) });
     renderPage({ user: { ...testUser, name: "Kid", is_admin: false } });
 
     await consentShown();
     expect(screen.getByText("See Kid's libraries, playlists and watch history.")).toBeInTheDocument();
-    expect(screen.getByText("Switch to the household's other profiles. Profiles with a PIN still ask for it.")).toBeInTheDocument();
-    expect(screen.queryByText("Your administrator rights stay in Pley's web app.")).not.toBeInTheDocument();
+    expect(screen.getByText("Switch to the household's other profiles (PINs still apply).")).toBeInTheDocument();
+    expect(screen.getByText("See and stop Kid's streams.")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.getByText("It can't change your password, sign-in settings or devices.")).toBeInTheDocument();
     expect(screen.getByText("an app on this computer")).toBeInTheDocument();
     expect(screen.getByText("Only allow this if you just started signing in to the app.")).toBeInTheDocument();
   });
@@ -285,7 +397,7 @@ describe("AuthorizePage", () => {
     fireEvent.click(allow);
     await settle();
     expect(screen.getByRole("heading", { name: "Returning to Pley for Android…" })).toBeInTheDocument();
-    expect(posts(requests, "/api/oauth/requests/r1").map((r) => r.body)).toEqual([{ allow: true }]);
+    expect(posts(requests, "/api/oauth/requests/r1").map((r) => r.body)).toEqual([{ allow: true, scopes: ["library", "play"] }]);
     expect(assign).toHaveBeenCalledExactlyOnceWith(CONTINUE);
 
     wait(2999);

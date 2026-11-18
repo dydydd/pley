@@ -9,6 +9,7 @@ import app.pley.android.auth.AuthGraph
 import app.pley.android.caps.CapsDecision
 import app.pley.android.caps.CapsGraph
 import app.pley.android.caps.CapsSnapshot
+import app.pley.android.common.AppLanguage
 import app.pley.android.common.DeviceProfile
 import app.pley.android.common.UserAgent
 import app.pley.android.data.DataGraph
@@ -24,10 +25,14 @@ import app.pley.android.player.PlayerGraph
 import app.pley.android.player.session.Qualities
 import app.pley.android.screens.PlayerLauncher
 import app.pley.android.screens.ScreensGraph
+import app.pley.android.screens.remote.CastReceiver
 import app.pley.android.watchnext.TvProviderRow
 import app.pley.android.watchnext.WatchNext
 import app.pley.android.watchnext.WatchNextImages
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import okhttp3.OkHttp
 import okhttp3.OkHttpClient
@@ -46,7 +51,8 @@ class AppGraph(private val app: Application) : ScreensGraph {
         // run on the main thread as the app starts (the manifest leaves it out):
         // its Android platform, with the app's context, before the first client.
         OkHttp.initialize(app)
-        HttpRoot.create(userAgent)
+        // The server writes some words itself (Home's rows), in the language shown.
+        HttpRoot.create(userAgent, language = { AppLanguage.locale.toLanguageTag() })
     }
     // Signing in and the servers' proofs go where the rest goes, the home network's way.
     override val auth: AuthGraph by lazy { AuthGraph.create(app, NetworkGraph.homeRouted(app, root), userAgent) }
@@ -103,6 +109,16 @@ class AppGraph(private val app: Application) : ScreensGraph {
      */
     override val drives: Drives by lazy { if (device.isTv) StorageDrives(app, DriveResume.preferences(app)) else Drives.None }
     override val playerLauncher: PlayerLauncher by lazy { PlayerLauncherImpl(app, { player }, device) }
+
+    /**
+     * What the profile's remotes cast here, played on the main thread for the whole life of the app; what plays
+     * ends before one switches profiles.
+     */
+    override val casts: CastReceiver by lazy {
+        CastReceiver.of(data, playerLauncher, { player.music }, CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)) {
+            player.endAll()
+        }
+    }
 
     /**
      * The home screen's Watch Next row: Android TV and Google TV only

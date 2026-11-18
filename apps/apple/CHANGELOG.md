@@ -8,6 +8,25 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A library's collections are grouped by category, with a filter by
+  category, and a collection's page shows its category. A row's See
+  all, and on iPhone, iPad and Mac its title, opens its collection, and
+  a Home row of same-titled collections from several libraries opens
+  them together.
+- Play on… lists Google Cast and AirPlay devices for movies, episodes and
+  Live TV channels, and says "Starting on…" until the device plays. An
+  AirPlay device asks once for the code it shows; on an Apple TV the code
+  goes as its fourth digit is typed.
+- The remote has a volume slider for a Google Cast device.
+- The remote offers Skip Intro and Skip Credits while what a device plays
+  is in an intro or the credits, and its back button goes 30 seconds, as far
+  as forward.
+- Pley in French and Spanish, as well as English: your account's language
+  from Settings → Language, else the one picked with the globe before you
+  sign in, else your device's, else your server's. Every screen on iPhone,
+  iPad, Mac and Apple TV is in it, and so are dates, times, counts, the
+  names of audio and subtitle languages, and errors. It changes at once,
+  without starting again.
 - Finds Pley servers on your network, keeps the ones you opened, and adds
   one by its address.
 - Sign in with your browser on iPhone, iPad and Mac, or with a code and its
@@ -40,8 +59,8 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Your token goes only to the server you signed in to: before it goes, the
   server proves it holds your sign-in's key, again after half an hour, on
   another network, or when the server didn't answer. When another device
-  answers at its address, Pley shows what it saved and says "Another device
-  answers there."
+  answers at its address, the token stays here and Pley shows what it saved,
+  as it does for a server that's offline.
 - Play movies and episodes: Play or Resume on an item's page, the system
   player on each device (its own window on the Mac, with keyboard
   shortcuts), and each file sent as this device plays it best, in HDR and
@@ -67,7 +86,9 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the channel cards, favourites and recently watched, a programme's
   details, and the live player with channel up and down, a channel number
   typed or on Apple TV's number pad, AirPlay, and Watch here instead when
-  every connection is in use. Search shows the channels it finds.
+  every connection is in use. Search shows the channels it finds. Live TV
+  stopped from another device, or its connection taken, stops at once and
+  says why.
 - Music: Play and Shuffle on albums, artists and music playlists, a track
   plays its album from there, and it plays on in the background and with
   the screen locked. A mini player and Now Playing (a window on the Mac,
@@ -81,9 +102,65 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Next while the server is away; what you watched reaches the server once
   it is back.
 - When the server doesn't answer, the app opens on what it saved of your
-  screens and says so, and reconnects by itself (Apple TV too).
+  screens under "Pley is offline", with Downloads on iPhone, iPad and Mac,
+  and reconnects by itself (Apple TV too).
 - A video that loses the server plays what it has loaded and keeps trying
   to reach the server for 90 seconds, then plays on where it stood.
 - Continue Watching on Apple TV's Top Shelf: with Pley in the top row,
   your titles in progress show with their pictures and progress, and one
   opens its page or plays.
+- Pley's icon on iPhone, iPad, Mac and Apple TV. On Apple TV it moves in
+  layers as it's focused, and the Top Shelf shows Pley's icon and name
+  until there's something to continue.
+- Requests on iPhone, iPad and Mac: discover movies and shows in Discover
+  or from Search, ask for them (picking a show's seasons), follow your
+  requests, and hear when they're ready. Administrators approve and
+  decline under Me, with a count on Me's tab.
+- Requests on Apple TV, as on Android TV: a Discover tab (Your requests,
+  or Requests for administrators, where you can't ask) with its count,
+  posters to browse and ask for, Which seasons? and each request's actions
+  in a panel down the side, Discover's titles in Search, and a pop-up when
+  something you asked for is ready to watch.
+- In Discover and Search's Discover titles, a movie or show a library has
+  whole opens its library page, where it plays.
+- A remote for your other devices on iPhone, iPad and Mac: a bar above
+  the tabs, or a toolbar button on the Mac, shows what plays on them, and
+  plays, pauses, seeks, skips, goes to the next or previous track (or
+  channel) and stops it. Every Apple device, Apple TV included, obeys
+  your remotes, the web's too, while Pley is open or music plays, and
+  music paused here stays on them.
+- Your remotes can change the audio and subtitles of a movie or an episode
+  playing on an Apple device, and see which ones it plays.
+- The remote lists all your other devices that are on, playing or ready
+  to play, each with its kind: choose one for its controls, with Audio and
+  Subtitles, and Next wherever there is one.
+- Play on… sends a title, a show, an album, an artist, a track or a
+  playlist (Watch on…, a Live TV channel) to another of your devices.
+  Every Apple device, Apple TV included, plays what you send it as its own
+  Play would, and says where it came from; on Apple TV the player's other
+  notices show too.
+- Your remotes can change the quality of a movie or an episode playing on
+  an Apple device, as its Quality menu does, and see which one it plays.
+- Play on… sends the audio and subtitles picked on a movie's or an
+  episode's page, and the device plays it with them. A channel sent to a
+  device already watching Live TV changes channel there, and what you send
+  to an iPhone, iPad or Apple TV no longer waits behind a sheet open on it.
+- The remote on iPhone, iPad and Mac: Audio, Subtitles and a new Quality
+  are symbols beside Stop, which now asks first. Live TV shows how far
+  along the programme is, its times and what's next, with a channel
+  rocker in place of the seek bar and skips. A device playing nothing says
+  "Send something here with Play on…"
+- When the server has video transcoding turned off, the Quality menu
+  offers only Original.
+
+### Changed
+
+- A library's Recommended tab no longer ends with a row of every collection.
+- Requests: a sign-in from before the app could ask says "Sign in again to ask for movies
+  and shows" without a second line, and its button reads Sign in.
+- A title's page on iPhone, iPad and Mac: Resume and From start share the
+  row, with how far you got and the time left inside Resume; a line of
+  facts no longer ends in a dot where it wraps, nor repeats the edition the
+  Version picker shows; Version names the edition, with the picture, codec
+  and size in its menu; and Audio and Subtitles show their choice on one
+  line.

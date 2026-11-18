@@ -23,8 +23,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
@@ -32,6 +34,7 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -52,6 +55,7 @@ import androidx.navigation3.scene.SinglePaneSceneStrategy
 import androidx.navigation3.ui.NavDisplay
 import app.pley.android.common.TestTags
 import app.pley.android.common.Tier
+import app.pley.android.common.perf.FrameRate
 import app.pley.android.common.perf.StartupSignals
 import app.pley.android.designsystem.PleyColors
 import app.pley.android.designsystem.PleyMotion
@@ -59,6 +63,7 @@ import app.pley.android.designsystem.PleyTv
 import app.pley.android.designsystem.PleyType
 import app.pley.android.designsystem.image.LocalArtworkHold
 import app.pley.android.designsystem.reducedMotion
+import app.pley.android.player.CastFrom
 import app.pley.android.screens.PleyKey
 import app.pley.android.screens.requests.RequestsEntry
 import app.pley.android.ui.tv.R
@@ -70,6 +75,7 @@ import app.pley.android.ui.tv.item.TvTileActionsPanel
 import app.pley.android.ui.tv.item.TvTileActionsState
 import app.pley.android.ui.tv.item.itemEntries
 import app.pley.android.ui.tv.kit.KeyRepeatGate
+import app.pley.android.ui.tv.kit.TvCastNotice
 import app.pley.android.ui.tv.kit.LocalKeyRepeatGate
 import app.pley.android.ui.tv.kit.LocalTvOverlays
 import app.pley.android.ui.tv.kit.LocalTvRailFocus
@@ -92,6 +98,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.launch
 
 /**
  * The TV app (Android TV, Google TV, Fire TV): the theme, the D-pad rules
@@ -182,6 +189,8 @@ private fun TvShell(
     // Signing in and choosing a profile are full screen.
     rail.shown = root !is PleyKey.Servers && root !is PleyKey.Link && root !is PleyKey.SignIn && root !is PleyKey.Profiles
     val curtain = rememberCurtain(backStack.lastOrNull())
+    // The screen the frame-rate counter's lines name, read outside composition.
+    LaunchedEffect(backStack) { snapshotFlow { backStack.lastOrNull() }.collect { FrameRate.route = it } }
     ReturnFocus(rail, content, pages)
     // The app is fully drawn (Android's time to full display) once Home has its
     // rows and pictures; a start elsewhere (sign-in, "Who's watching?") is at once.
@@ -196,6 +205,21 @@ private fun TvShell(
     // A refused sign-in (the server ended it, or forgot it): that server's sign-in again, as on phones.
     LaunchedEffect(source, navigator) {
         source.signedOut.collect { issuer -> if (rail.shown) navigator.restart(PleyKey.Link(issuer)) }
+    }
+
+    // Music a remote cast here: Now Playing, as the TV's own Play opens it, saying where it came from.
+    val resources = LocalResources.current
+    var cast by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    LaunchedEffect(source, navigator) {
+        var casts = 0
+        launch {
+            // Another profile's remote couldn't switch the TV to its profile: nothing plays, said where music's would be.
+            source.castRefused.collect { cast = CastFrom.switchFailed(resources) to ++casts }
+        }
+        source.castMusic.collect { from ->
+            if (rail.shown && backStack.lastOrNull() != PleyKey.NowPlaying) navigator.open(PleyKey.NowPlaying)
+            cast = from.notice(resources) to ++casts
+        }
     }
 
     // A Watch Next program: its page, and it plays, once past signing in and choosing a profile.
@@ -276,6 +300,7 @@ private fun TvShell(
         }
         // A tile's actions, over the page they were asked on.
         TvTileActionsPanel(tileActions, page = backStack.lastOrNull(), navigator = navigator)
+        TvCastNotice(cast?.first, key = cast?.second)
         if (rail.shown) {
             TvRail(
                 items = items,

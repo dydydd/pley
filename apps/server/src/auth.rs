@@ -77,6 +77,9 @@ pub struct AppAccess {
     pub scopes: Scopes,
     /// Who allowed it (the profile it acts as, unless it switched since).
     pub approved_by: i64,
+    /// Whether a cast put it on the profile it acts as (a switch with the
+    /// cast's ticket), until the profile is picked on the device itself.
+    pub by_cast: bool,
 }
 
 impl AuthUser {
@@ -107,15 +110,73 @@ impl AuthUser {
         self.app.as_ref().is_none_or(|app| crate::oauth::clients::builtin(&app.client_id).is_some())
     }
 
+    /// Whether the account's administrator role holds for this request:
+    /// Pley's own sign-in or a compatibility token on an administrator's
+    /// account, or an app that administrator allowed and put on their
+    /// profile at the device: by signing in, or by picking the profile
+    /// there. An app someone else allowed that switched to the profile
+    /// since acts as it, but never with its role's rights over others: the
+    /// scopes it holds were never that administrator's to give. Nor does an
+    /// app a cast switched to the profile, whoever allowed it
+    /// ([`AppAccess::by_cast`]): the caster gave their PIN on their own
+    /// device, and whoever holds this one may be someone else.
+    pub fn role_holds(&self) -> bool {
+        self.account_admin && self.app.as_ref().is_none_or(|app| app.approved_by == self.id && !app.by_cast)
+    }
+
     /// Whether this request manages requests (approves and declines them,
     /// sees and deletes everyone's): an administrator's own sign-in, or one
-    /// of pley's own apps on an administrator's account allowed `approvals`
-    /// (no other app can be).
+    /// of pley's own apps on an administrator's account, allowed by them,
+    /// with `approvals` (no other app can be).
     pub fn manages_requests(&self) -> bool {
         match &self.app {
             None => self.is_admin,
-            Some(app) => self.account_admin && app.scopes.contains(Scope::Approvals) && self.first_party(),
+            Some(app) => self.role_holds() && app.scopes.contains(Scope::Approvals) && self.first_party(),
         }
+    }
+
+    /// Whether this request sees and stops everyone's playback, as the
+    /// dashboard does: an administrator's own sign-in (and a compatibility
+    /// token that sees everyone's, by its own rules), or one of pley's own
+    /// apps on an administrator's account, allowed by them, with `activity`
+    /// or `server` (no other app can be: it sees and stops only its
+    /// profile's own). Remote control and casting stay the user's own
+    /// whatever this says.
+    pub fn oversees_playback(&self) -> bool {
+        match &self.app {
+            None => self.is_admin,
+            Some(app) => {
+                self.role_holds()
+                    && (app.scopes.contains(Scope::Activity) || app.scopes.contains(Scope::Server))
+                    && self.first_party()
+            }
+        }
+    }
+
+    /// Whether this request manages the server: an administrator's own
+    /// sign-in, or one of pley's own apps on an administrator's account,
+    /// allowed by them, with `server` (no other app can be, and never a
+    /// compatibility token). The administrators' routes `server` opens
+    /// ([`AdminUser`], APP_ROUTES) answer such an app as an administrator;
+    /// elsewhere it stays a viewer, apart from what this opens by name.
+    pub fn administers(&self) -> bool {
+        if self.compatibility.is_some() {
+            return false;
+        }
+        match &self.app {
+            None => self.is_admin,
+            Some(app) => self.role_holds() && app.scopes.contains(Scope::Server) && self.first_party(),
+        }
+    }
+
+    /// Whether this request gets audiobook libraries: Pley's own sign-in
+    /// (the web app, the desktop app's window), whose pages show books.
+    /// Other apps would show a book as a film or an album, and the
+    /// compatibility APIs have no books to give their clients, so these get
+    /// neither the libraries nor their books in lists, hubs, search and
+    /// history ([`crate::access::library_ids`]).
+    pub fn audiobooks(&self) -> bool {
+        self.app.is_none() && self.compatibility.is_none()
     }
 
     /// Whether this request may use what `scope` allows: pley's own sign-in
@@ -149,7 +210,9 @@ impl UsedFrom {
     }
 }
 
-/// Extractor that additionally requires administrator rights.
+/// Extractor that additionally requires administrator rights: an
+/// administrator's own sign-in, or one of pley's own apps that manages the
+/// server ([`AuthUser::administers`]), which it holds as an administrator.
 #[derive(Debug, Clone)]
 pub struct AdminUser(pub AuthUser);
 
@@ -774,6 +837,7 @@ impl AuthService {
                 client_id: row.client_id.into(),
                 scopes: Scopes::from_stored(&row.scope),
                 approved_by: row.approved_by,
+                by_cast: row.by_cast,
             })),
             compatibility: None,
         };
@@ -787,7 +851,7 @@ impl AuthService {
             "SELECT u.id, u.username, u.is_admin AS role_admin, u.all_libraries, u.max_age, u.disabled,
                     a.disabled AS approver_disabled, {} AS user_without_two_step,
                     {} AS approver_without_two_step, t.expires_at AS token_expires, g.id AS grant_id, g.client_id,
-                    g.scope, g.approved_by, g.expires_at AS grant_expires, g.ends_at
+                    g.scope, g.approved_by, g.by_cast, g.expires_at AS grant_expires, g.ends_at
              FROM app_tokens t
              JOIN app_grants g ON g.id = t.grant_id
              JOIN users u ON u.id = g.user_id
@@ -1005,13 +1069,6 @@ impl AuthService {
         Ok(ended.is_some())
     }
 
-    /// Revokes every compatibility token of `user_id`.
-    pub async fn end_compatibility_tokens(&self, user_id: i64) -> Result<(), AppError> {
-        let ended = compatibility::delete_for(&self.db, user_id).await?;
-        self.forget_compatibility_tokens(&ended);
-        Ok(())
-    }
-
     /// Drop the cached compatibility tokens with these ids (ended).
     fn forget_compatibility_tokens(&self, ids: &[i64]) {
         self.epoch.fetch_add(1, Ordering::SeqCst);
@@ -1076,13 +1133,6 @@ impl AuthService {
         Ok(ended.is_some())
     }
 
-    /// Ends the apps acting as `user_id` or allowed by them; their grants.
-    pub async fn end_apps(&self, user_id: i64) -> Result<Vec<i64>, AppError> {
-        let ended = grants::delete_for(&self.db, user_id).await?;
-        self.forget_grants(&ended);
-        Ok(ended)
-    }
-
     /// Ends the grants of every app but `clients`; their ids.
     pub async fn end_grants_except_clients(&self, clients: &[&str]) -> Result<Vec<i64>, AppError> {
         let ended = grants::delete_except_clients(&self.db, clients).await?;
@@ -1094,16 +1144,30 @@ impl AuthService {
     /// is `keep_session_hash`, then every app acting as them or allowed by
     /// them, and every compatibility token of theirs.
     pub async fn sign_out_everywhere(&self, user_id: i64, keep_session_hash: Option<&str>) -> Result<(), AppError> {
-        sqlx::query("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?")
-            .bind(user_id)
-            .bind(keep_session_hash.unwrap_or_default())
-            .execute(&self.db.write)
-            .await?;
-        self.end_apps(user_id).await?;
-        self.end_compatibility_tokens(user_id).await?;
+        let mut tx = self.db.write.begin().await?;
+        sign_out_within(&mut tx, user_id, keep_session_hash).await?;
+        tx.commit().await?;
         self.forget_user(user_id);
         Ok(())
     }
+}
+
+/// [`AuthService::sign_out_everywhere`] within `conn`'s transaction: what it
+/// deletes. Whoever commits it then has the caches forget the user
+/// ([`AuthService::forget_user`]), which covers every grant and token gone.
+pub async fn sign_out_within(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: i64,
+    keep_session_hash: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?")
+        .bind(user_id)
+        .bind(keep_session_hash.unwrap_or_default())
+        .execute(&mut *conn)
+        .await?;
+    grants::delete_for_within(conn, user_id).await?;
+    compatibility::delete_for_within(conn, user_id).await?;
+    Ok(())
 }
 
 /// SQL that is true when the account of the `users` row `alias` signs in
@@ -1134,6 +1198,7 @@ struct AppRow {
     client_id: String,
     scope: String,
     approved_by: i64,
+    by_cast: bool,
     grant_expires: i64,
     ends_at: Option<i64>,
 }
@@ -1431,6 +1496,8 @@ fn app_may_use(parts: &Parts, app: &AppAccess) -> Result<(), AppError> {
         Some(Need::AnyApp) => Ok(()),
         Some(Need::Scope(scope)) if app.scopes.contains(scope) => Ok(()),
         Some(Need::Scope(scope)) => Err(AppError::InsufficientScope(Some(scope.name()))),
+        Some(Need::Either(one, other)) if app.scopes.contains(one) || app.scopes.contains(other) => Ok(()),
+        Some(Need::Either(one, _)) => Err(AppError::InsufficientScope(Some(one.name()))),
     }
 }
 
@@ -1439,10 +1506,12 @@ impl FromRequestParts<AppState> for AdminUser {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let user = AuthUser::from_request_parts(parts, state).await?;
-        if !user.is_admin {
+        if !user.administers() {
             return Err(AppError::forbidden("administrator rights required"));
         }
-        Ok(AdminUser(user))
+        // An app that manages the server got here through a route `server`
+        // opens (AuthUser checked it): it administers, here only.
+        Ok(AdminUser(AuthUser { is_admin: true, ..user }))
     }
 }
 
@@ -1680,6 +1749,7 @@ mod tests {
         let admin = auth.validate(&admin).await.unwrap();
         assert_eq!(admin.max_age, None, "administrators have no age limit");
         assert!(admin.is_admin && admin.account_admin && admin.manages_requests() && admin.first_party());
+        assert!(admin.oversees_playback() && !user.oversees_playback());
         assert!(auth.validate("not-a-token").await.is_none());
     }
 
@@ -1761,10 +1831,11 @@ mod tests {
     #[tokio::test]
     async fn app_tokens_act_without_administrator_rights() {
         let dir = crate::testing::tempdir();
-        let (_db, auth) = service_with_user(dir.path()).await;
+        let (db, auth) = service_with_user(dir.path()).await;
         let admin = app_of(&auth, 2, 2).await;
         let user = auth.validate_app(&admin.access_token).await.unwrap();
         assert!(!user.is_admin, "never an administrator through an app");
+        assert!(!user.oversees_playback(), "nor sees everyone's playback without activity");
         assert!(user.all_libraries, "an administrator's role sees every library");
         assert_eq!(user.max_age, None, "and has no age limit");
         let app = user.app.as_deref().unwrap();
@@ -1772,12 +1843,31 @@ mod tests {
         assert_eq!(app.scopes.to_string(), "library play");
         assert_eq!(&*app.client_id, "https://pley-media-server.github.io/pley/oauth/android.json");
 
+        assert!(user.role_holds(), "the administrator allowed it");
+        // The kid's app, switched to the administrator's profile since.
+        let switched = app_of(&auth, 2, 1).await;
+        let switched = auth.validate_app(&switched.access_token).await.unwrap();
+        assert!(switched.all_libraries && switched.max_age.is_none(), "it sees as the profile does");
+        assert!(!switched.role_holds(), "but has none of its role's rights over others");
+
         let kid = app_of(&auth, 1, 1).await;
         let kid = auth.validate_app(&kid.access_token).await.unwrap();
         assert_eq!((kid.id, kid.is_admin, kid.all_libraries, kid.max_age), (1, false, false, Some(12)));
         assert!(auth.validate_any(&admin.access_token).await.is_some_and(|u| u.app.is_some()));
         assert!(auth.validate_app(admin.refresh_token.as_ref().unwrap()).await.is_none(), "no refresh token");
         assert!(auth.validate_app("pley_at_unknown").await.is_none());
+
+        // The administrator's own app, which a cast put on their profile:
+        // whoever holds the device didn't give the PIN.
+        sqlx::query("UPDATE app_grants SET by_cast = 1 WHERE id = ?")
+            .bind(admin.grant_id)
+            .execute(&db.write)
+            .await
+            .unwrap();
+        auth.forget_grants(&[admin.grant_id]);
+        let cast = auth.validate_app(&admin.access_token).await.unwrap();
+        assert!(cast.all_libraries && cast.max_age.is_none(), "it sees as the profile does");
+        assert!(!cast.role_holds(), "but has none of its role's rights over others");
     }
 
     #[tokio::test]

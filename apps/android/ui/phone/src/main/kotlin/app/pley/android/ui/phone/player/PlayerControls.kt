@@ -15,11 +15,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -28,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -51,6 +52,7 @@ import app.pley.android.designsystem.PleyShape
 import app.pley.android.designsystem.icon.Icon
 import app.pley.android.designsystem.icon.PleyIcon
 import app.pley.android.designsystem.icon.PleyIcons
+import app.pley.android.model.PlaybackMethod
 import app.pley.android.ui.phone.R
 import app.pley.android.ui.phone.kit.PleyIconButton
 
@@ -60,6 +62,17 @@ private val BottomScrim = 150.dp
 
 /** How much higher subtitles go while the controls show: the seek bar and the row under it. */
 internal val ControlsLift = 120.dp
+
+/**
+ * What the player keeps its controls clear of: the camera cutout alone.
+ * The player hides the system bars for as long as it shows, and a swipe
+ * brings them back over the picture for a moment, so they take no room.
+ * Keeping clear of where they would be put the top row a status bar's
+ * height down the screen; keeping clear of them as they show would move
+ * every control when they go, a moment after the player's first frame.
+ */
+internal val WindowInsets.Companion.player: WindowInsets
+    @Composable get() = displayCutout
 
 /**
  * The scrim over the picture while the controls show, as streaming apps'
@@ -102,7 +115,7 @@ internal fun TopBar(state: PlayerScreenState, host: PlayerHost, modifier: Modifi
     Row(
         modifier
             .fillMaxWidth()
-            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .windowInsetsPadding(WindowInsets.player)
             .padding(start = 8.dp, end = 12.dp, top = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -127,7 +140,7 @@ internal fun TopBar(state: PlayerScreenState, host: PlayerHost, modifier: Modifi
             }
         }
         state.method?.let {
-            MethodBadge(it) { state.open(SheetPage.Details) }
+            MethodBadge(it, state.playbackMethod) { state.open(SheetPage.Details) }
             Spacer(Modifier.size(4.dp))
         }
         if (host.pipSupported) PleyIconButton(PleyIcons.PictureInPicture2, stringResource(R.string.player_pip), onClick = host::enterPip)
@@ -198,36 +211,52 @@ internal fun BottomBar(state: PlayerScreenState, picture: PictureState, screenAs
     Column(
         modifier
             .fillMaxWidth()
-            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .windowInsetsPadding(WindowInsets.player)
             .padding(start = 16.dp, end = 16.dp, bottom = 4.dp),
     ) {
         TimesAndSeekBar(state)
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            Row(
-                Modifier
-                    .horizontalScroll(rememberScrollState())
-                    .widthIn(min = maxWidth),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (state.subtitles.isNotEmpty()) {
-                    BarItem(PleyIcons.Captions, stringResource(R.string.player_subtitles)) { state.open(SheetPage.Subtitles) }
-                }
-                if (state.audio.size > 1) {
-                    BarItem(PleyIcons.AudioLines, stringResource(R.string.player_audio)) { state.open(SheetPage.Audio) }
-                }
-                if (state.qualities.isNotEmpty()) {
-                    BarItem(PleyIcons.Gauge, stringResource(R.string.player_quality)) { state.open(SheetPage.Quality) }
-                }
-                FitItem(state, picture, screenAspect)
-                if (state.chapters.size > 1) {
-                    BarItem(PleyIcons.ListOrdered, stringResource(R.string.player_chapters)) { state.open(SheetPage.Chapters) }
-                }
-                BarItem(PleyIcons.Lock, stringResource(R.string.player_lock), onClick = state::lock)
-                if (state.episode) {
-                    BarItem(PleyIcons.SkipForward, stringResource(R.string.player_next_episode)) {
-                        state.touched()
-                        state.controller.playNext()
+        BottomButtons(state, picture, screenAspect)
+    }
+}
+
+/**
+ * The bottom row's buttons, once the server has said how the item plays.
+ * What they offer arrives in steps as the player opens (the item's
+ * details, then the server's answer), and each step would move every
+ * button along the row. The row keeps its height meanwhile, so the seek
+ * bar above it stays where it is.
+ */
+@Composable
+private fun BottomButtons(state: PlayerScreenState, picture: PictureState, screenAspect: () -> Float) {
+    Box(Modifier.fillMaxWidth().heightIn(min = BarItemHeight)) {
+        AnimatedVisibility(state.answered, enter = fadeIn(PleyMotion.reveal()), exit = fadeOut(PleyMotion.reveal())) {
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                Row(
+                    Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .widthIn(min = maxWidth),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (state.subtitles.isNotEmpty()) {
+                        BarItem(PleyIcons.Captions, stringResource(R.string.player_subtitles)) { state.open(SheetPage.Subtitles) }
+                    }
+                    if (state.audio.size > 1) {
+                        BarItem(PleyIcons.AudioLines, stringResource(R.string.player_audio)) { state.open(SheetPage.Audio) }
+                    }
+                    if (state.qualities.isNotEmpty()) {
+                        BarItem(PleyIcons.Gauge, stringResource(R.string.player_quality)) { state.open(SheetPage.Quality) }
+                    }
+                    FitItem(state, picture, screenAspect)
+                    if (state.chapters.size > 1) {
+                        BarItem(PleyIcons.ListOrdered, stringResource(R.string.player_chapters)) { state.open(SheetPage.Chapters) }
+                    }
+                    BarItem(PleyIcons.Lock, stringResource(R.string.player_lock), onClick = state::lock)
+                    if (state.episode) {
+                        BarItem(PleyIcons.SkipForward, stringResource(R.string.player_next_episode)) {
+                            state.touched()
+                            state.controller.playNext()
+                        }
                     }
                 }
             }
@@ -256,7 +285,7 @@ private fun FitItem(state: PlayerScreenState, picture: PictureState, screenAspec
 internal fun BarItem(icon: PleyIcon, label: String, description: String? = null, onClick: () -> Unit) {
     Row(
         Modifier
-            .heightIn(min = 48.dp)
+            .heightIn(min = BarItemHeight)
             .clip(PleyShape.Pill)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -274,10 +303,18 @@ internal fun BarItem(icon: PleyIcon, label: String, description: String? = null,
     }
 }
 
+/** The bottom row's buttons' height, and the row's. */
+private val BarItemHeight = 48.dp
+
+/** The badge's colours for [method], the session's name for how it plays, or for [type] where the details know it. */
+@Composable
+@ReadOnlyComposable
+internal fun methodColors(type: PlaybackMethod?): BadgeColors = PlayerLook.badgeColors(type)
+
 /** "Direct play", "Direct stream" or "Transcoding" in its colour; it opens Playback details. */
 @Composable
-internal fun MethodBadge(method: String, onClick: () -> Unit) {
-    val colors = PlayerLook.badgeColors(method)
+internal fun MethodBadge(method: String, type: PlaybackMethod?, onClick: () -> Unit) {
+    val colors = methodColors(type)
     val description = stringResource(R.string.player_method_hint, method)
     Box(
         Modifier

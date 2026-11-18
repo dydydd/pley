@@ -34,6 +34,8 @@ sub init()
     m.problemText = m.top.findNode("problemText")
     m.problemButtons = m.top.findNode("problemButtons")
     m.poll = m.top.findNode("poll")
+    m.credit.text = t("requests.credit")
+    m.message.text = t("common.states.loading")
     ' The title as the server sent it (DiscoverDetail), and as the page
     ' shows it (reqTitlePage's).
     m.detail = invalid
@@ -95,7 +97,7 @@ sub onDetail(event as object)
         end if
         if uiFailed(answer) then return
         problem = reqProblem(answer, reqSummaryOf(m.top.requestSummary).manage)
-        if problem = invalid then problem = { title: "Couldn't load this title", text: answer.message, retry: answer.status <> 404, signIn: false }
+        if problem = invalid then problem = { title: t("requests.title.loadFailed"), text: answer.message, retry: answer.status <> 404, signIn: false }
         showProblem(problem)
         return
     end if
@@ -177,8 +179,9 @@ sub showDetail()
     hasButtons = m.shown.buttons.Count() > 0
     if hasButtons
         focused = m.buttons.buttonFocused
+        hadFocus = m.buttons.isInFocusChain()
         if FormatJson(m.buttons.buttons) <> FormatJson(m.shown.buttons) then m.buttons.buttons = m.shown.buttons
-        if focused > 0 and focused < m.shown.buttons.Count() then m.buttons.focusButton = focused
+        uiKeepButton(m.buttons, focused, hadFocus)
     else if m.buttons.isInFocusChain()
         m.top.setFocus(true)
     end if
@@ -347,7 +350,7 @@ sub confirmAsk()
     dialog = CreateObject("roSGNode", "StandardMessageDialog")
     dialog.title = confirm.title
     dialog.message = confirm.lines
-    dialog.buttons = ["Request", "Cancel"]
+    dialog.buttons = [t("requests.buttons.request"), t("common.actions.cancel")]
     dialog.observeField("buttonSelected", "onAskConfirmed")
     m.top.getScene().dialog = dialog
 end sub
@@ -369,7 +372,7 @@ sub onAsked(event as object)
     title = m.shown.title
     if not answer.ok
         if uiFailed(answer) then return
-        uiMessage("That didn't work", [reqAskProblem(answer, m.shown.allowance, m.shown.kind, CreateObject("roDateTime").AsSeconds())])
+        uiMessage(t("common.states.failed"), [reqAskProblem(answer, m.shown.allowance, m.shown.kind, CreateObject("roDateTime").AsSeconds())])
         ' Someone asked meanwhile, or it arrived, or the limits moved.
         if answer.status = 409 or answer.status = 429 then changedHere()
         return
@@ -411,7 +414,7 @@ end sub
 
 ' --- What stops the page ---
 
-' In place of the title, why it can't be shown: with Sign in again, Try
+' In place of the title, why it can't be shown: with Sign in, Try
 ' again, or nothing to do here.
 sub showProblem(problem as object)
     m.problemShown = problem
@@ -422,8 +425,8 @@ sub showProblem(problem as object)
     m.problemTitle.text = problem.title
     m.problemText.text = problem.text
     buttons = []
-    if problem.signIn then buttons.Push("Sign in again")
-    if problem.retry then buttons.Push("Try again")
+    if problem.signIn then buttons.Push(t("requests.buttons.signIn"))
+    if problem.retry then buttons.Push(t("common.actions.tryAgain"))
     m.problemButtons.buttons = buttons
     m.problemButtons.visible = buttons.Count() > 0
     m.problem.visible = true

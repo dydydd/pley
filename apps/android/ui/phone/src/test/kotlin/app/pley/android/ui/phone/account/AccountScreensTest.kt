@@ -1,26 +1,40 @@
 package app.pley.android.ui.phone.account
 
+import android.app.Application
+import android.content.ComponentName
+import android.content.Intent
+import android.content.IntentFilter
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onLast
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.hasScrollAction
+import androidx.test.core.app.ApplicationProvider
+import app.pley.android.common.perf.FrameRate
+import app.pley.android.data.AdminAccess
 import app.pley.android.data.TrackDefaultsUnsupported
 import app.pley.android.model.SubtitleMode
 import app.pley.android.network.ApiException
 import app.pley.android.player.NowPlaying
 import app.pley.android.screens.Navigator
 import app.pley.android.screens.PleyKey
+import app.pley.android.testing.data.FakeServerAdmin
+import app.pley.android.ui.phone.admin.ManageServerScreen
+import app.pley.android.ui.phone.diagnostics.DIAGNOSTICS_FRAME_RATE
+import app.pley.android.ui.phone.diagnostics.DiagnosticsScreen
 import app.pley.android.ui.phone.kit.LocalOffline
 import app.pley.android.ui.phone.music.AlbumScreen
 import app.pley.android.ui.phone.shell.LocalPhoneNavigator
@@ -30,19 +44,23 @@ import app.pley.android.ui.phone.shell.PhoneShellState
 import app.pley.android.ui.phone.shell.rememberPhoneNavigation
 import app.pley.android.ui.phone.theme.PhoneTheme
 import org.junit.Assert.assertEquals
+import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
  * The phone's Me, history, album page and mini player over a graph of
  * fakes: track defaults saved and shown read-only when the server refuses,
  * history paging and removal, playing an album from a row, the mini
- * player's controls.
+ * player's controls, Diagnostics' frame-rate switch, and Manage server
+ * for a phone that must sign in again to manage the server, with a browser
+ * for it or without one.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(qualifiers = "w412dp-h915dp-xxhdpi", application = AccountTestApplication::class)
@@ -67,6 +85,11 @@ class AccountScreensTest {
     @Before
     fun graph() {
         AccountTestApplication.graph = graph
+    }
+
+    @After
+    fun frameRateOff() {
+        FrameRate.show(ApplicationProvider.getApplicationContext(), false)
     }
 
     private fun show(content: @Composable () -> Unit) {
@@ -149,6 +172,71 @@ class AccountScreensTest {
         compose.onNodeWithText("Diagnostics").performClick()
         compose.onNodeWithText("Settings").performClick()
         assertEquals(listOf(PleyKey.History, PleyKey.Diagnostics, PleyKey.Settings), opened)
+    }
+
+    @Test
+    fun manageServerOpensItsPageWhenItNeedsANewSignIn() {
+        // The page says why and what to tick, with its button: the row doesn't sign in on its own.
+        graph.admin = FakeServerAdmin(AdminAccess.SignInAgain)
+        show { MeScreen() }
+        waitFor("Anna")
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("Manage server"))
+        compose.onNodeWithText("Sign in again to manage it from this phone").assertExists()
+        compose.onNodeWithText("Manage server").performClick()
+        assertEquals(listOf(PleyKey.ManageServer), opened)
+    }
+
+    @Test
+    fun manageServerSaysWhatToTickBeforeSigningInAgain() {
+        installBrowser()
+        graph.admin = FakeServerAdmin(AdminAccess.SignInAgain)
+        show { ManageServerScreen() }
+        waitFor("Sign in again to manage the server")
+        compose.onNodeWithText("Sign in again in the browser, not with a code, and tick Manage the server.", substring = true).assertExists()
+        compose.onNode(hasText("Sign in again") and hasClickAction()).assertExists()
+        compose.onNodeWithText("Dashboard").assertDoesNotExist()
+    }
+
+    @Test
+    fun manageServerSaysABrowserIsNeededOnAPhoneWithoutOne() {
+        // Signing in there takes a code, which never allows managing the server: no sign-in that can't give it.
+        graph.admin = FakeServerAdmin(AdminAccess.SignInAgain)
+        show { ManageServerScreen() }
+        waitFor("Managing the server needs a browser")
+        compose.onNodeWithText("Only a sign-in through a browser on this phone can let it manage the server", substring = true).assertExists()
+        compose.onNode(hasText("Sign in again") and hasClickAction()).assertDoesNotExist()
+        compose.onNodeWithText("Sign in again to manage the server").assertDoesNotExist()
+    }
+
+    /** A browser, for the server's sign-in page to open in. */
+    private fun installBrowser() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val activity = ComponentName("com.example.browser", "com.example.browser.Main")
+        shadowOf(app.packageManager).run {
+            addActivityIfNotPresent(activity)
+            addIntentFilterForActivity(
+                activity,
+                IntentFilter(Intent.ACTION_VIEW).apply {
+                    addCategory(Intent.CATEGORY_DEFAULT)
+                    addCategory(Intent.CATEGORY_BROWSABLE)
+                    addDataScheme("http")
+                    addDataScheme("https")
+                },
+            )
+        }
+    }
+
+    @Test
+    fun diagnosticsSwitchesTheFrameRateOnAndOff() {
+        show { DiagnosticsScreen() }
+        compose.onNodeWithTag(DIAGNOSTICS_FRAME_RATE).assertIsOff()
+        compose.onNodeWithText("Show frame rate").assertExists()
+        compose.onNodeWithTag(DIAGNOSTICS_FRAME_RATE).performClick()
+        compose.waitUntil(5_000) { FrameRate.on.value }
+        compose.onNodeWithTag(DIAGNOSTICS_FRAME_RATE).assertIsOn()
+        compose.onNodeWithTag(DIAGNOSTICS_FRAME_RATE).performClick()
+        compose.waitUntil(5_000) { !FrameRate.on.value }
+        compose.onNodeWithTag(DIAGNOSTICS_FRAME_RATE).assertIsOff()
     }
 
     @Test

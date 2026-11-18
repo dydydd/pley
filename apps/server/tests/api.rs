@@ -319,6 +319,40 @@ async fn movies_are_scanned_listed_and_searchable() {
 }
 
 #[tokio::test]
+async fn search_reads_slips_years_and_words_written_together() {
+    let app = TestApp::new().await;
+    let token = app.setup_admin().await;
+    for name in [
+        "The Matrix (1999)",
+        "Night-Watch (2002)",
+        "The Captain's Log (1993)",
+        "D'Artagnan (2001)",
+        "Harbor (1984)",
+        "Harbor (2021)",
+    ] {
+        app.media_file(&format!("movies/{name}/{name}.mkv"), 1024);
+    }
+    app.library(&token, "Movies", "movies", "movies").await;
+    let search = |q: &'static str| {
+        let app = &app;
+        let token = &token;
+        async move { titles(&app.get(&format!("/api/search?q={}", q.replace(' ', "%20")), token).await.body["items"]) }
+    };
+
+    assert_eq!(search("the matirx").await, ["The Matrix"], "a slip");
+    assert_eq!(search("nightwatch").await, ["Night-Watch"], "words written together");
+    assert_eq!(search("the captains log").await, ["The Captain's Log"], "an apostrophe left out");
+    assert_eq!(search("nighhtt watch").await, ["Night-Watch"], "too many slips for words: alike");
+    assert_eq!(search("matrix 1999").await, ["The Matrix"], "a year");
+    let harbor = app.get("/api/search?q=harbor%202021", &token).await.body;
+    assert_eq!(harbor["items"].as_array().unwrap().len(), 1, "that year's: {harbor}");
+    assert_eq!(harbor["items"][0]["year"], json!(2021));
+    assert_eq!(search("harbor").await.len(), 2);
+    assert_eq!(search("d'art").await, ["D'Artagnan"], "an apostrophe typed: words as the index has them");
+    assert!(search("qzxv").await.is_empty());
+}
+
+#[tokio::test]
 async fn shows_progress_and_hubs() {
     let app = TestApp::new().await;
     let token = app.setup_admin().await;
@@ -500,6 +534,7 @@ async fn direct_play_supports_ranges_and_transcode_needs_the_transcoder() {
 
     let activity = app.get("/api/activity", &token).await;
     assert_eq!(activity.body["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(activity.body["sessions"][0]["player"], json!("pley"));
     let session = play.body["session_id"].as_str().unwrap();
     let stop = app.call(Method::DELETE, &format!("/api/playback/{session}"), Some(&token), None, &[]).await;
     assert_eq!(stop.status, StatusCode::NO_CONTENT);
@@ -568,6 +603,8 @@ async fn settings_validation_and_folder_browser() {
 
     let roots = app.post("/api/fs", &token, json!({})).await;
     assert!(!roots.body["entries"].as_array().unwrap().is_empty());
+    // Whether the tests run in a container depends on the machine.
+    assert!(roots.body["container"].is_boolean() && roots.body["mounts"].is_array());
     std::fs::create_dir_all(app.media.path().join("Alpha")).unwrap();
     std::fs::create_dir_all(app.media.path().join("beta")).unwrap();
     std::fs::write(app.media.path().join("file.txt"), b"x").unwrap();
@@ -641,7 +678,7 @@ async fn subtitle_choice_carries_over_to_the_next_episode() {
 }
 
 async fn set_rating(app: &TestApp, title: &str, rating: Option<&str>) {
-    let age = rating.and_then(pley::ratings::rating_age);
+    let age = rating.and_then(|r| pley::ratings::age(Some("US"), pley::ratings::Kind::Film, r));
     sqlx::query("UPDATE items SET content_rating = ?, rating_age = ? WHERE title = ?")
         .bind(rating)
         .bind(age)

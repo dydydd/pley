@@ -6,7 +6,7 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { addEntries, entryOf, findSection, notes, plainText, release, sections } from "./changelog.mjs";
-import { RELEASE_TAG, lowered, parseArgs, pending, plan, status } from "./release.mjs";
+import { RELEASE_TAG, latestReleases, lowered, parseArgs, pending, plan, readmeWith, status } from "./release.mjs";
 import {
   ROOT,
   UNITS,
@@ -127,6 +127,7 @@ describe("versions", () => {
     expect(limitProblem("android", "0.100.0")).toMatch(/below 100/);
     expect(limitProblem("android", "0.99.99")).toBeNull();
     expect(limitProblem("samsung", "256.0.0")).toMatch(/Tizen/);
+    expect(limitProblem("samsung-native", "0.256.0")).toMatch(/Tizen/);
     expect(limitProblem("kodi", "300.0.0")).toBeNull();
   });
 
@@ -147,6 +148,18 @@ describe("versions", () => {
     for (const u of UNIT_NAMES.filter((x) => x !== "samsung")) expect(versionOf(u, dir)).toBe(before[u]);
     // Its changelog has no 0.3.0 section yet.
     expect(problems("samsung", dir)).toEqual([`${UNITS.samsung.changelog} has no section for 0.3.0`]);
+  });
+
+  test("the native Samsung app's version is its build's and its manifest's, not Tizen's api-version", () => {
+    const { dir } = fixture();
+    const manifest = "apps/tizen-native/src/Pley.Tv.Tizen/tizen-manifest.xml";
+    const changes = planSet("samsung-native", "0.2.0", dir);
+    expect(changes.map((c) => c.path).sort()).toEqual(["apps/tizen-native/Directory.Build.props", manifest]);
+    write(changes, dir);
+    expect(readFileSync(join(dir, "apps/tizen-native/Directory.Build.props"), "utf8")).toContain("<Version>0.2.0</Version>");
+    const text = readFileSync(join(dir, manifest), "utf8");
+    expect(text).toContain('version="0.2.0" api-version="9.0"');
+    expect(text).toContain('<?xml version="1.0"');
   });
 
   test("the server's version reaches the transcoder, its API crate and the web app", () => {
@@ -305,18 +318,24 @@ describe("releases", () => {
     addEntry(dir, "kodi", "Kodi's fix");
     bumped(f, "kodi", "patch");
     const one = pending(dir);
-    expect(one).toMatchObject({ tag: "release-2026-11-01", title: "Pley for Kodi 0.0.2", problems: [] });
+    // A release is named after its day and what it holds; the notes of its only unit are open under the unit's name.
+    expect(one).toMatchObject({ tag: "release-2026-11-01", title: "Pley 2026-11-01: Kodi", problems: [] });
     expect(one.units.map((u) => [u.unit, u.from, u.to, u.later])).toEqual([["kodi", "0.0.1", "0.0.2", []]]);
-    expect(one.notes).toBe("### Fixed\n\n- Kodi's fix");
+    expect(one.notes).toBe("<details open>\n<summary><strong>Pley for Kodi 0.0.2</strong></summary>\n\n### Fixed\n\n- Kodi's fix\n\n</details>");
 
     // Another unit joins the release, with its own version.
     addEntry(dir, "roku", "Roku's fix");
     expect(bumped(f, "roku", "minor").tag).toBe("release-2026-11-01");
     const two = pending(dir);
-    expect(two).toMatchObject({ tag: "release-2026-11-01", title: "Pley 2026-11-01", problems: [] });
+    expect(two).toMatchObject({ tag: "release-2026-11-01", title: "Pley 2026-11-01: Kodi, Roku", problems: [] });
     expect(two.units.map((u) => `${u.unit} ${u.to}`)).toEqual(["kodi 0.0.2", "roku 0.1.0"]);
-    expect(two.notes).toBe("## Pley for Kodi 0.0.2\n\n### Fixed\n\n- Kodi's fix\n\n## Pley for Roku 0.1.0\n\n### Fixed\n\n- Roku's fix");
+    expect(two.notes).toBe(
+      "<details>\n<summary><strong>Pley for Kodi 0.0.2</strong></summary>\n\n### Fixed\n\n- Kodi's fix\n\n</details>\n\n" +
+        "<details>\n<summary><strong>Pley for Roku 0.1.0</strong></summary>\n\n### Fixed\n\n- Roku's fix\n\n</details>",
+    );
     expect(status(dir).filter((u) => u.waits).map((u) => u.unit)).toEqual(["kodi", "roku"]);
+    // The names are short ones: the native Samsung app, the one released, is plain "Samsung".
+    expect(Object.values(UNITS).map((u) => u.short)).toEqual(["Media Server", "Desktop", "Android", "Samsung (web)", "Samsung", "LG", "Kodi", "Roku"]);
 
     // A unit waiting for its release isn't bumped again.
     addEntry(dir, "kodi");
@@ -331,6 +350,49 @@ describe("releases", () => {
     expect(RELEASE_TAG.test("release-2026-11-01.2")).toBe(true);
     expect(RELEASE_TAG.test("kodi-v0.0.2")).toBe(false);
   }, SLOW);
+
+  test("put each unit's latest among the README's pills as it is bumped", () => {
+    const f = fixture();
+    const { dir, git } = f;
+    git("tag", "release-2026-10-31");
+    // A README without the marks is left alone.
+    addEntry(dir, "kodi");
+    expect(plan({ unit: "kodi", how: "patch", date: "2026-11-01", root: dir }).changes.map((c) => c.path)).not.toContain("README.md");
+    f.change("README.md", "# Pley\n\n<!-- latest releases: written by scripts/release.mjs -->\nold\n<!-- /latest releases -->\n\nMore.\n", "docs: a README");
+
+    const kodi = bumped(f, "kodi", "patch");
+    expect(kodi.changes.at(-1)).toMatchObject({ path: "README.md", what: "Kodi 0.0.2 among the latest releases" });
+    const releases = "https://github.com/pley-media-server/pley/releases/tag";
+    const kodiPill = `<a href="${releases}/release-2026-11-01"><img src="https://img.shields.io/badge/Kodi-0.0.2-0284C7" alt="Kodi 0.0.2"></a>`;
+    // The units with no release of their own yet have no pill.
+    expect(latestReleases(dir)).toBe(kodiPill);
+    expect(readFileSync(join(dir, "README.md"), "utf8")).toBe(
+      `# Pley\n\n<!-- latest releases: written by scripts/release.mjs -->\n${kodiPill}\n<!-- /latest releases -->\n\nMore.\n`,
+    );
+
+    // Another unit takes its place in the units' order, and a later release its pill.
+    addEntry(dir, "server");
+    bumped(f, "server", "minor");
+    git("tag", "release-2026-11-01");
+    addEntry(dir, "kodi");
+    bumped(f, "kodi", "patch", "2026-11-02");
+    expect(latestReleases(dir)).toBe(
+      `<a href="${releases}/release-2026-11-01"><img src="https://img.shields.io/badge/Media%20Server-0.1.0-0284C7" alt="Media Server 0.1.0"></a>\n` +
+        `<a href="${releases}/release-2026-11-02"><img src="https://img.shields.io/badge/Kodi-0.0.3-0284C7" alt="Kodi 0.0.3"></a>`,
+    );
+    const readme = readmeWith(dir);
+    expect(readme.after).toBe(readme.before);
+
+    // A README that falls behind fails the check.
+    writeFileSync(join(dir, "README.md"), readme.before.replace("0.0.3", "0.0.2"));
+    expect(readmeWith(dir).after).not.toBe(readmeWith(dir).before);
+  }, SLOW);
+
+  test("the repository's README has each unit's latest release", () => {
+    const readme = readmeWith(ROOT);
+    expect(readme).not.toBeNull();
+    expect(readme.after).toBe(readme.before);
+  });
 
   test("tell what would ship without being in the notes", () => {
     const f = fixture();
@@ -398,6 +460,8 @@ describe("releases", () => {
     }
     expect(workflow).toContain("fetch-depth: 0");
     expect(workflow).toContain("\n      - run: bun scripts/release.mjs check\n");
+    // And the README's pills of them, whoever edits it.
+    expect(workflow.split("\n      - README.md\n").length - 1).toBe(2);
   });
 
   test("count only release-<date> tags as releases", () => {

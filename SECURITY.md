@@ -32,8 +32,8 @@ protect your server.
   compatibility APIs take only tokens made for other apps. Make one per app
   or tool in **Account → Tokens for other apps**, allow only what it needs,
   limit it to the addresses the tool runs at, and revoke what isn't used.
-  Turn an API off (`plex_bind = "off"`; the Jellyfin-compatible one is off
-  by default) if nothing needs it.
+  Turn an API off (`plex_bind = "off"`, `jellyfin_bind = "off"`, or
+  **Settings → Network**) if nothing needs it.
 - **Mount media read-only**, run Pley as an unprivileged user, and don't let
   untrusted people write to library folders. The Docker setup does the first
   two and more: a read-only image, no capabilities, the port on 127.0.0.1
@@ -152,8 +152,46 @@ protect your server.
   stops working at once, even one being checked at that moment. Its event
   streams end within 30 seconds, when they check it again.
 - Switching from a restricted profile to one that can see more (an
-  administrator, a higher age limit, other libraries) takes that profile's
-  PIN, or its password (and code).
+  administrator, a higher age limit, other libraries, fewer labels it
+  never sees or more it always sees) takes that profile's PIN, or its
+  password (and code).
+- A profile's limits (libraries, age limit, label rules) are kept by the
+  server in every listing, search, stream and compatibility API, and
+  Discover; a hidden title answers as if it didn't exist. Only
+  administrators see a title's labels and a profile's rules, so a child
+  doesn't read what a label says. The limits decide what Pley shows, not
+  what's on the disk: anyone who can read the media folders sees it all.
+- A remote casting to a device of another of the household's profiles
+  switches that device to its own profile, signed in as it already, by a
+  switch's rules from the device's profile: a freer profile (an
+  administrator, a higher age limit, other libraries, freer label rules)
+  takes its PIN and,
+  without one, can't cast there, so a child's device never becomes an
+  administrator's without that PIN. An administrator's profile is cast
+  only to Pley's apps, whose tokens never carry administrator rights and
+  which a cast leaves without those an administrator allowed them
+  ([Apps signing in](#apps-signing-in)),
+  never to a browser's or the desktop app's sign-in, which would stay one
+  with those rights, and such a sign-in never switches to an
+  administrator with a ticket. When the profile has a PIN, the remote
+  gives it first, checked and throttled as a switch's, and the rules are
+  checked again as the device switches. Only devices whose app switches
+  (Pley's own, allowed to switch profiles) are offered across profiles,
+  so an older app never plays someone else's cast as its own profile. The
+  device switches with a ticket the cast carries: random, stored hashed,
+  good once for 60 seconds for that device, from the profile it is on to
+  the caster's. A copy shown by anything else spends it. Such a cast goes
+  to the device the remote listed or to none, and reaches that device's
+  stream alone, not the profile's other devices. A receiver is its
+  device's: another sign-in of the profile that names a TV's receiver id
+  is listed beside the TV, never in its place, whether the TV is there or
+  comes back later, and never gets what is cast to the TV. A progress
+  report of another profile's session is kept for neither profile. Another
+  profile's devices are listed by name and profile, never with what they
+  play, and only to home members of the same household, from a person's
+  own sign-in or Pley's own apps allowed to switch profiles (another app
+  could take a TV over as its profile), nor are anyone's devices outside
+  it, or a disabled profile's, listed or cast to from it.
 
 ### Apps signing in
 
@@ -167,12 +205,74 @@ Apps sign in on Pley's own page with OAuth 2.1.
   one used twice ends the app's access.
 - People are asked every time, Pley's own apps included, on a page that
   shows the app's address first and can't be framed.
-- Apps never get administrator rights. Every route they may use is listed
-  with the scope it needs, anything else is refused, and the compatibility
-  APIs refuse their tokens.
+- Apps never get administrator rights but three, which only Pley's own
+  apps get, on an administrator's account and when the administrator
+  allows them: approving requests (`approvals`), seeing and stopping
+  everyone's streams (`activity`, which only Pley for Home Assistant asks
+  for), and managing the server's libraries, accounts and invitations, with
+  its dashboard (`server`, which Android's phones ask for). Whatever holds
+  such a token can do as much, so whoever controls a Home Assistant an
+  administrator signed in can see what everyone plays and stop it, and
+  whoever holds an administrator's phone signed in with `server` can change
+  who may sign in and what they see. No app reads or changes what holds the
+  server's keys and passwords: its settings, network and transcoder, Radarr
+  and Sonarr, backups and Live TV's sources stay with the web app, as does
+  Live TV's lineup, and no answer an app can reach carries a key, a
+  password or a provider's address (tests/app_tokens.rs checks every one).
+  Such a token can't change the account's own name, password, PIN or
+  two-step sign-in, nor see or sign out its devices and apps, nor take the
+  account's own role, which whoever holds a lost phone could otherwise take
+  from its owner. Nor can it make an administrator, or change anything of
+  another administrator's account: their role, password, PIN, two-step
+  sign-in, name, libraries and limits, whether it is disabled, their
+  devices and apps, or the account itself; it only reads such an account,
+  its devices and apps. Making an administrator, or a PIN set on one whose
+  role was taken and then given back, would take whoever holds the token
+  into the web app as an administrator; the rest would let them lock the
+  other administrators out. The role is checked again in the transaction
+  that writes the change, so an account made an administrator meanwhile is
+  left as it is. Such a token does set passwords and PINs on accounts that
+  aren't administrators', and makes accounts, so whoever holds it may know
+  them: making one of those accounts an administrator in the web app would
+  let that person in as one. Before you do, give the account a new
+  password, which signs it out everywhere, and remove or change its PIN.
+  On the consent page, `server` is a box the administrator ticks,
+  unticked to begin with: the app works without it. `approvals` is listed
+  with the rest of what the app needs, allowed with it or not at all, as
+  Pley's apps without it ask to sign in again on their requests screens.
+  An account that isn't an administrator's is never asked for either and
+  never gives them, whatever the page sends, so no grant of such an
+  account holds `approvals` or `server` to wake without anyone being asked
+  when the account becomes one. `activity` does stay on its grants, for the
+  profile's own streams, and once the account is an administrator it
+  covers everyone's in an app the account allowed, as for any
+  administrator: Pley for Home Assistant, signed in by someone made an
+  administrator later, then sees and stops what everyone plays. No grant
+  gains a scope later, by a refresh or a profile switch. `server` is never
+  allowed with a TV's code, which anyone in front of a screen could pass
+  to an administrator. Each of the three rights is checked against the
+  account at every request, so a role taken away takes them at once (and
+  gives them back with the role: to end them for good, sign the account's
+  apps out), and holds only for an app that administrator allowed, on a
+  profile picked at the device. An app someone else allowed never has them
+  on an administrator's profile. Nor does a phone or TV
+  that a cast switched to one, whoever signed it in: the caster gave
+  their PIN on their own device, so it plays as them with none of the
+  three until their profile is picked on it with that PIN, or they sign in
+  to it again. Other apps, and apps on other accounts, see and stop only
+  their profile's own streams. Every route apps may use is listed with the
+  scope it needs, anything else is refused, and the compatibility APIs
+  refuse their tokens.
+- Android's app is answered at a private-use address
+  (`app.pley.android:/oauth/callback`), as RFC 8252 allows. Another app on
+  the phone that claims that scheme can start a sign-in as Pley for Android
+  and get its token, `server` included, if the person ticks it; PKCE
+  doesn't stop that, only the consent page does, so allow a sign-in only
+  when you started it.
 - Apps, and people who aren't administrators, don't see library folders or
   file paths on either API (only a file's name), the transcoder's error
-  messages included.
+  messages included, except Pley's own apps allowed `server` on an
+  administrator's account, which change those folders.
 - Pley's own apps are built in and sign in without internet access.
 - Descriptions of other publishers' apps are read only when an administrator
   allows those apps, for someone signed in, from public addresses only,
@@ -232,10 +332,13 @@ other apps (`pley_ct_…`), never with a session's
   are) and `manage` (refreshes, edits, collections, stopping anyone's
   playback) only for an administrator, checked at every request, so a role
   taken away takes them at once. Each is checked by name where it applies:
-  no token is ever an administrator. No scope administers accounts, sign-in
-  or the server's settings, and the Jellyfin-compatible API takes every token
-  for what `play` allows: it lists no one but the caller, and a user id in
-  a path must be its own.
+  no such token is ever an administrator. No scope administers accounts,
+  sign-in or the server's settings, and the Jellyfin-compatible API takes
+  every token for what `play` allows, and one with `manage` for collections and editing
+  metadata: it lists no one but the caller, a user id in a path must be its
+  own, and a playlist is its owner's alone. A picture it is sent to fetch
+  must be on one of the hosts Pley takes pictures from, as on the
+  Plex-compatible API.
 - A token may be limited to addresses and networks (or the home network).
   From elsewhere it is refused as if it didn't exist; the address is the
   connection's, or the one a proxy on this computer or its network names
@@ -246,9 +349,10 @@ other apps (`pley_ct_…`), never with a session's
   or token) or paths it alone has reach it; `/api/…` never does. Answers
   are never pages (a sandboxing `Content-Security-Policy`, `nosniff`, no
   framing), and vary with the headers that decide for caches.
-- Players open streams, subtitles and pictures without a token. A
-  stream's HLS session is reached by its 128-bit id, and a Jellyfin media
-  source by an id keyed with the server's `secret.key` (an HMAC): either
+- Players open streams, subtitles, seek previews and pictures without a
+  token. A stream's HLS session is reached by its 128-bit id, and a
+  Jellyfin media source by an id keyed with the server's `secret.key` (an
+  HMAC): either
   stands for the token that started or listed it, and works only while that
   token does, from where it may be used, for what its user may see. A
   Jellyfin picture answers for an id someone was given, and with a token
@@ -286,6 +390,10 @@ other apps (`pley_ct_…`), never with a session's
 - No other site may frame Pley (`frame-ancestors 'none'`,
   `X-Frame-Options: DENY`). Answers carry `nosniff` and
   `Referrer-Policy: same-origin`.
+- CORS opens the API to Pley's packaged TV apps' origins alone. Keyed
+  media addresses answer it to any origin, for players such as a Cast
+  receiver's page: they take no cookie or token, so another site's page
+  reads nothing a key it was given doesn't already open.
 - Clients get 30 seconds to send a request's headers, and a body may pause
   for 20 seconds at most.
 - At most 8,192 connections are open at once, and 256 from one address on
@@ -323,6 +431,58 @@ other apps (`pley_ct_…`), never with a session's
   unicast, so a device on the network can't make it flood another; reads
   what it hears within bounds; and keeps none of it, so no device can
   make it hold more.
+- Pley looks for Google Cast and AirPlay devices (`_googlecast._tcp`,
+  `_airplay._tcp`) only while an administrator has casting to them on
+  (Settings → Network, off by default; turned off, it doesn't look, and
+  forgets the devices it found); only when a home member's remote lists
+  devices, or casts to or pairs with a device Pley doesn't keep, at most
+  every 30 seconds, by one mDNS query from a port of its own; only while its web
+  port listens beyond this computer, where a device can fetch a cast;
+  and only while discovery is on: turned off in Settings → Network (or
+  with `--no-discovery`), it doesn't look, and forgets the devices it
+  found, which can't be cast to. Only answers from private and link-local
+  addresses count, read within bounds: 64 devices a look, names cut to 100
+  characters, ids of letters and digits (an AirPlay device's, its 12-digit
+  hex MAC address). Pley connects to a device only as one of these
+  answered, never to an address a request names.
+- Pley talks to a Cast device over TLS without checking its certificate,
+  which the device made itself and no authority signed, as Google's own
+  senders do on a home network. It reads what comes back within bounds
+  (64 KiB a message, JSON objects alone) and ends a connection that goes
+  silent, or stops reading, for 20 seconds. The device gets the cast's
+  keyed addresses, which open that session's media alone, and nothing else
+  of Pley's; a cast plays as a session of the home member who sent it, by
+  their profile's rules, and only home members see and cast to these
+  devices, from the web app or Pley's own apps: another app gets none of
+  them, as it gets none of the household's TVs.
+- Pley pairs with an AirPlay device as HomeKit does: the device shows a
+  PIN, a home member types it, and SRP proves it without sending it; then
+  the two swap Ed25519 public keys, and each connection proves both hold
+  their keys (X25519, HKDF-SHA512) and is sealed with ChaCha20-Poly1305,
+  its frames counted. Pley's key pair is derived from `secret.key`, so the
+  database keeps only each device's id and public key (and its name, and
+  who paired it). A pairing is the server's, for every home member's
+  casts; administrators list and forget pairings. Wrong PINs are counted
+  as a profile PIN's are (5 in 15 minutes), a device is asked to show a
+  PIN once every 3 seconds at most, and a wait the device asks for is
+  kept. A device open to everyone on its network pairs for each connection
+  with its fixed PIN, and nothing is kept. What the device sends is read
+  within bounds: 16 KiB a pairing message, 1 MiB a message, frames of
+  1 KiB. Its session has Pley connect to the event port it names, at its
+  own address, and answer its clock on a UDP port of Pley's, which answers
+  that address alone and closes with the session.
+- Before its first cast to a Cast device, Pley asks the device's own setup
+  API (`http://<its address>:8008/setup/eureka_info`, an address one of
+  the answers above named) which hardware it is, waiting a second at most
+  and reading 64 KiB at most, without proxies or redirects. It keeps the
+  model, the hardware's name and two flags, in memory, and neither keeps
+  nor logs the rest (the device's keys and addresses). A device that lies
+  about its model gets a stream it may not play, and then the basic one.
+- A receiver keeps the address its event stream came from, in memory while
+  the stream lasts, so that a Cast device at the same address is listed
+  once, as the Pley app. Someone on the local network can make an app
+  claim any address, and so hide a Cast device from the lists that app is
+  in; it can't cast to the device or reach it that way.
 - Discovery is on and Bonjour off until Settings → Network changes them.
   `--no-bonjour` (`PLEY_NO_BONJOUR`) keeps Bonjour off, and
   `--no-discovery` (`PLEY_NO_DISCOVERY`) both; the Docker setup has them
@@ -331,7 +491,8 @@ other apps (`pley_ct_…`), never with a session's
 ### Files
 
 - A symbolic link in a library is followed only to a file of the same kind
-  (a video to a video, a picture to a picture). This is checked when the
+  (a video to a video, a picture to a picture, an NFO file to an NFO
+  file). This is checked when the
   library is scanned and again whenever the file is used: played,
   transcoded, downloaded, or its pictures or subtitles served. A symbolic
   link named like a film can't hand out other files.
@@ -362,6 +523,48 @@ other apps (`pley_ct_…`), never with a session's
   privileges, never impersonation, restricted or not
   ([deploy/windows/README.md](deploy/windows/README.md#security)).
 
+### .strm files
+
+A `.strm` file names an address, and whoever can write in a library folder
+can write one ([CONFIGURATION.md](docs/CONFIGURATION.md#strm-files)).
+
+- Only `http` and `https` addresses are read: never a path, `file:` or
+  another protocol, so a `.strm` file can't hand out a file of the server's
+  computer. The file is read up to 64 KiB, and a link to it is followed
+  only to another `.strm` file.
+- The address never leaves the server. Apps and both compatibility APIs
+  get the file's name, never what it names; players read the media through
+  Pley; the transcoder and FFmpeg are given an address of Pley's own
+  (`/api/strm/{key}/…`), so no password or token in an address reaches a
+  command line. The log names the `.strm` file, never the address.
+- Pley's own address for a file's media carries a key derived from the
+  server's `secret.key`, and answers the transcoder only: a request from
+  this computer (or the host of a transcoder run elsewhere), and not one
+  that came through a proxy. A key read in a log opens nothing from
+  anywhere else.
+- An address on the internet can't lead to one of the server's network or
+  computer: not by a redirect, and not by a name that resolves to a private
+  address later (the resolver gives its public addresses only, to the
+  connection itself). An address the file names on the network directly is
+  asked: that is where a NAS or a download service is. A name given for
+  one is held to the network from then on, so it can't turn into a host on
+  the internet that redirects back in. So someone who can
+  write in a library folder can have Pley ask an address of the network
+  for video or audio, as a link in a library can lead to a video anywhere
+  on the disk. With a proxy configured for Pley (`HTTPS_PROXY`), the proxy
+  resolves names, and only redirects to addresses written as numbers are
+  refused.
+- What an address gives is handed to a player only once FFprobe read it as
+  video or audio at the address the file names now, reached as it is
+  reached now: it is read again after the file changes or the server
+  starts, so neither a file rewritten since nor a name that resolves
+  elsewhere since hands out anything unread. It is sent as that format's
+  `Content-Type` whatever the address calls it, and never as a page
+  (`X-Content-Type-Options: nosniff`).
+- Nothing asks an address until someone opens or plays its item: a scan
+  reads the files only. An address that fails isn't asked again for 20
+  seconds by a playback, or for 10 minutes by a page opening.
+
 ### Untrusted media
 
 - What FFmpeg hands back for one picture or subtitle track is capped at
@@ -374,6 +577,15 @@ other apps (`pley_ct_…`), never with a session's
   streams do, up to 1 MB for a logo and 4 MB for a picture, and are kept
   only when they are JPEG, PNG, WebP or GIF.
 - A profile picture is decoded only up to 4096 pixels.
+- NFO files are read up to 1 MiB, as XML with no DTD and none but XML's
+  own entities. What they say is bounded (500 characters for a title,
+  20,000 for a summary, 50 genres, 100 entries a file) and ids are checked
+  for their shape. Addresses in them, pictures' included, are never
+  fetched.
+- An audiobook's tags get the same limits, cut before they are read: 500
+  characters for a title, a name, a series or a genre, 20,000 for a
+  summary, names read from a tag's first 2,000 characters and 50 at
+  most, and a place in a series from 0 to 10,000.
 - Subtitles from OpenSubtitles come over HTTPS only, never redirected to
   plain HTTP.
 - A file's attached fonts (for burned-in ASS subtitles) are taken up to
@@ -430,6 +642,49 @@ other apps (`pley_ct_…`), never with a session's
   through the server but those of its own requests.
 - TMDB's pictures are fetched 8 at once, 10 MB each at most, and kept up
   to 256 MB in all.
+
+### Moving from Plex
+
+- Only administrators import, and none of the import's routes are open to
+  apps.
+- The Plex token, from Plex's own sign-in page or pasted, is kept in
+  memory only: never saved, logged or sent to the browser, and forgotten
+  when the import ends, however it ends, or the server stops. Home users' tokens
+  are made from it as the import needs them, and kept no longer. Plex
+  PINs given for Home users are sent to plex.tv only.
+- Pley reads Plex's answers 8 MB at most each, follows no redirects, and
+  sends tokens in headers, never in addresses. Home users' pictures are
+  the one exception to redirects: asked for without a token, followed by
+  hand three times at most and only to plex.tv, assets.plex.tv and
+  secure.gravatar.com over HTTPS, taken only as an image, and squared to
+  Pley's size as an uploaded picture is. It connects only to the
+  server's addresses plex.tv lists, or one the administrator types, never
+  to a link-local address (neither one typed in nor one a name resolves
+  to), and checks that the server answering is the one chosen. It falls
+  back to plain HTTP only for the server's addresses on the home network,
+  never one across the internet.
+- A Home user's profile is made with Plex's restrictions in the same
+  step, so it's never open to everything while the import runs, or if it
+  stops. A restriction Pley can't keep is made stricter, never dropped.
+  A new profile opens a library already in Pley only when it holds no
+  more than the Plex libraries shared with them: every one brought to it,
+  and folders within theirs.
+  A profile with labels it never sees doesn't see the libraries a run
+  brings until the run finishes, since Plex's labels reach Pley's titles
+  later in it: the run marks each of them (`labels_pending`) before it
+  brings anything, a library it makes as it's made, and only a run that
+  finishes clears the marks, so one that stops or a restart leaves them
+  hidden until an administrator shows them. Profiles' own library choices
+  aren't touched, and the profile can sign in meanwhile, so apps stay
+  signed in. One that gets its first such label in this run has its new
+  rules only once the run reaches its profile.
+  Titles the import can't find on Plex don't get Plex's labels, and the
+  report says so for the profiles that rely on them.
+- What Plex sends is checked as any input: labels and label rules as
+  Settings checks them, at most 50 rules of each kind on a profile, and
+  the import's choices bounded (libraries, folders, people, PINs).
+- Profiles the import makes are managed profiles with no password, as
+  those made in Settings; Plex's PINs aren't copied to them.
 
 ### The desktop app
 

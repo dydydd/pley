@@ -2,6 +2,8 @@
 
 package app.pley.android.data
 
+import app.pley.android.model.CollectionCategories
+import app.pley.android.model.CollectionCategory
 import app.pley.android.model.CollectionDetail
 import app.pley.android.model.CollectionList
 import app.pley.android.model.CollectionSummary
@@ -15,6 +17,7 @@ import app.pley.android.model.Library
 import app.pley.android.model.LibraryFilters
 import app.pley.android.model.LibraryIds
 import app.pley.android.model.MaybeItem
+import app.pley.android.model.MergedCollection
 import app.pley.android.model.PersonDetail
 import app.pley.android.model.PleyJson
 import app.pley.android.model.SearchResults
@@ -50,13 +53,18 @@ internal suspend fun <T> ResourceCache.refreshQuietly(resource: Resource<T>) {
     }
 }
 
+/**
+ * The libraries everyone browses, saved for the next start. The server
+ * tells an app that manages it where it keeps the media; nothing here
+ * shows that, so it isn't saved: Manage server reads it when it shows.
+ */
 internal class CachedLibraries(
     private val cache: ResourceCache,
     /** Hears every fresh list: the scans it shows running. */
     private val heard: (List<Library>) -> Unit = {},
 ) : LibrariesRepository {
     private val resource = Resource(SnapshotKeys.LIBRARIES, ListSerializer(Library.serializer())) { api, _ ->
-        api.libraries().also(heard)
+        withoutPaths(api.libraries()).also(heard)
     }
 
     override fun libraries(): Flow<Loadable<List<Library>>> = cache.observe(resource)
@@ -69,10 +77,14 @@ internal class CachedLibraries(
 
     /** The server's answer to a change is the list now; Home's rows of each library follow its order. */
     private fun holds(answer: List<Library>) {
-        heard(answer)
-        cache.put(resource, answer)
+        val libraries = withoutPaths(answer)
+        heard(libraries)
+        cache.put(resource, libraries)
         cache.revalidate { key, _ -> key == SnapshotKeys.HOME }
     }
+
+    private fun withoutPaths(libraries: List<Library>): List<Library> =
+        libraries.map { if (it.paths.isEmpty()) it else it.copy(paths = emptyList()) }
 }
 
 internal class CachedHubs(private val cache: ResourceCache) : HubsRepository {
@@ -177,6 +189,17 @@ internal class CachedItems(private val cache: ResourceCache) : ItemRepository {
 
     override suspend fun next(itemId: Long): ItemSummary? = cache.api(cache.profile()).next(itemId).item
 
+    override suspend fun warmChildren(itemId: Long) {
+        val resource = childrenOf(itemId)
+        if (cache.peek(resource) == null) cache.refreshQuietly(resource)
+    }
+
+    override fun held(itemId: Long): ItemDetail? = cache.peek(detailOf(itemId))
+
+    override fun heldChildren(itemId: Long): List<ItemSummary>? = cache.peek(childrenOf(itemId))?.items
+
+    override fun heldOnDeck(itemId: Long): Loadable<ItemSummary?>? = cache.peek(onDeckOf(itemId))?.let { Loadable.Ready(it.item, fresh = false) }
+
     /** Loads [itemId]'s page ahead, unless it is held: never every visible card (asking queues work on the server). */
     override fun prefetch(itemId: Long) {
         prefetching
@@ -205,6 +228,16 @@ internal class CachedCollections(private val cache: ResourceCache) : Collections
     override fun collection(collectionId: Long): Flow<Loadable<CollectionDetail>> = cache.observe(
         Resource(SnapshotKeys.collection(collectionId), CollectionDetail.serializer(), detail = true) { api, _ ->
             api.collection(collectionId)
+        },
+    )
+
+    override fun categories(): Flow<Loadable<List<CollectionCategory>>> = cache.observe(
+        Resource(SnapshotKeys.CATEGORIES, CollectionCategories.serializer()) { api, _ -> api.collectionCategories() },
+    ).map { it.map(CollectionCategories::categories) }
+
+    override fun merged(collectionIds: List<Long>): Flow<Loadable<MergedCollection>> = cache.observe(
+        Resource(SnapshotKeys.merged(collectionIds), MergedCollection.serializer(), detail = true) { api, _ ->
+            api.mergedCollection(collectionIds)
         },
     )
 }

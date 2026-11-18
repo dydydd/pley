@@ -19,8 +19,9 @@
 //!   following, managers' decisions and the listing's filters;
 //! - Live TV with a guide, keyed live HLS, sessions, plans and a connection
 //!   limit that answers `409`;
-//! - server events (SSE) and pictures it draws itself (JPEG, PNG with
-//!   transparency for channel logos);
+//! - server events (SSE), the user's remote (commands, and casts to the
+//!   devices whose event streams name them) and pictures it draws itself
+//!   (JPEG, PNG with transparency for channel logos);
 //! - and, apart from the server, a pretend USB drive of videos that are heads
 //!   only, for the simulator's `--drive fixtures` ([`write_sample_drive`]).
 //!
@@ -32,6 +33,7 @@
 //! ```
 
 mod browse;
+mod cast;
 mod catalog;
 mod drive;
 mod events;
@@ -64,6 +66,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+pub use cast::CastBody;
 pub use drive::write_sample_drive;
 pub use events::ServerEvent;
 pub use requests::titles as request_titles;
@@ -281,8 +284,14 @@ impl FixtureServer {
             requests: requests::Requests::new(now_ms.div_euclid(1_000)),
             subtitle_search: true,
             two_step_required: false,
+            server_language: Some("en".into()),
+            language_route_refusal: None,
             subtitle_asks: Default::default(),
             added_subtitles: Default::default(),
+            casts_sent: Default::default(),
+            cast_tickets: Default::default(),
+            hidden_collections: Vec::new(),
+            before_categories: false,
         };
         let libraries: Vec<(i64, i64)> = catalog.libraries.iter().map(|l| (l.id, l.item_count)).collect();
         let shared = Arc::new(Shared {
@@ -418,6 +427,33 @@ impl FixtureServer {
         lock(&self.shared.state).two_step_required = on;
     }
 
+    /// The server language (`language` in `GET /api/server`).
+    pub fn set_server_language(&self, language: &str) {
+        lock(&self.shared.state).server_language = Some(language.to_string());
+    }
+
+    /// A Pley from before languages: `GET /api/server` names none, and `PUT /api/me/language`,
+    /// a route it hasn't, answers 404.
+    pub fn set_before_languages(&self) {
+        let mut state = lock(&self.shared.state);
+        state.server_language = None;
+        state.language_route_refusal = Some(404);
+    }
+
+    /// `PUT /api/me/language` answers `status` instead of changing the language, as a server
+    /// without the route can (404 or 405); none: it changes it.
+    pub fn refuse_language_route(&self, status: Option<u16>) {
+        lock(&self.shared.state).language_route_refusal = status;
+    }
+
+    /// Sets a profile's own language, as `PUT /api/me/language` does; none: Automatic.
+    pub fn set_account_language(&self, profile: i64, language: Option<&str>) {
+        let mut state = lock(&self.shared.state);
+        let p = state.profile_mut(profile);
+        p.language = language.map(str::to_string);
+        p.version += 1;
+    }
+
     /// The apps play from another network than the server's: a speed test is
     /// due when nothing is known of theirs.
     pub fn set_network_remote(&self, on: bool) {
@@ -434,6 +470,18 @@ impl FixtureServer {
     /// answers `503 unavailable`.
     pub fn set_requests(&self, on: bool) {
         lock(&self.shared.state).requests.enabled = on;
+    }
+
+    /// Takes `ids` out of their libraries' lists of collections, as if an administrator deleted
+    /// them.
+    pub fn hide_collections(&self, ids: &[i64]) {
+        lock(&self.shared.state).hidden_collections.extend_from_slice(ids);
+    }
+
+    /// A Pley from before collections had categories: `GET /api/collection-categories`, a route
+    /// it hasn't, answers 404, and collections name no category.
+    pub fn set_before_categories(&self) {
+        lock(&self.shared.state).before_categories = true;
     }
 
     /// What asking does for `profile`: `auto`, `ask` or `off`.
@@ -458,9 +506,31 @@ impl FixtureServer {
         self.shared.events.emit_text(json.to_string(), None);
     }
 
+    /// `profile`'s own sessions, as `GET /api/sessions` lists them: what its players obey, the
+    /// tracks they play, and their ids for [`ServerEvent::PlayerCommand`].
+    pub fn sessions_of(&self, profile: i64) -> Vec<serde_json::Value> {
+        play::listed(&self.shared.catalog, &lock(&self.shared.state), profile, false)
+    }
+
     /// Event streams open now: tests wait for one before sending.
     pub fn event_listeners(&self) -> usize {
         self.shared.events.listeners()
+    }
+
+    /// `profile`'s devices that take casts, as `GET /api/remote/devices` lists them: their
+    /// `receiver_id` is where [`FixtureServer::cast`] sends.
+    pub fn receivers_of(&self, profile: i64) -> Vec<serde_json::Value> {
+        self.shared.events.receivers(profile).iter().map(|r| r.to_json()).collect()
+    }
+
+    /// What `profile`'s remote on the device of User-Agent `agent` casting `body` to `receiver`
+    /// does (`POST /api/remote/devices/{receiver}/cast`, docs/API.md "Casting"): its status, `202`
+    /// when the profile's streams were sent `cast`.
+    pub fn cast(&self, profile: i64, receiver: &str, body: &CastBody, agent: Option<&str>) -> u16 {
+        let mut state = lock(&self.shared.state);
+        match cast::send(&self.shared, &mut state, profile, receiver, &body.to_json(), agent) {
+            Ok(answer) | Err(answer) => answer.status,
+        }
     }
 
     /// Every write so far.

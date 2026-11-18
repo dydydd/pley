@@ -2,13 +2,16 @@ import type { ComponentType } from "react";
 import { createBrowserRouter, Navigate, RouterProvider, type Params, type RouteObject } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { LoaderCircle } from "lucide-react";
-import { ApiError, setUnauthorizedHandler } from "@/api/client";
+import { ApiError, setUnauthorizedHandler, signInAgainFrom } from "@/api/client";
 import { queries } from "@/api/hooks";
 import { liveQueries } from "@/api/livetv";
 import { requestQueries } from "@/api/requests";
 import { RequireAuth, Splash } from "@/auth";
 import { AppLayout } from "@/components/AppLayout";
 import { ToastProvider } from "@/components/Toast";
+import { loadNamespaces } from "@/i18n";
+import { LanguageSync } from "@/i18n/LanguageSync";
+import type { LazyNamespace } from "@/i18n/resources";
 import { PageSpinner } from "@/components/ui";
 import { AccountPage } from "@/pages/AccountPage";
 import { HomePage } from "@/pages/HomePage";
@@ -20,7 +23,9 @@ import { NotFoundPage, RouteErrorPage } from "@/pages/NotFoundPage";
 import { PersonPage } from "@/pages/PersonPage";
 import { ProfilesPage } from "@/pages/ProfilesPage";
 import { SearchPage } from "@/pages/SearchPage";
+import { SetupLayout } from "@/pages/SetupLayout";
 import { SetupPage } from "@/pages/SetupPage";
+import { SetupStartPage } from "@/pages/SetupStartPage";
 import { loadPlayerPage, playerData } from "@/player/preload";
 
 export const queryClient = new QueryClient({
@@ -48,6 +53,11 @@ function PlayerFallback() {
   );
 }
 
+/** `load`, with the words of `namespaces`, which come with the code that uses them. */
+function withWords<M>(namespaces: readonly LazyNamespace[], load: () => Promise<M>): () => Promise<M> {
+  return async () => (await Promise.all([load(), loadNamespaces(namespaces)]))[0];
+}
+
 /**
  * A route whose code (the player with hls.js, the admin screens) loads on
  * demand, together with the data the page opens with: the router waits for
@@ -72,7 +82,48 @@ function onDemand<M>(
 }
 
 const router = createBrowserRouter([
-  { path: "/setup", element: <SetupPage />, errorElement: <RouteErrorPage /> },
+  // Setup, from the administrator's account on, in one card that stays.
+  {
+    element: <SetupLayout />,
+    errorElement: <RouteErrorPage />,
+    children: [
+      { path: "/setup", element: <SetupPage /> },
+      {
+        element: <RequireAuth />,
+        children: [
+          // The first run goes on here once the administrator's account is made.
+          {
+            path: "/setup/server",
+            ...onDemand(
+              withWords(["settings"], () => import("@/pages/SetupServerPage")),
+              (m) => m.SetupServerPage,
+              () => [],
+              <Splash />,
+            ),
+          },
+          { path: "/setup/start", element: <SetupStartPage /> },
+          {
+            path: "/setup/library",
+            ...onDemand(
+              withWords(["settings"], () => import("@/pages/SetupLibraryPage")),
+              (m) => m.SetupLibraryPage,
+              () => [],
+              <Splash />,
+            ),
+          },
+          {
+            path: "/setup/plex",
+            ...onDemand(
+              withWords(["settings"], () => import("@/pages/plexImport/PlexSetupPage")),
+              (m) => m.PlexSetupPage,
+              () => [],
+              <Splash />,
+            ),
+          },
+        ],
+      },
+    ],
+  },
   { path: "/login", element: <LoginPage />, errorElement: <RouteErrorPage /> },
   { path: "/invite/:code", element: <InvitePage />, errorElement: <RouteErrorPage /> },
   // Where the way back to an app leads once its request is over.
@@ -125,7 +176,7 @@ const router = createBrowserRouter([
       ...["/live/:sourceUid/:channelId", "/live/:channelId"].map((path) => ({
         path,
         ...onDemand(
-          () => import("@/player/live/LivePlayerPage"),
+          withWords(["livetv"], () => import("@/player/live/LivePlayerPage")),
           (m) => m.LivePlayerPage,
           (prefetch, params) => [prefetch(liveQueries.channel(Number(params.channelId)))],
           <PlayerFallback />,
@@ -139,12 +190,13 @@ const router = createBrowserRouter([
           { path: "item/:id", element: <ItemPage /> },
           { path: "person/:id", element: <PersonPage /> },
           { path: "collection/:id", ...onDemand(() => import("@/pages/collections/CollectionPage"), (m) => m.CollectionPage) },
+          { path: "collection", ...onDemand(() => import("@/pages/collections/MergedCollectionPage"), (m) => m.MergedCollectionPage) },
           { path: "playlists", ...onDemand(() => import("@/pages/playlists/PlaylistsPage"), (m) => m.PlaylistsPage) },
           { path: "playlists/:id", ...onDemand(() => import("@/pages/playlists/PlaylistPage"), (m) => m.PlaylistPage) },
           {
             path: "live",
             ...onDemand(
-              () => import("@/pages/livetv/LiveTvPage"),
+              withWords(["livetv"], () => import("@/pages/livetv/LiveTvPage")),
               (m) => m.LiveTvPage,
               (prefetch) => [prefetch(liveQueries.summary()), prefetch(liveQueries.groups())],
             ),
@@ -180,7 +232,11 @@ const router = createBrowserRouter([
           { path: "account", element: <AccountPage /> },
           {
             path: "settings",
-            ...onDemand(() => import("@/pages/settings/SettingsLayout"), (m) => m.SettingsLayout),
+            // Its pages' words with it, Live TV's settings among them.
+            ...onDemand(
+              withWords(["settings", "livetv"], () => import("@/pages/settings/SettingsLayout")),
+              (m) => m.SettingsLayout,
+            ),
             children: [
               { index: true, element: <Navigate to="dashboard" replace /> },
               {
@@ -267,7 +323,7 @@ const router = createBrowserRouter([
 // Any authenticated request that comes back 401 (expired/revoked session) sends the user to the login screen.
 setUnauthorizedHandler(() => {
   const { pathname, search } = window.location;
-  if (pathname.startsWith("/login") || pathname.startsWith("/setup") || pathname.startsWith("/invite/")) return;
+  if (!signInAgainFrom(pathname)) return;
   const next = pathname + search;
   void router
     .navigate(next && next !== "/" ? `/login?next=${encodeURIComponent(next)}` : "/login", { replace: true })
@@ -277,6 +333,7 @@ setUnauthorizedHandler(() => {
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
+      <LanguageSync />
       <ToastProvider>
         <RouterProvider router={router} />
       </ToastProvider>

@@ -8,17 +8,19 @@
 
 use pley_core::caps::{CapsDecision, best_file, range_of, video_of};
 use pley_core::model::{
-    ClientCaps, DynamicRange, ItemDetail, MediaFile, MediaStream, PlaybackInfo, PlaybackMethod, PlaybackMode,
-    PlaybackRequest, StreamKind,
+    ClientCaps, DeviceKind, DynamicRange, ItemDetail, MediaFile, MediaStream, PlaybackInfo, PlaybackMethod,
+    PlaybackMode, PlaybackRequest, StreamKind,
 };
 
 use crate::quality::Quality;
 
 /// A playlist or collection played through, for Up Next.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Queue {
     Playlist(i64),
     Collection(i64),
+    /// Several libraries' same-titled collections as one (a Home row's merged page).
+    Collections(Vec<i64>),
 }
 
 /// What starts a playback.
@@ -93,8 +95,12 @@ pub fn playing_audio(file: Option<&MediaFile>, info: &PlaybackInfo) -> Option<Me
         .map(|s| (*s).clone())
 }
 
-/// The subtitles to start with: as asked, else the profile's choice; none is off, whatever the file flags.
+/// The subtitles to start with: as asked (-1: none, as the title's page or a cast asks), else the
+/// profile's choice; none is off, whatever the file flags.
 pub fn initial_subtitle(file: Option<&MediaFile>, requested: Option<i64>) -> Option<MediaStream> {
+    if requested == Some(-1) {
+        return None;
+    }
     let subs = subtitle_streams(file);
     requested
         .and_then(|r| subs.iter().find(|s| s.index == r))
@@ -209,6 +215,9 @@ pub fn playback_request(
         client_id: Some(client_id.to_string()),
         keep_previous: false,
         keyed_urls: keyed,
+        // What it obeys is the controller's to say; that it plays on a TV, always.
+        controls: Vec::new(),
+        device_kind: Some(DeviceKind::Tv),
         caps: caps.cloned().unwrap_or_else(ClientCaps::empty),
     }
 }

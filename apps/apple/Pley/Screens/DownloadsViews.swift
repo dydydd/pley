@@ -124,7 +124,7 @@ private struct DownloadRowView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(row.accessibilityLabel)
         .accessibilityAddTraits(row.canPlay ? .isButton : [])
-        .accessibilityHint(row.canPlay ? "Plays it" : "")
+        .accessibilityHint(row.canPlay ? Text("Plays it") : Text(verbatim: ""))
         .accessibilityIdentifier("downloads.row.\(row.id)")
     }
 }
@@ -269,30 +269,38 @@ struct DownloadButton: View {
                     Label(DownloadWords.tryAgain, systemImage: "exclamationmark.arrow.circlepath")
                 }
                 .menuStyle(.button)
-                .accessibilityLabel("\(why). \(DownloadWords.tryAgain)")
+                .accessibilityLabel(Text(verbatim: "\(why). \(DownloadWords.tryAgain)"))
                 .accessibilityIdentifier("item.downloadFailed")
             }
         }
     }
 }
 
-/// "Showing what Pley had saved. Reconnecting…" (after "Another device
-/// answers there." when that is why), above the signed-in app
-/// while the server can't be reached; Try again asks it at once.
+/// "Pley is offline", above the signed-in app while the server can't be
+/// reached, with the way to the downloads unless they are showing. The app
+/// tries the server again by itself, and the banner goes when it answers.
 struct OfflineBanner: View {
     @ObservedObject var app: AppModel
+    @ObservedObject private var shell: ShellModel
+
+    init(app: AppModel) {
+        self.app = app
+        _shell = ObservedObject(wrappedValue: app.shell)
+    }
 
     var body: some View {
         if app.offline {
             HStack(spacing: 10) {
                 Image(systemName: "wifi.slash").accessibilityHidden(true)
-                Text(app.offlineMessage)
+                Text(DownloadWords.offline)
                     .font(.subheadline)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
-                Button("Try again") { Task { await app.reconnect() } }
-                    .font(.subheadline.weight(.semibold))
-                    .accessibilityIdentifier("offline.retry")
+                if app.downloads.available && shell.path(for: shell.section).last != .downloads {
+                    Button(DownloadWords.offlineAction) { shell.open(.downloads) }
+                        .font(.subheadline.weight(.semibold))
+                        .accessibilityIdentifier("offline.downloads")
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -300,7 +308,7 @@ struct OfflineBanner: View {
             .background(.regularMaterial)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("offline.banner")
-            .task(id: app.offlineMessage) { announce(app.offlineMessage) }
+            .task { announce(DownloadWords.offline) }
         }
     }
 }

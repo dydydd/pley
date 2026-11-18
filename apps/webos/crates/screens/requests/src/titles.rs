@@ -7,6 +7,7 @@
 use pley_base::{Icon, Point, Rect, TextOpts};
 use pley_core::model::DiscoverList;
 use pley_core::requests::{DISCOVER_ROWS, problem_words, requests_problem, search_text};
+use pley_i18n::t;
 use pley_kit::{GridState, Message, MessageStyle, PosterGrid, Tile, TileKind, skeleton_block};
 use pley_shell::{AppCx, AppEvent, Chrome, Route, Screen};
 use pley_ui::theme::{self, radius};
@@ -14,7 +15,7 @@ use pley_ui::{Id, Ui};
 
 use crate::common::{
     ProblemAction, SignInAgain, TitleTileModel, failed_title, marked, marks_version, paint_title, problem_page,
-    summary_problem,
+    summary_problem, title_page,
 };
 use crate::pages::Reader;
 
@@ -52,10 +53,10 @@ impl TitlesScreen {
     pub fn list(list: DiscoverList) -> TitlesScreen {
         let row = DISCOVER_ROWS.iter().find(|r| r.list == list).unwrap_or(&DISCOVER_ROWS[0]);
         let words = Words {
-            title: row.title.to_string(),
-            failed: "Couldn't load it",
-            none: ("Nothing here right now".into(), "TMDB's list has nothing this profile can ask for."),
-            none_yet: "Nothing here yet".into(),
+            title: row.title().to_string(),
+            failed: t!("requests.discover.couldNotLoad"),
+            none: (t!("requests.discover.nothing").into(), t!("requests.discover.nothingInList")),
+            none_yet: t!("requests.discover.nothingYet").into(),
         };
         TitlesScreen::new(words, Reader::new(0, move |api, page| api.discover(list, page)))
     }
@@ -64,13 +65,10 @@ impl TitlesScreen {
     pub fn search(query: &str) -> TitlesScreen {
         let q = search_text(query);
         let words = Words {
-            title: format!("Results for “{q}”"),
-            failed: "Couldn't search TMDB",
-            none: (
-                format!("Nothing on TMDB matches “{q}”"),
-                "Try a different spelling, or the title in its own language.",
-            ),
-            none_yet: format!("Nothing yet for “{q}”"),
+            title: t!("requests.discover.resultsFor", query = q),
+            failed: t!("requests.discover.searchFailed"),
+            none: (t!("requests.discover.nothingFound", query = q), t!("requests.discover.nothingFoundHint")),
+            none_yet: t!("requests.discover.nothingYetFor", query = q),
         };
         TitlesScreen::new(words, Reader::new(0, move |api, page| api.discover_search(&q, page, false)))
     }
@@ -145,7 +143,7 @@ impl Screen for TitlesScreen {
                 };
                 let mut message = Message::new(MessageStyle::Column { top: note_at }, &title).body(&body);
                 if retry {
-                    message = message.action("Retry", Icon::RefreshCw);
+                    message = message.action(t!("requests.buttons.retry"), Icon::RefreshCw);
                 }
                 let r = message.show(ui, page.with("note"));
                 self.rail_if(cx, !retry);
@@ -182,7 +180,7 @@ impl Screen for TitlesScreen {
             let r = grid.show(ui, grid_id, &mut self.grid, count, |ui, slot| match tiles.get(slot.index) {
                 Some(t) => paint_title(ui, slot, t),
                 None if end_tile => {
-                    let label = if failed { "Retry" } else { "Show more" };
+                    let label = if failed { t!("requests.buttons.retry") } else { t!("requests.buttons.showMore") };
                     Tile::see_all(TileKind::Poster, label).paint(ui, slot)
                 }
                 None => Tile::skeleton(TileKind::Poster).paint(ui, slot),
@@ -195,7 +193,7 @@ impl Screen for TitlesScreen {
             }
             if let Some(a) = r.activated {
                 match self.tiles.get(a) {
-                    Some(t) => cx.push(Route::Title { kind: t.title.kind, tmdb_id: t.title.tmdb_id, pick: false }),
+                    Some(t) => cx.push(title_page(&t.title)),
                     None if end_tile => self.reader.again(),
                     None => {}
                 }
@@ -210,10 +208,7 @@ impl Screen for TitlesScreen {
                             None => (failed_title(Some(e), self.words.failed).to_string(), e.problem()),
                         }
                     }
-                    None => (
-                        self.words.none_yet.clone(),
-                        "TMDB's pages read so far have nothing this profile can ask for.".to_string(),
-                    ),
+                    None => (self.words.none_yet.clone(), t!("requests.discover.nothingSoFar").to_string()),
                 };
                 let x = theme::GUTTER + TileKind::Poster.size().w + 28.0;
                 let y = LIST_TOP + theme::GRID_CONTENT_TOP + 40.0;

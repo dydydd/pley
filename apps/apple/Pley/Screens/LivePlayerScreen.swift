@@ -8,8 +8,10 @@ import SwiftUI
 /// of its own on the Mac: the channel's picture, and over it, for 3
 /// seconds after a tap, Close, the channel's logo, number and name, what's
 /// on with its progress and what's next, the star, channel up and down,
-/// the Channels list, AirPlay and "Live". Live can't pause or seek. Digits
-/// on a keyboard tune a number, ↑ and ↓ change channel.
+/// the Channels list, Watch on… (another of the profile's devices), AirPlay
+/// and "Live". Live can't pause or seek. Digits on a keyboard tune a
+/// number, ↑ and ↓ change channel. A cast from another device says where
+/// it came from at the top.
 struct LivePlayerScreen: View {
     let app: AppModel
     @ObservedObject var model: LivePlayerModel
@@ -43,9 +45,23 @@ struct LivePlayerScreen: View {
             }
             if case .failed(let trouble) = model.state.phase {
                 TroubleView(model: model, trouble: trouble, close: close)
-            } else if controlsShown {
+            } else {
+                // Hidden, it stays where it is, unseen and out of reach: Watch on…'s menu, open as it hides, stays.
                 overlay
-                    .transition(.opacity)
+                    .opacity(controlsShown ? 1 : 0)
+                    .allowsHitTesting(controlsShown)
+                    .accessibilityHidden(!controlsShown)
+            }
+            if let banner = model.banner {
+                Text(banner)
+                    .font(.callout)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 8)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("live.banner")
             }
             if !model.digits.isEmpty || model.notice != nil {
                 Text(model.notice ?? model.digits)
@@ -147,6 +163,12 @@ struct LivePlayerScreen: View {
                 }
                 .accessibilityLabel("Channels")
                 .accessibilityIdentifier("live.channels")
+                if let channelId = model.channelId {
+                    PlayOnMenu(remote: app.remote, target: .channel(channelId), prefix: "live", iconOnly: true)
+                        .menuStyle(.button)
+                        .menuIndicator(.hidden)
+                        .font(.title2)
+                }
             }
             .padding()
             .background(LinearGradient(colors: [.clear, .black.opacity(0.75)], startPoint: .top, endPoint: .bottom)
@@ -167,14 +189,14 @@ struct LivePlayerScreen: View {
                             .accessibilityIdentifier("live.favorite")
                     }
                     if let on = channel.on(at: model.now) {
-                        Text(on.title.isEmpty ? "On now" : on.title).font(.subheadline)
+                        Text(on.title.isEmpty ? localized("On now") : on.title).font(.subheadline)
                         HStack(spacing: 8) {
                             ProgressView(value: on.progress(at: model.now)).frame(maxWidth: 220).tint(.white)
                             Text(LiveTvRules.leftText(on, now: model.now)).font(.caption)
                         }
                         .accessibilityElement(children: .combine)
                     } else {
-                        Text(channel.hasGuide ? "Nothing in the guide now" : "No guide for this channel")
+                        (channel.hasGuide ? Text("Nothing in the guide now") : Text("No guide for this channel"))
                             .font(.subheadline)
                     }
                     if let next = channel.after(at: model.now) {
@@ -206,7 +228,7 @@ struct LivePlayerScreen: View {
     private var keys: some View {
         ZStack {
             ForEach(0..<10, id: \.self) { digit in
-                Button("\(digit)") { model.type(digit) }
+                Button(String(digit)) { model.type(digit) }
                     .keyboardShortcut(KeyEquivalent(Character(String(digit))), modifiers: [])
             }
             Button("Channel up") { model.zap(by: 1) }
@@ -242,14 +264,13 @@ struct TroubleView: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            Text(trouble.title(channel: model.channel?.name ?? "The channel"))
+            Text(trouble.title(channel: model.channel?.name ?? localized("The channel")))
                 .font(.headline)
                 .accessibilityIdentifier("live.trouble.title")
             Text(trouble.message).multilineTextAlignment(.center)
             if trouble.kind == .busy {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(trouble.connections.count == 1 ? "Its one connection is watching:"
-                         : "Its \(trouble.connections.count) connections are watching:")
+                    Text("Its \(trouble.connections.count) connections are watching:")
                         .font(.subheadline)
                     ForEach(trouble.connections, id: \.channelId) { connection in
                         HStack {
@@ -289,7 +310,7 @@ struct TroubleView: View {
 
     /// What VoiceOver reads out as the trouble shows.
     private var spoken: String {
-        "\(trouble.title(channel: model.channel?.name ?? "The channel")). \(trouble.message)"
+        "\(trouble.title(channel: model.channel?.name ?? localized("The channel"))). \(trouble.message)"
     }
 }
 
@@ -386,7 +407,7 @@ struct LiveWindow: View {
             if let model {
                 LivePlayerScreen(app: app, model: model) { dismiss() }
                     .focusedSceneObject(model)
-                    .navigationTitle(model.channel?.numberedName ?? "Live TV")
+                    .navigationTitle(model.channel?.numberedName ?? localized("Live TV"))
                     .background {
                         Button("Full Screen") { NSApp.keyWindow?.toggleFullScreen(nil) }
                             .keyboardShortcut("f", modifiers: [])

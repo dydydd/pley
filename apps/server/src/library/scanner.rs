@@ -4,14 +4,16 @@
 //! the library folders, diffs the files against the database (size + mtime),
 //! probes new/changed files through the transcoder with bounded concurrency,
 //! writes items in short transactions, removes vanished files (unless their
-//! drive is offline), refreshes sidecar artwork/subtitles, recomputes counts and
-//! finally lets the metadata agent enrich new items.
+//! drive is offline), gives the audiobooks it touched what their first parts
+//! say, refreshes sidecar artwork, subtitles and NFO files (whose
+//! ids decide a title's match, and whose fields win over the online source's),
+//! recomputes counts and finally lets the metadata agent enrich new items.
 //!
 //! The database has a single writer, which progress reports, logins and
 //! edits wait for: whatever takes time (matching sidecar files, deciding
 //! what changed) is done before taking it, and only changes are written.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,21 +21,23 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use parking_lot::Mutex;
 use pley_transcoder_api::{MediaInfo, StreamKind};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
 use tokio::sync::mpsc;
 
-use super::parse::{parse_episode, parse_movie, parse_track};
+use super::nfo::{self, Nfo, NfoFields, NfoIds, NfoKind};
+use super::parse::{AudiobookName, EpisodeName, parse_audiobook, parse_episode, parse_movie, parse_track};
 use super::sidecar::{ExternalSub, Sidecars};
-use super::walk::{Extra, ExtraKind, FoundFile, walk};
+use super::walk::{Extra, ExtraKind, FoundFile, Walked, walk};
 use super::{LibraryKind, LibraryRow, get_library, list_libraries};
 use crate::config::Config;
 use crate::db::Db;
 use crate::events::{EventBus, ScanPhase, ServerEvent};
 use crate::metadata::MetadataAgent;
+use crate::schedule::LibraryHold;
 use crate::store::Store;
 use crate::transcoder::{Transcoder, TranscoderError};
-use crate::util::{normalize_key, now, path_str, sort_title};
+use crate::util::{Pace, normalize_key, now, path_str, sort_title};
 
 const PROBE_CONCURRENCY: usize = 6;
 const WRITE_BATCH: usize = 64;
@@ -48,12 +52,51 @@ pub struct ScanStatus {
     pub processed: u64,
     pub total: u64,
     pub started_at: i64,
+    /// The library's first scan: Home says how far it is.
+    pub first: bool,
+    /// About how many seconds its files have left to be read, or its
+    /// titles' details to be fetched, once that can be told from how fast
+    /// they've gone.
+    pub left_secs: Option<u64>,
+    /// The phase `left_secs` is told for, and how fast it goes.
+    #[serde(skip)]
+    pace: Option<(ScanPhase, Pace)>,
+}
+
+impl ScanStatus {
+    /// The scan is at `processed` of `total` in `phase`, with about how long
+    /// that has left.
+    fn update(&mut self, phase: ScanPhase, processed: u64, total: u64) {
+        self.phase = phase;
+        self.processed = processed;
+        self.total = total;
+        // Measured from where the phase began: reading files and fetching
+        // details go at their own paces.
+        if self.pace.is_none_or(|(measured, _)| measured != phase) {
+            self.pace =
+                matches!(phase, ScanPhase::Probing | ScanPhase::Metadata).then(|| (phase, Pace::new(processed)));
+        }
+        self.left_secs = self.pace.and_then(|(_, pace)| pace.left(processed, total));
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ScanRequest {
     library_id: i64,
     force: bool,
+    /// Walk the folders and write what changed.
+    files: bool,
+    /// Then fetch metadata for the titles that have none.
+    metadata: bool,
+}
+
+impl ScanRequest {
+    /// Two requests for one library as one: what either asked for.
+    fn merge(&mut self, other: ScanRequest) {
+        self.force |= other.force;
+        self.files |= other.files;
+        self.metadata |= other.metadata;
+    }
 }
 
 pub struct Scanner {
@@ -62,8 +105,13 @@ pub struct Scanner {
     events: EventBus,
     metadata: Arc<MetadataAgent>,
     store: Arc<Store>,
+    /// Held through a library's first scan (see [`crate::schedule`]).
+    hold: Arc<LibraryHold>,
     queue: mpsc::UnboundedSender<ScanRequest>,
     status: Mutex<HashMap<i64, ScanStatus>>,
+    /// First scans that finished while other first scans are under way:
+    /// Home ticks them off until the last is done.
+    first_done: Mutex<Vec<ScanStatus>>,
     failures: Mutex<ScanFailures>,
 }
 
@@ -88,7 +136,7 @@ struct Phases {
     probe: Duration,
     /// Saving files and items, removing vanished ones, counting children.
     write: Duration,
-    /// Subtitles and local artwork next to unchanged files.
+    /// Subtitles, local artwork and NFO files next to unchanged files.
     sidecars: Duration,
     metadata: Duration,
 }
@@ -150,6 +198,7 @@ impl Scanner {
         events: EventBus,
         metadata: Arc<MetadataAgent>,
         store: Arc<Store>,
+        hold: Arc<LibraryHold>,
         config: &Config,
     ) -> Arc<Self> {
         let _ = config;
@@ -160,8 +209,10 @@ impl Scanner {
             events,
             metadata,
             store,
+            hold,
             queue: tx,
             status: Mutex::default(),
+            first_done: Mutex::default(),
             failures: Mutex::default(),
         });
         tokio::spawn(scanner.clone().worker(rx));
@@ -178,40 +229,101 @@ impl Scanner {
         self.failures.lock().backing_off(library_id, interval, now())
     }
 
+    /// Scans a library: its files, then metadata for what has none.
     pub fn enqueue(&self, library_id: i64, force: bool) {
-        self.status.lock().entry(library_id).or_insert_with(|| ScanStatus {
+        self.request(ScanRequest { library_id, force, files: true, metadata: true }, false);
+    }
+
+    /// Scans a library just added: a first scan from the moment it's
+    /// queued, so Home lists it while it waits behind another.
+    pub fn enqueue_new(&self, library_id: i64) {
+        self.request(ScanRequest { library_id, force: false, files: true, metadata: true }, true);
+    }
+
+    /// Scans a library's files only, leaving metadata for later: the Plex
+    /// import brings Plex's matches first, so the fetch finds their ids.
+    pub fn enqueue_files(&self, library_id: i64) {
+        self.request(ScanRequest { library_id, force: false, files: true, metadata: false }, false);
+    }
+
+    /// Fetches metadata for a library's titles that have none, without
+    /// walking its folders again.
+    pub fn enqueue_metadata(&self, library_id: i64) {
+        self.request(ScanRequest { library_id, force: false, files: false, metadata: true }, false);
+    }
+
+    /// Queues `req`; `first` when it's the library's first scan.
+    fn request(&self, req: ScanRequest, first: bool) {
+        let library_id = req.library_id;
+        let mut status = self.status.lock();
+        let entry = status.entry(library_id).or_insert_with(|| ScanStatus {
             library_id,
             library_name: String::new(),
             phase: ScanPhase::Queued,
             processed: 0,
             total: 0,
             started_at: now(),
+            first: false,
+            left_secs: None,
+            pace: None,
         });
-        let _ = self.queue.send(ScanRequest { library_id, force });
+        entry.first |= first;
+        drop(status);
+        let _ = self.queue.send(req);
         self.events.send(ServerEvent::ScanProgress { library_id, phase: ScanPhase::Queued, processed: 0, total: 0 });
     }
 
     pub async fn enqueue_all(&self, force: bool) -> sqlx::Result<()> {
         for lib in list_libraries(&self.db).await? {
-            self.enqueue(lib.id, force);
+            self.request(
+                ScanRequest { library_id: lib.id, force, files: true, metadata: true },
+                lib.scanned_at.is_none(),
+            );
         }
         Ok(())
     }
 
     pub fn statuses(&self) -> Vec<ScanStatus> {
         let mut list: Vec<_> = self.status.lock().values().cloned().collect();
-        list.sort_by_key(|s| s.started_at);
+        // Seconds tie often, and the map has no order of its own: the
+        // library added first goes first, so the list doesn't reshuffle.
+        list.sort_by_key(|s| (s.started_at, s.library_id));
         list
+    }
+
+    /// The first scans done while others are queued or running; none once
+    /// the last is done. A library scanned again since isn't among them.
+    pub fn first_scans_done(&self) -> Vec<ScanStatus> {
+        let status = self.status.lock();
+        self.first_done.lock().iter().filter(|s| !status.contains_key(&s.library_id)).cloned().collect()
     }
 
     pub fn is_scanning(&self, library_id: i64) -> bool {
         self.status.lock().contains_key(&library_id)
     }
 
+    /// Where a library's scan is, while it's queued or running.
+    pub fn status_of(&self, library_id: i64) -> Option<ScanStatus> {
+        self.status.lock().get(&library_id).cloned()
+    }
+
     async fn worker(self: Arc<Self>, mut rx: mpsc::UnboundedReceiver<ScanRequest>) {
         let mut pending: Vec<ScanRequest> = Vec::new();
+        // A new library's files and metadata go before other library work,
+        // and so do other first scans queued behind it: released between
+        // two, the seek previews of the first would start beside the next.
+        // A later scan, with no first scan to come, lets it go.
+        let mut hold = None;
         loop {
+            // One queued while the last ran keeps the hold; only an empty
+            // queue lets library work go.
+            if pending.is_empty()
+                && let Ok(req) = rx.try_recv()
+            {
+                pending.push(req);
+            }
             if pending.is_empty() {
+                hold = None;
                 match rx.recv().await {
                     Some(req) => pending.push(req),
                     None => break,
@@ -219,13 +331,21 @@ impl Scanner {
             }
             while let Ok(req) = rx.try_recv() {
                 match pending.iter_mut().find(|p| p.library_id == req.library_id) {
-                    Some(existing) => existing.force |= req.force,
+                    Some(existing) => existing.merge(req),
                     None => pending.push(req),
                 }
             }
             let req = pending.remove(0);
+            if req.files && self.first_scan(req.library_id).await {
+                hold.get_or_insert_with(|| self.hold.take());
+            } else if hold.is_some() && !self.first_pending(&pending).await {
+                // Only a library's first scan holds library work back: a
+                // later one, with none to come, lets it go.
+                hold = None;
+            }
             let started = Instant::now();
-            let result = self.scan(req.library_id, req.force).await;
+            let result = self.scan(req).await;
+            let scanned = matches!(result, Ok(Some(_)));
             self.failures.lock().record(req.library_id, result.is_ok(), now());
             match result {
                 Ok(Some((t, p))) => tracing::info!(
@@ -249,7 +369,18 @@ impl Scanner {
                 Err(err) => tracing::error!("scan of library {} failed: {err:#}", req.library_id),
             }
             if !pending.iter().any(|p| p.library_id == req.library_id) {
-                self.status.lock().remove(&req.library_id);
+                let mut status = self.status.lock();
+                let mut first_done = self.first_done.lock();
+                if let Some(done) = status.remove(&req.library_id)
+                    && done.first
+                    && scanned
+                {
+                    first_done.retain(|s| s.library_id != req.library_id);
+                    first_done.push(ScanStatus { phase: ScanPhase::Done, left_secs: None, ..done });
+                }
+                if !status.values().any(|s| s.first) {
+                    first_done.clear();
+                }
             }
             self.events.send(ServerEvent::ScanProgress {
                 library_id: req.library_id,
@@ -258,6 +389,21 @@ impl Scanner {
                 total: 0,
             });
         }
+    }
+
+    /// Whether one of `pending` is a library's first scan.
+    async fn first_pending(&self, pending: &[ScanRequest]) -> bool {
+        for req in pending {
+            if req.files && self.first_scan(req.library_id).await {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether `library_id` was never scanned.
+    async fn first_scan(&self, library_id: i64) -> bool {
+        get_library(&self.db, library_id).await.ok().flatten().is_some_and(|lib| lib.scanned_at.is_none())
     }
 
     fn set_status(&self, lib: &LibraryRow, phase: ScanPhase, processed: u64, total: u64) {
@@ -269,23 +415,79 @@ impl Scanner {
             processed,
             total,
             started_at: now(),
+            first: false,
+            left_secs: None,
+            pace: None,
         });
         entry.library_name = lib.name.clone();
-        entry.phase = phase;
-        entry.processed = processed;
-        entry.total = total;
+        entry.update(phase, processed, total);
         drop(status);
         self.events.send(ServerEvent::ScanProgress { library_id: lib.id, phase, processed, total });
     }
 
-    async fn scan(&self, library_id: i64, force: bool) -> anyhow::Result<Option<(Totals, Phases)>> {
+    async fn scan(&self, req: ScanRequest) -> anyhow::Result<Option<(Totals, Phases)>> {
+        let ScanRequest { library_id, force, .. } = req;
         let Some(lib) = get_library(&self.db, library_id).await? else {
             return Ok(None);
         };
+        if req.files
+            && lib.scanned_at.is_none()
+            && let Some(status) = self.status.lock().get_mut(&library_id)
+        {
+            status.first = true;
+        }
+        self.events.send(ServerEvent::ScanStarted { library_id });
+        let (totals, mut phases, processed, total) =
+            if req.files { self.scan_files(&lib, force).await? } else { (Totals::default(), Phases::default(), 0, 0) };
+
+        let mut phase = Instant::now();
+        if req.metadata && self.metadata.enabled_for(lib.kind()) {
+            self.set_status(&lib, ScanPhase::Metadata, 0, 0);
+            let progress = |done: u64, total: u64| self.set_status(&lib, ScanPhase::Metadata, done, total);
+            if let Err(err) = self.metadata.refresh_library(&lib, force, &progress).await {
+                tracing::warn!("metadata refresh for library {} failed: {err:#}", lib.id);
+            }
+            self.events.send(ServerEvent::LibraryChanged { library_id });
+        }
+        if totals.removed > 0 {
+            self.metadata.prune_people().await;
+        }
+        phases.metadata = phase.elapsed();
+        if req.files {
+            // New and changed files get their fingerprint; then whatever
+            // removed items left behind goes.
+            let store = self.store.clone();
+            let removed = totals.removed > 0;
+            tokio::spawn(async move {
+                store.fingerprint_pending().await;
+                if removed && let Err(err) = store.clean().await {
+                    tracing::warn!("storage clean-up failed: {err:#}");
+                }
+            });
+        }
+
+        self.set_status(&lib, ScanPhase::Done, processed, total);
+        self.events.send(ServerEvent::ScanFinished {
+            library_id,
+            added: totals.added,
+            updated: totals.updated,
+            removed: totals.removed,
+        });
+        phase = Instant::now();
+        self.db.optimize().await;
+        phases.write += phase.elapsed();
+        Ok(Some((totals, phases)))
+    }
+
+    /// The files part of a scan: walks the folders, probes and writes what
+    /// changed, sidecars and NFO files, counts, and the overrides over it.
+    /// Gives the totals, the phases' times, and the files probed of those
+    /// to probe.
+    async fn scan_files(&self, lib: &LibraryRow, force: bool) -> anyhow::Result<(Totals, Phases, u64, u64)> {
+        let library_id = lib.id;
         let kind = lib.kind();
         let roots = lib.paths();
-        self.events.send(ServerEvent::ScanStarted { library_id });
-        self.set_status(&lib, ScanPhase::Walking, 0, 0);
+        self.set_status(lib, ScanPhase::Walking, 0, 0);
 
         // Sidecar files are indexed once: matching them file by file against
         // the whole library made every scan quadratic in its size.
@@ -303,11 +505,13 @@ impl Scanner {
             Phases { folders: walked.folders, files: walked.media.len(), walk: phase.elapsed(), ..Default::default() };
 
         phase = Instant::now();
-        let existing: Vec<KnownFile> =
-            sqlx::query_as("SELECT id, path, size, mtime, probed, external_subs FROM media_files WHERE library_id = ?")
-                .bind(library_id)
-                .fetch_all(&self.db.read)
-                .await?;
+        let existing: Vec<KnownFile> = sqlx::query_as(
+            "SELECT id, path, COALESCE(link_size, size) AS size, mtime, probed, external_subs
+                 FROM media_files WHERE library_id = ?",
+        )
+        .bind(library_id)
+        .fetch_all(&self.db.read)
+        .await?;
         let existing_by_path: HashMap<&str, &KnownFile> = existing.iter().map(|f| (f.path.as_str(), f)).collect();
 
         let mut to_process = Vec::new();
@@ -341,21 +545,43 @@ impl Scanner {
             .filter(|f| !seen.contains(&f.path) && !walked.maybe_unavailable(Path::new(&f.path)))
             .map(|f| f.id)
             .collect();
+        // A book whose files go or change may begin with another part after
+        // the scan, or with none: it is read again (see `read_books`).
+        let mut books = HashSet::new();
+        if kind == LibraryKind::Audiobooks {
+            let files: Vec<i64> = removed
+                .iter()
+                .copied()
+                .chain(to_process.iter().filter_map(|f| existing_by_path.get(path_str(&f.path).as_str()).map(|k| k.id)))
+                .collect();
+            if !files.is_empty() {
+                let parents: Vec<i64> = sqlx::query_scalar(
+                    "SELECT DISTINCT i.parent_id FROM media_files f JOIN items i ON i.id = f.item_id
+                     WHERE f.id IN (SELECT value FROM json_each(?)) AND i.kind = 'part' AND i.parent_id IS NOT NULL",
+                )
+                .bind(serde_json::to_string(&files)?)
+                .fetch_all(&self.db.read)
+                .await?;
+                books.extend(parents);
+            }
+        }
 
         phases.diff = phase.elapsed();
 
         let mut totals = Totals { removed: removed.len() as u64, ..Default::default() };
         let total = to_process.len() as u64;
-        self.set_status(&lib, ScanPhase::Probing, 0, total);
+        self.set_status(lib, ScanPhase::Probing, 0, total);
         // Probes and writes take turns: the time spent writing is taken out
         // of the probing time.
         phase = Instant::now();
         let mut writing = Duration::ZERO;
-        if !to_process.is_empty() && !self.transcoder.is_available() {
+        // (Not for `.strm` files, which a scan doesn't probe.)
+        let to_probe = to_process.iter().any(|file| !super::walk::is_strm(&file.path));
+        if to_probe && !self.transcoder.is_available() {
             self.transcoder.wait_ready(Duration::from_secs(90)).await;
         }
 
-        let mut writer = Writer::new(&lib, &sidecars);
+        let mut writer = Writer::new(lib, &sidecars, force);
         let mut batch: Vec<(FoundFile, ProbeOutcome)> = Vec::with_capacity(WRITE_BATCH);
         let mut processed = 0u64;
         let mut last_emit = Instant::now();
@@ -368,6 +594,13 @@ impl Scanner {
             let mut results = futures::stream::iter(files.into_iter().map(|file| {
                 let transcoder = transcoder.clone();
                 async move {
+                    // What a `.strm` file names isn't asked by a scan (see
+                    // `crate::strm`): only the file is read.
+                    if super::walk::is_strm(&file.path) {
+                        let path = file.path.clone();
+                        let key = crate::util::blocking(move || Ok(crate::strm::key_of(&path))).await.ok().flatten();
+                        return (file, ProbeOutcome::Link(key));
+                    }
                     let outcome = match transcoder.probe(&path_str(&file.path)).await {
                         Ok(info) => ProbeOutcome::Ok(Box::new(info)),
                         // ffprobe ran and cannot read the file: don't retry every scan.
@@ -396,7 +629,7 @@ impl Scanner {
                     last_flush = Instant::now();
                 }
                 if last_emit.elapsed() > Duration::from_millis(400) {
-                    self.set_status(&lib, ScanPhase::Probing, processed, total);
+                    self.set_status(lib, ScanPhase::Probing, processed, total);
                     last_emit = Instant::now();
                 }
             }
@@ -404,7 +637,7 @@ impl Scanner {
             self.flush(&mut writer, &mut batch, &existing_by_path, &mut totals).await?;
             writing += flushing.elapsed();
         }
-        self.set_status(&lib, ScanPhase::Probing, processed, total);
+        self.set_status(lib, ScanPhase::Probing, processed, total);
         phases.probe = phase.elapsed().saturating_sub(writing);
 
         // Vanished files go, with the items they leave empty.
@@ -433,6 +666,21 @@ impl Scanner {
         let mut tx = self.db.write.begin().await?;
         cleanup_orphans(&mut tx, library_id).await?;
         tx.commit().await?;
+        if kind == LibraryKind::Audiobooks {
+            books.extend(writer.containers.values());
+            // And books a scan stopped part way made but never read: their
+            // files are unchanged since, so nothing above names them.
+            // `read_books` always gives a book its writers.
+            let unread: Vec<i64> = sqlx::query_scalar(
+                "SELECT id FROM items
+                 WHERE library_id = ? AND kind = 'audiobook' AND authors IS NULL AND metadata_locked = 0",
+            )
+            .bind(library_id)
+            .fetch_all(&self.db.read)
+            .await?;
+            books.extend(unread);
+            self.read_books(lib, books).await?;
+        }
         writing += phase.elapsed();
 
         // Sidecar subtitles and local artwork can change without their video
@@ -443,9 +691,9 @@ impl Scanner {
         let (subtitles, artwork) = {
             let sidecars = sidecars.clone();
             crate::util::blocking(move || {
-                // Music has no subtitles (scans don't look for them).
-                let subtitles =
-                    if kind == LibraryKind::Music { Vec::new() } else { subtitle_changes(unchanged, &sidecars) };
+                // Music and audiobooks have no subtitles (scans don't look
+                // for them).
+                let subtitles = if kind.is_audio() { Vec::new() } else { subtitle_changes(unchanged, &sidecars) };
                 Ok((subtitles, artwork_changes(rows, &sidecars)))
             })
             .await?
@@ -478,6 +726,10 @@ impl Scanner {
                 artwork.len()
             );
         }
+        // NFO files too, before what they set is applied below.
+        if !kind.is_audio() {
+            self.read_nfos(lib, &sidecars, &mut walked).await?;
+        }
         phases.sidecars = phase.elapsed();
 
         phase = Instant::now();
@@ -489,47 +741,89 @@ impl Scanner {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        // Scanning rewrites titles of unmatched items and local artwork;
-        // hand edits win.
+        // Scanning rewrites titles of unmatched items and local artwork; NFO
+        // files win, and hand edits over them.
         crate::overrides::apply_library(&self.db, library_id).await?;
         writing += phase.elapsed();
         self.events.send(ServerEvent::LibraryChanged { library_id });
+        phases.write = writing;
+        Ok((totals, phases, processed, total))
+    }
 
-        phase = Instant::now();
-        if self.metadata.enabled_for(kind) {
-            self.set_status(&lib, ScanPhase::Metadata, 0, 0);
-            let progress = |done: u64, total: u64| self.set_status(&lib, ScanPhase::Metadata, done, total);
-            if let Err(err) = self.metadata.refresh_library(&lib, force, &progress).await {
-                tracing::warn!("metadata refresh for library {} failed: {err:#}", lib.id);
-            }
-            self.events.send(ServerEvent::LibraryChanged { library_id });
+    /// Gives `books` what their first parts say of them: their titles,
+    /// writers, series and the rest. A scan reads a book's files in any
+    /// order, and one file added later (untagged, say) must not decide it.
+    /// The tags are the ones stored when the files were read; like
+    /// artwork, this is worked out without the writer, and only changes are
+    /// written.
+    async fn read_books(&self, lib: &LibraryRow, books: HashSet<i64>) -> anyhow::Result<()> {
+        if books.is_empty() {
+            return Ok(());
         }
-        if totals.removed > 0 {
-            self.metadata.prune_people().await;
-        }
-        phases.metadata = phase.elapsed();
-        // New and changed files get their fingerprint; then whatever removed
-        // items left behind goes.
-        let store = self.store.clone();
-        let removed = totals.removed > 0;
-        tokio::spawn(async move {
-            store.fingerprint_pending().await;
-            if removed && let Err(err) = store.clean().await {
-                tracing::warn!("storage clean-up failed: {err:#}");
+        let firsts: Vec<FirstPart> =
+            sqlx::query_as(FIRST_PARTS).bind(serde_json::to_string(&books)?).fetch_all(&self.db.read).await?;
+        let roots = lib.paths();
+        let names = crate::util::blocking(move || {
+            Ok(firsts
+                .into_iter()
+                .filter_map(|first| {
+                    let tags =
+                        first.media_info.as_deref().and_then(|info| serde_json::from_str::<StoredTags>(info).ok());
+                    let path = PathBuf::from(first.path);
+                    // The library's folder the file was found in, the deepest
+                    // when one is in another.
+                    let root =
+                        roots.iter().filter(|root| path.starts_with(root)).max_by_key(|root| root.as_os_str().len())?;
+                    Some((first.book, parse_audiobook(&path, root, &tags.map(|t| t.tags).unwrap_or_default())))
+                })
+                .collect::<Vec<_>>())
+        })
+        .await?;
+        let at = now();
+        for chunk in names.chunks(CHANGE_BATCH) {
+            let mut tx = self.db.write.begin().await?;
+            for (book, name) in chunk {
+                save_book(&mut tx, *book, name, at).await?;
             }
-        });
+            tx.commit().await?;
+        }
+        Ok(())
+    }
 
-        self.set_status(&lib, ScanPhase::Done, processed, total);
-        self.events.send(ServerEvent::ScanFinished {
-            library_id,
-            added: totals.added,
-            updated: totals.updated,
-            removed: totals.removed,
-        });
-        phase = Instant::now();
-        self.db.optimize().await;
-        phases.write = writing + phase.elapsed();
-        Ok(Some((totals, phases)))
+    /// Reads the NFO files of the library's movies, shows, seasons and
+    /// episodes that appeared or changed, and lets go of those that went
+    /// (all of them when NFO files aren't read). Like artwork, what changed
+    /// is worked out off the async workers and without the writer, and only
+    /// that is written.
+    async fn read_nfos(&self, lib: &LibraryRow, sidecars: &Arc<Sidecars>, walked: &mut Walked) -> anyhow::Result<()> {
+        let rows: Vec<NfoRow> = sqlx::query_as(NFO_ROWS).bind(lib.id).fetch_all(&self.db.read).await?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let files: Vec<(i64, String)> = sqlx::query_as(NFO_FILES).bind(lib.id).fetch_all(&self.db.read).await?;
+        let context = NfoContext {
+            read: self.metadata.read_nfo(),
+            roots: lib.paths(),
+            unavailable: walked.offline_roots.iter().chain(&walked.unreadable).cloned().collect(),
+            listed: std::mem::take(&mut walked.nfo_files),
+            region: crate::ratings::region(&self.db).await?,
+        };
+        let changes = {
+            let sidecars = sidecars.clone();
+            crate::util::blocking(move || Ok(nfo_changes(rows, files, &sidecars, &context))).await?
+        };
+        for chunk in changes.chunks(CHANGE_BATCH) {
+            let mut tx = self.db.write.begin().await?;
+            for change in chunk {
+                change.save(&mut tx).await?;
+            }
+            tx.commit().await?;
+        }
+        let read = changes.iter().filter(|c| c.after.is_some()).count();
+        if !changes.is_empty() {
+            tracing::info!("library {}: {read} NFO files read, {} gone", lib.id, changes.len() - read);
+        }
+        Ok(())
     }
 
     async fn flush(
@@ -569,6 +863,7 @@ impl Scanner {
 struct KnownFile {
     id: i64,
     path: String,
+    /// The file's own size: a `.strm` file's, not its media's.
     size: i64,
     mtime: i64,
     probed: bool,
@@ -582,6 +877,10 @@ enum ProbeOutcome {
     Unavailable,
     /// ffprobe rejected the file: store it as probed so we don't retry every scan.
     Failed,
+    /// A `.strm` file, with the key of the address it names
+    /// ([`crate::strm::Target::key`]; `None`: it names nothing to play). Its
+    /// media is looked at when it is first opened or played.
+    Link(Option<String>),
 }
 
 /// Writes items for scanned files, caching container ids for the scan.
@@ -590,6 +889,8 @@ struct Writer<'a> {
     kind: LibraryKind,
     sidecars: &'a Sidecars,
     containers: HashMap<String, i64>,
+    /// A scan of every file again, changed or not.
+    force: bool,
 }
 
 struct NewItem {
@@ -598,6 +899,8 @@ struct NewItem {
     kind: &'static str,
     key: String,
     title: String,
+    /// What it sorts by, when its title's [`sort_title`] isn't it.
+    sort_title: Option<String>,
     original_title: Option<String>,
     year: Option<i32>,
     idx: Option<i32>,
@@ -618,6 +921,7 @@ impl NewItem {
             kind,
             key,
             title,
+            sort_title: None,
             original_title: None,
             year: None,
             idx: None,
@@ -633,8 +937,8 @@ impl NewItem {
 }
 
 impl<'a> Writer<'a> {
-    fn new(lib: &LibraryRow, sidecars: &'a Sidecars) -> Self {
-        Self { library_id: lib.id, kind: lib.kind(), sidecars, containers: HashMap::new() }
+    fn new(lib: &LibraryRow, sidecars: &'a Sidecars, force: bool) -> Self {
+        Self { library_id: lib.id, kind: lib.kind(), sidecars, containers: HashMap::new(), force }
     }
 
     async fn write(
@@ -643,10 +947,11 @@ impl<'a> Writer<'a> {
         file: &FoundFile,
         outcome: ProbeOutcome,
     ) -> anyhow::Result<()> {
-        let (info, probed) = match outcome {
-            ProbeOutcome::Ok(info) => (Some(*info), true),
-            ProbeOutcome::Unavailable => (None, false),
-            ProbeOutcome::Failed => (None, true),
+        let (info, probed, link) = match outcome {
+            ProbeOutcome::Ok(info) => (Some(*info), true, None),
+            ProbeOutcome::Unavailable => (None, false, None),
+            ProbeOutcome::Failed => (None, true, None),
+            ProbeOutcome::Link(key) => (None, true, Some(key)),
         };
         let duration = info.as_ref().and_then(|i| i.duration_ms);
         let item_id = match (&file.extra, self.kind) {
@@ -658,9 +963,13 @@ impl<'a> Writer<'a> {
             (None, LibraryKind::Movies) => self.write_movie(conn, file, duration).await?,
             (None, LibraryKind::Shows) => self.write_episode(conn, file, duration).await?,
             (None, LibraryKind::Music) => self.write_track(conn, file, info.as_ref(), duration).await?,
+            (None, LibraryKind::Audiobooks) => self.write_part(conn, file, info.as_ref(), duration).await?,
         };
-        let subs = if self.kind == LibraryKind::Music { Vec::new() } else { self.sidecars.subtitles(&file.path) };
-        upsert_file(conn, self.library_id, item_id, file, info.as_ref(), &subs, probed).await
+        let subs = if self.kind.is_audio() { Vec::new() } else { self.sidecars.subtitles(&file.path) };
+        match link {
+            Some(key) => upsert_link(conn, self.library_id, item_id, file, key.as_deref(), &subs, self.force).await,
+            None => upsert_file(conn, self.library_id, item_id, file, info.as_ref(), &subs, probed).await,
+        }
     }
 
     async fn container(&mut self, conn: &mut SqliteConnection, item: NewItem) -> anyhow::Result<i64> {
@@ -739,7 +1048,7 @@ impl<'a> Writer<'a> {
                 .await?;
                 Ok(row.map(|(id, kind, parent)| if kind == "season" { parent.unwrap_or(id) } else { id }))
             }
-            LibraryKind::Music => Ok(None),
+            LibraryKind::Music | LibraryKind::Audiobooks => Ok(None),
         }
     }
 
@@ -780,30 +1089,20 @@ impl<'a> Writer<'a> {
         show.path = name.show_dir.as_deref().map(path_str);
         let show_id = self.container(conn, show).await?;
 
-        let season_title = if name.season == 0 { "Specials".to_owned() } else { format!("Season {}", name.season) };
-        let mut season = NewItem::new("season", format!("season:{show_id}:{}", name.season), season_title);
+        let mut season =
+            NewItem::new("season", format!("season:{show_id}:{}", name.season), season_title(name.season.into()));
         season.parent_id = Some(show_id);
         season.idx = Some(name.season);
         season.path = name.season_dir.as_deref().map(path_str);
         let season_id = self.container(conn, season).await?;
 
-        let (key, title) = match name.episode {
-            Some(number) => (
-                format!("episode:{season_id}:{number}"),
-                name.title.clone().unwrap_or_else(|| match name.episode_end {
-                    Some(end) => format!("Episodes {number}-{end}"),
-                    None => format!("Episode {number}"),
-                }),
-            ),
+        let title = episode_title(&name, &file.path);
+        let key = match name.episode {
+            Some(number) => format!("episode:{season_id}:{number}"),
             // No number in the name: the title tells the episode apart, so
             // a season's unnumbered episodes never merge into one. Metadata
             // may number it by its title (see `metadata`).
-            None => {
-                let title = name.title.clone().unwrap_or_else(|| {
-                    file.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
-                });
-                (format!("episode:{season_id}:title:{}", normalize_key(&title)), title)
-            }
+            None => format!("episode:{season_id}:title:{}", normalize_key(&title)),
         };
         let mut episode = NewItem::new("episode", key, title);
         episode.parent_id = Some(season_id);
@@ -853,6 +1152,139 @@ impl<'a> Writer<'a> {
     }
 }
 
+impl Writer<'_> {
+    /// An audiobook's file: a part of its book, which is made when it's
+    /// new. What the book says (its title, writers, series…) comes after the
+    /// scan's writes, from its first part (see [`Scanner::read_books`]).
+    async fn write_part(
+        &mut self,
+        conn: &mut SqliteConnection,
+        file: &FoundFile,
+        info: Option<&MediaInfo>,
+        duration: Option<i64>,
+    ) -> anyhow::Result<i64> {
+        let empty = Default::default();
+        let tags = info.map(|i| &i.tags).unwrap_or(&empty);
+        let name = parse_audiobook(&file.path, &file.root, tags);
+        let book_id = self.book(conn, &name).await?;
+
+        let mut part = NewItem::new("part", format!("part:{}", path_str(&file.path)), name.part_title);
+        // Parts sort by their files' names (see `library::part_order`).
+        part.sort_title = Some(name.part_sort);
+        part.parent_id = Some(book_id);
+        part.idx = name.part;
+        part.disc = name.disc;
+        part.year = name.year;
+        part.duration_ms = duration;
+        Ok(upsert_item(conn, self.library_id, &part).await?)
+    }
+
+    /// The book `name`'s file is a part of: one that exists is left as it
+    /// is, a new one is made with what `name` says.
+    async fn book(&mut self, conn: &mut SqliteConnection, name: &AudiobookName) -> anyhow::Result<i64> {
+        let key = format!("audiobook:{}", name.book_key);
+        if let Some(id) = self.containers.get(&key) {
+            return Ok(*id);
+        }
+        let known: Option<i64> = sqlx::query_scalar("SELECT id FROM items WHERE library_id = ? AND key = ?")
+            .bind(self.library_id)
+            .bind(&key)
+            .fetch_optional(&mut *conn)
+            .await?;
+        let id = match known {
+            Some(id) => id,
+            None => {
+                let mut book = NewItem::new("audiobook", key.clone(), name.title.clone());
+                book.year = name.year;
+                book.path = name.book_dir.as_deref().map(path_str);
+                upsert_item(conn, self.library_id, &book).await?
+            }
+        };
+        self.containers.insert(key, id);
+        Ok(id)
+    }
+}
+
+/// Of the books in a JSON array, the first part of each, with the tags
+/// read from its file: in the order parts play, of those whose files were
+/// read. Only the first parts' files are fetched whole.
+const FIRST_PARTS: &str = concat!(
+    "SELECT r.book, f.path, f.media_info FROM (
+        SELECT p.parent_id AS book, f.id AS file,
+               ROW_NUMBER() OVER (PARTITION BY p.parent_id ORDER BY f.media_info IS NULL, ",
+    super::part_order!(),
+    ") AS n
+        FROM items p JOIN media_files f ON f.item_id = p.id
+        WHERE p.parent_id IN (SELECT value FROM json_each(?)) AND p.kind = 'part') r
+     JOIN media_files f ON f.id = r.file
+     WHERE r.n = 1"
+);
+
+#[derive(sqlx::FromRow)]
+struct FirstPart {
+    book: i64,
+    path: String,
+    media_info: Option<String>,
+}
+
+/// The tags of a file's stored `MediaInfo`, without the rest of it.
+#[derive(Deserialize)]
+struct StoredTags {
+    #[serde(default)]
+    tags: BTreeMap<String, String>,
+}
+
+/// Writes what a book's first part says of it where that changed: its
+/// folder, and unless its details are locked, the rest.
+async fn save_book(conn: &mut SqliteConnection, id: i64, name: &AudiobookName, now: i64) -> anyhow::Result<()> {
+    let path = name.book_dir.as_deref().map(path_str);
+    sqlx::query("UPDATE items SET path = ?1, updated_at = ?2 WHERE id = ?3 AND path IS NOT ?1")
+        .bind(&path)
+        .bind(now)
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+    let genres = name.genre.as_ref().map(|g| serde_json::json!([g]).to_string());
+    let authors = serde_json::to_string(&name.authors)?;
+    let narrators = (!name.narrators.is_empty()).then(|| serde_json::to_string(&name.narrators)).transpose()?;
+    sqlx::query(
+        "UPDATE items SET title = ?1, sort_title = ?2, year = ?3, genres = ?4, authors = ?5, narrators = ?6,
+                          series = ?7, series_index = ?8, summary = ?9, updated_at = ?10
+         WHERE id = ?11 AND metadata_locked = 0
+           AND (title IS NOT ?1 OR sort_title IS NOT ?2 OR year IS NOT ?3 OR genres IS NOT ?4 OR authors IS NOT ?5
+                OR narrators IS NOT ?6 OR series IS NOT ?7 OR series_index IS NOT ?8 OR summary IS NOT ?9)",
+    )
+    .bind(&name.title)
+    .bind(sort_title(&name.title))
+    .bind(name.year)
+    .bind(genres)
+    .bind(authors)
+    .bind(narrators)
+    .bind(&name.series)
+    .bind(name.series_index)
+    .bind(&name.summary)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// A season's title before metadata names it.
+fn season_title(number: i64) -> String {
+    if number == 0 { "Specials".to_owned() } else { format!("Season {number}") }
+}
+
+/// An episode's title from its file's name: the title in it, else its
+/// number (`Episode 3`, `Episodes 1-2`), else the name itself.
+fn episode_title(name: &EpisodeName, file: &Path) -> String {
+    name.title.clone().unwrap_or_else(|| match (name.episode, name.episode_end) {
+        (Some(number), Some(end)) => format!("Episodes {number}-{end}"),
+        (Some(number), None) => format!("Episode {number}"),
+        (None, _) => file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+    })
+}
+
 async fn upsert_item(conn: &mut SqliteConnection, library_id: i64, item: &NewItem) -> sqlx::Result<i64> {
     let now = now();
     // Titles and years come from the files until a metadata agent matched the
@@ -886,7 +1318,7 @@ async fn upsert_item(conn: &mut SqliteConnection, library_id: i64, item: &NewIte
     .bind(item.kind)
     .bind(&item.key)
     .bind(&item.title)
-    .bind(sort_title(&item.title))
+    .bind(item.sort_title.clone().unwrap_or_else(|| sort_title(&item.title)))
     .bind(&item.original_title)
     .bind(item.year)
     .bind(item.idx)
@@ -957,15 +1389,68 @@ async fn upsert_file(
     Ok(())
 }
 
+/// [`upsert_file`] for a `.strm` file, which names the address `link_key`
+/// tells from others. What was found of its media when it was played (its
+/// streams, its length, its size: see [`crate::strm::ready`]) stays for as
+/// long as the file names that address, unless every file is scanned again
+/// (`force`); else it is unknown until the file is opened or played, and
+/// its container reads `strm` meanwhile.
+async fn upsert_link(
+    conn: &mut SqliteConnection,
+    library_id: i64,
+    item_id: i64,
+    file: &FoundFile,
+    link_key: Option<&str>,
+    subs: &[ExternalSub],
+    force: bool,
+) -> anyhow::Result<()> {
+    let now = now();
+    sqlx::query(
+        "INSERT INTO media_files (id, item_id, library_id, path, size, link_size, link_key, mtime, container,
+                                  external_subs, probed, added_at, updated_at)
+         VALUES ((SELECT last + 1 FROM file_ids), ?1, ?2, ?3, 0, ?4, ?5, ?6, 'strm', ?7, 1, ?8, ?8)
+         ON CONFLICT(path) DO UPDATE SET
+            item_id = excluded.item_id, library_id = excluded.library_id, link_size = excluded.link_size,
+            link_key = excluded.link_key, mtime = excluded.mtime, external_subs = excluded.external_subs,
+            probed = 1, updated_at = excluded.updated_at,
+            size = CASE WHEN media_files.link_key IS excluded.link_key AND NOT ?9 THEN media_files.size ELSE 0 END,
+            container = CASE WHEN media_files.link_key IS excluded.link_key AND NOT ?9 THEN media_files.container
+                             ELSE 'strm' END,
+            duration_ms = CASE WHEN media_files.link_key IS excluded.link_key AND NOT ?9 THEN media_files.duration_ms END,
+            bitrate = CASE WHEN media_files.link_key IS excluded.link_key AND NOT ?9 THEN media_files.bitrate END,
+            width = CASE WHEN media_files.link_key IS excluded.link_key AND NOT ?9 THEN media_files.width END,
+            height = CASE WHEN media_files.link_key IS excluded.link_key AND NOT ?9 THEN media_files.height END,
+            video_codec = CASE WHEN media_files.link_key IS excluded.link_key AND NOT ?9 THEN media_files.video_codec END,
+            dynamic_range = CASE WHEN media_files.link_key IS excluded.link_key AND NOT ?9
+                                 THEN media_files.dynamic_range END,
+            audio_codec = CASE WHEN media_files.link_key IS excluded.link_key AND NOT ?9 THEN media_files.audio_codec END,
+            media_info = CASE WHEN media_files.link_key IS excluded.link_key AND NOT ?9 THEN media_files.media_info END,
+            fingerprint = CASE WHEN media_files.link_size = excluded.link_size AND media_files.mtime = excluded.mtime
+                               THEN media_files.fingerprint END",
+    )
+    .bind(item_id)
+    .bind(library_id)
+    .bind(path_str(&file.path))
+    .bind(file.size)
+    .bind(link_key)
+    .bind(file.mtime)
+    .bind(serde_json::to_string(subs)?)
+    .bind(now)
+    .bind(force)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 async fn cleanup_orphans(conn: &mut SqliteConnection, library_id: i64) -> sqlx::Result<()> {
     sqlx::query(
-        "DELETE FROM items WHERE library_id = ? AND kind IN ('movie', 'episode', 'track', 'extra')
+        "DELETE FROM items WHERE library_id = ? AND kind IN ('movie', 'episode', 'track', 'part', 'extra')
          AND NOT EXISTS (SELECT 1 FROM media_files f WHERE f.item_id = items.id)",
     )
     .bind(library_id)
     .execute(&mut *conn)
     .await?;
-    for kinds in ["('season', 'album')", "('show', 'artist')"] {
+    for kinds in ["('season', 'album', 'audiobook')", "('show', 'artist')"] {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "DELETE FROM items WHERE library_id = ? AND kind IN {kinds}
              AND NOT EXISTS (SELECT 1 FROM items c WHERE c.parent_id = items.id AND c.kind != 'extra')"
@@ -1004,7 +1489,7 @@ async fn update_counts(conn: &mut SqliteConnection, library_id: i64) -> sqlx::Re
          FROM (SELECT p.id,
                  (SELECT COUNT(*) FROM items t WHERE t.parent_id = p.id) AS leaves,
                  (SELECT SUM(t.duration_ms) FROM items t WHERE t.parent_id = p.id) AS duration
-               FROM items p WHERE p.library_id = ? AND p.kind = 'album') AS c
+               FROM items p WHERE p.library_id = ? AND p.kind IN ('album', 'audiobook')) AS c
          WHERE items.id = c.id AND (items.leaf_count IS NOT c.leaves OR items.duration_ms IS NOT c.duration)",
     ];
     for sql in statements {
@@ -1035,10 +1520,18 @@ fn subtitle_changes(files: Vec<(i64, PathBuf, String)>, sidecars: &Sidecars) -> 
 }
 
 /// Items and the files their local artwork is looked for next to.
-const ARTWORK_ROWS: &str = "SELECT i.id, i.kind, i.path, i.idx, i.poster, i.backdrop, i.thumb, p.path AS parent_path,
-        (SELECT f.path FROM media_files f WHERE f.item_id = i.id ORDER BY f.id LIMIT 1) AS file_path
+/// An audiobook's file is its first part's.
+const ARTWORK_ROWS: &str = concat!(
+    "SELECT i.id, i.kind, i.path, i.idx, i.poster, i.backdrop, i.thumb, p.path AS parent_path,
+        CASE WHEN i.kind = 'audiobook'
+             THEN (SELECT f.path FROM media_files f JOIN items c ON c.id = f.item_id
+                   WHERE c.parent_id = i.id ORDER BY ",
+    super::part_order!(),
+    " LIMIT 1)
+             ELSE (SELECT f.path FROM media_files f WHERE f.item_id = i.id ORDER BY f.id LIMIT 1) END AS file_path
      FROM items i LEFT JOIN items p ON p.id = i.parent_id
-     WHERE i.library_id = ? AND i.kind IN ('movie', 'show', 'season', 'episode', 'artist', 'album')";
+     WHERE i.library_id = ? AND i.kind IN ('movie', 'show', 'season', 'episode', 'artist', 'album', 'audiobook')"
+);
 
 #[derive(sqlx::FromRow)]
 struct ArtworkRow {
@@ -1093,6 +1586,16 @@ fn artwork_changes(rows: Vec<ArtworkRow>, sidecars: &Sidecars) -> Vec<ArtworkCha
         sidecars.image(Path::new(dir), bases).map(|path| path_str(&path))
     };
     let strings = |names: &[&str]| names.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    // Books side by side in a folder (an author's `.m4b` files of one
+    // series) share it: its pictures are none of theirs. Counted here, from
+    // the rows at hand, rather than per book in the query, as items have no
+    // index on their folders.
+    let mut book_dirs: HashMap<String, usize> = HashMap::new();
+    for row in rows.iter().filter(|r| r.kind == "audiobook") {
+        if let Some(path) = &row.path {
+            *book_dirs.entry(path.clone()).or_default() += 1;
+        }
+    }
     let mut changes = Vec::new();
     for row in rows {
         let file_stem_bases = |suffixes: &[&str]| -> Vec<String> {
@@ -1148,6 +1651,17 @@ fn artwork_changes(rows: Vec<ArtworkRow>, sidecars: &Sidecars) -> Vec<ArtworkCha
                 let path = row.path.as_deref().unwrap_or_default();
                 (lookup(path, &strings(&["cover", "folder", "front", "album", "poster"])), None, None)
             }
+            "audiobook" => {
+                // `Book.m4b` beside `Book.jpg`, else the cover of the book's
+                // own folder; embedded art comes on request (see `catalog`).
+                let named =
+                    file_dir.as_deref().and_then(|dir| lookup(dir, &file_stem_bases(&["", "-cover", "-poster"])));
+                let own_folder = row.path.as_deref().filter(|path| book_dirs.get(*path) == Some(&1));
+                let poster = named.or_else(|| {
+                    own_folder.and_then(|path| lookup(path, &strings(&["cover", "folder", "front", "poster"])))
+                });
+                (poster, None, None)
+            }
             "episode" => {
                 let dir = file_dir.clone().unwrap_or_default();
                 (None, None, lookup(&dir, &file_stem_bases(&["-thumb", ""])))
@@ -1155,6 +1669,10 @@ fn artwork_changes(rows: Vec<ArtworkRow>, sidecars: &Sidecars) -> Vec<ArtworkCha
             _ => (None, None, None),
         };
 
+        // An audiobook's local pictures are only the ones found for it: one
+        // its folder gave it before the folder was found to be another
+        // book's too, or its author's, goes.
+        let only_found = row.kind == "audiobook";
         let decide = |current: &Option<String>, local: Option<String>| -> Swap {
             let after = match (current, local) {
                 (Some(cur), Some(new)) if *cur == new => return None,
@@ -1163,7 +1681,8 @@ fn artwork_changes(rows: Vec<ArtworkRow>, sidecars: &Sidecars) -> Vec<ArtworkCha
                 // something else (downloaded art lives in the blob store).
                 (Some(cur), None)
                     if !crate::store::is_blob(cur)
-                        && !(Path::new(cur).exists() && super::walk::leads_to_its_kind(Path::new(cur))) =>
+                        && (only_found
+                            || !(Path::new(cur).exists() && super::walk::leads_to_its_kind(Path::new(cur)))) =>
                 {
                     None
                 }
@@ -1182,6 +1701,606 @@ fn artwork_changes(rows: Vec<ArtworkRow>, sidecars: &Sidecars) -> Vec<ArtworkCha
         }
     }
     changes
+}
+
+/// Movies, shows, seasons and episodes of a library, with the NFO file each
+/// had at the last scan.
+const NFO_ROWS: &str = "SELECT i.id, i.kind, i.path, i.idx, i.parent_id, i.grandparent_id, s.idx AS season, i.title,
+        i.tmdb_id, i.imdb_id, i.tvdb_id, i.tvmaze_id, i.metadata_locked,
+        EXISTS (SELECT 1 FROM item_overrides o WHERE o.item_id = i.id AND o.field = 'match') AS rematched,
+        n.path AS nfo_path, n.size AS nfo_size, n.mtime AS nfo_mtime, n.ids AS nfo_ids, n.fields AS nfo_fields,
+        n.locked AS nfo_locked
+     FROM items i LEFT JOIN items s ON s.id = i.parent_id AND i.kind = 'episode'
+     LEFT JOIN item_nfo n ON n.item_id = i.id
+     WHERE i.library_id = ? AND i.kind IN ('movie', 'show', 'season', 'episode')";
+
+/// The files of a library's movies and episodes, which NFO files are found
+/// next to.
+const NFO_FILES: &str = "SELECT f.item_id, f.path FROM media_files f JOIN items i ON i.id = f.item_id
+     WHERE f.library_id = ? AND i.kind IN ('movie', 'episode') ORDER BY f.id";
+
+#[derive(sqlx::FromRow)]
+struct NfoRow {
+    id: i64,
+    kind: String,
+    path: Option<String>,
+    idx: Option<i64>,
+    parent_id: Option<i64>,
+    grandparent_id: Option<i64>,
+    /// An episode's season number.
+    season: Option<i64>,
+    title: String,
+    #[sqlx(flatten)]
+    ids: ItemIds,
+    metadata_locked: bool,
+    /// Matched with Fix Match, which an NFO file's ids don't undo.
+    rematched: bool,
+    nfo_path: Option<String>,
+    nfo_size: Option<i64>,
+    nfo_mtime: Option<i64>,
+    nfo_ids: Option<String>,
+    nfo_fields: Option<String>,
+    nfo_locked: Option<bool>,
+}
+
+impl NfoRow {
+    /// The NFO file as the last scan read it.
+    fn stored(&self) -> Option<ItemNfo> {
+        Some(ItemNfo {
+            path: self.nfo_path.clone()?,
+            size: self.nfo_size?,
+            mtime: self.nfo_mtime?,
+            ids: self.nfo_ids.as_deref().and_then(|ids| serde_json::from_str(ids).ok()).unwrap_or_default(),
+            fields: self.nfo_fields.as_deref().and_then(|f| serde_json::from_str(f).ok()).unwrap_or_default(),
+            locked: self.nfo_locked.unwrap_or_default(),
+        })
+    }
+
+    /// The item whose refresh fetches this one: a season's or an episode's
+    /// show.
+    fn refreshed_with(&self) -> Option<i64> {
+        match self.kind.as_str() {
+            "season" => self.parent_id,
+            "episode" => self.grandparent_id,
+            _ => Some(self.id),
+        }
+    }
+}
+
+/// An item's ids at the metadata sources.
+#[derive(Debug, Clone, Default, PartialEq, sqlx::FromRow)]
+pub(crate) struct ItemIds {
+    pub tmdb_id: Option<i64>,
+    pub imdb_id: Option<String>,
+    pub tvdb_id: Option<i64>,
+    pub tvmaze_id: Option<i64>,
+}
+
+/// Whether an NFO file describes the title its item is matched to, so that
+/// its fields and lockdata are the item's: always, but for a movie or a
+/// show matched with Fix Match to a title none of the file's ids name.
+/// `overrides::RATING_LOCKED` says the same in SQL.
+pub(crate) fn nfo_describes(kind: &str, item: &ItemIds, nfo: &NfoIds) -> bool {
+    let named = ItemIds::of_nfo(kind, nfo);
+    !matches!(kind, "movie" | "show") || named == ItemIds::default() || item.shares_with(&named)
+}
+
+/// Which ids an item of `kind` takes from its NFO file (TMDB, IMDb,
+/// TheTVDB, TVmaze): a movie's TMDB and IMDb ids, a show's from every
+/// source, an episode's own, none of a season.
+fn nfo_ids_taken(kind: &str) -> [bool; 4] {
+    match kind {
+        "movie" => [true, true, false, false],
+        "show" => [true, true, true, true],
+        "episode" => [true, true, true, false],
+        _ => [false; 4],
+    }
+}
+
+impl ItemIds {
+    /// The ids an item of `kind` takes from its NFO file.
+    fn of_nfo(kind: &str, nfo: &NfoIds) -> Self {
+        let [tmdb, imdb, tvdb, tvmaze] = nfo_ids_taken(kind);
+        Self {
+            tmdb_id: nfo.tmdb.filter(|_| tmdb),
+            imdb_id: nfo.imdb.clone().filter(|_| imdb),
+            tvdb_id: nfo.tvdb.filter(|_| tvdb),
+            tvmaze_id: nfo.tvmaze.filter(|_| tvmaze),
+        }
+    }
+
+    /// Whether the two have an id in common: they name the same title.
+    fn shares_with(&self, other: &Self) -> bool {
+        fn same<T: PartialEq>(a: &Option<T>, b: &Option<T>) -> bool {
+            matches!((a, b), (Some(a), Some(b)) if a == b)
+        }
+        same(&self.tmdb_id, &other.tmdb_id)
+            || same(&self.imdb_id, &other.imdb_id)
+            || same(&self.tvdb_id, &other.tvdb_id)
+            || same(&self.tvmaze_id, &other.tvmaze_id)
+    }
+
+    /// Whether the two have different ids of the same kind: they name
+    /// different titles.
+    fn conflicts_with(&self, other: &Self) -> bool {
+        fn differs<T: PartialEq>(a: &Option<T>, b: &Option<T>) -> bool {
+            matches!((a, b), (Some(a), Some(b)) if a != b)
+        }
+        differs(&self.tmdb_id, &other.tmdb_id)
+            || differs(&self.imdb_id, &other.imdb_id)
+            || differs(&self.tvdb_id, &other.tvdb_id)
+            || differs(&self.tvmaze_id, &other.tvmaze_id)
+    }
+
+    /// What an item of `kind` holding these ids holds once it takes the ids
+    /// of its NFO file, if that changes anything. A movie's or a show's ids
+    /// decide its match: unless one of them is the NFO file's, they came
+    /// from the names or a search, maybe for another title, and give way to
+    /// the NFO file's, from which the source finds the rest. An episode's
+    /// ids decide nothing: those it lacks are added, and only one it holds
+    /// differently means another title, whose other ids go too.
+    fn with_nfo(&self, kind: &str, nfo: &NfoIds) -> Option<Self> {
+        let wanted = Self::of_nfo(kind, nfo);
+        if wanted == Self::default() {
+            return None;
+        }
+        let keep = match kind {
+            "movie" | "show" => self.shares_with(&wanted),
+            _ => !self.conflicts_with(&wanted),
+        };
+        let [tmdb, imdb, tvdb, tvmaze] = nfo_ids_taken(kind);
+        fn pick<T>(keep: bool, taken: bool, want: Option<T>, have: Option<T>) -> Option<T> {
+            if keep || !taken { want.or(have) } else { want }
+        }
+        let next = Self {
+            tmdb_id: pick(keep, tmdb, wanted.tmdb_id, self.tmdb_id),
+            imdb_id: pick(keep, imdb, wanted.imdb_id, self.imdb_id.clone()),
+            tvdb_id: pick(keep, tvdb, wanted.tvdb_id, self.tvdb_id),
+            tvmaze_id: pick(keep, tvmaze, wanted.tvmaze_id, self.tvmaze_id),
+        };
+        (next != *self).then_some(next)
+    }
+
+    /// What an item of `kind` holding these ids holds once its NFO file no
+    /// longer gives the ids `gone`, if that changes anything. A movie or a
+    /// show still matched by them goes back to the ids in its names
+    /// (`named`), and the source finds it as it would without the file.
+    fn without_nfo(&self, kind: &str, gone: &NfoIds, named: impl FnOnce() -> Self) -> Option<Self> {
+        if !matches!(kind, "movie" | "show") || !self.shares_with(&Self::of_nfo(kind, gone)) {
+            return None;
+        }
+        let next = named();
+        (next != *self).then_some(next)
+    }
+}
+
+/// An item's NFO file, and what the scan read in it.
+#[derive(Debug, Clone, PartialEq)]
+struct ItemNfo {
+    path: String,
+    size: i64,
+    mtime: i64,
+    ids: NfoIds,
+    fields: NfoFields,
+    locked: bool,
+}
+
+impl ItemNfo {
+    /// Whether it sets anything at all (an NFO file of the wrong kind, or
+    /// release notes, doesn't).
+    fn sets_anything(&self) -> bool {
+        self.locked || self.ids != NfoIds::default() || self.fields != NfoFields::default()
+    }
+}
+
+/// What the NFO pass of a scan needs besides the items.
+struct NfoContext {
+    /// Whether NFO files are read (the `read_nfo` setting).
+    read: bool,
+    roots: Vec<PathBuf>,
+    /// Folders the walk couldn't read: NFO files in them haven't gone.
+    unavailable: Vec<PathBuf>,
+    /// The size and modification time of the NFO files the walk listed.
+    listed: HashMap<PathBuf, (i64, i64)>,
+    /// The server's country, whose rating is taken of several countries'.
+    region: String,
+}
+
+/// An item whose NFO file appeared, changed or went.
+struct NfoChange {
+    item_id: i64,
+    /// The item whose online metadata has to be fetched again: the item, or
+    /// a season's or an episode's show.
+    refresh: Option<i64>,
+    /// As the database has it, and as it is now.
+    before: Option<ItemNfo>,
+    after: Option<ItemNfo>,
+    /// The item's ids as seen, and what they become.
+    ids: Option<(ItemIds, ItemIds)>,
+    /// Columns that the NFO file set and no longer does: the value it set,
+    /// and what the item gets back (its names', or nothing until the next
+    /// refresh fills it).
+    reverts: Vec<(&'static str, String, Option<String>)>,
+    /// Jellyfin's lockdata, as the item has it and as the NFO file has it.
+    locked: Option<(bool, bool)>,
+}
+
+impl NfoChange {
+    async fn save(&self, conn: &mut SqliteConnection) -> sqlx::Result<()> {
+        if let Some((seen, next)) = &self.ids {
+            // Only if the item's ids are still as seen, and it wasn't matched
+            // by hand meanwhile. Otherwise none of the change is kept: the
+            // next scan finds the NFO file new or changed again and works it
+            // out from the ids the item has then.
+            let set = sqlx::query(
+                "UPDATE items SET tmdb_id = ?, imdb_id = ?, tvdb_id = ?, tvmaze_id = ?
+                 WHERE id = ? AND tmdb_id IS ? AND imdb_id IS ? AND tvdb_id IS ? AND tvmaze_id IS ?
+                   AND NOT EXISTS (SELECT 1 FROM item_overrides o WHERE o.item_id = items.id AND o.field = ?)",
+            )
+            .bind(next.tmdb_id)
+            .bind(&next.imdb_id)
+            .bind(next.tvdb_id)
+            .bind(next.tvmaze_id)
+            .bind(self.item_id)
+            .bind(seen.tmdb_id)
+            .bind(&seen.imdb_id)
+            .bind(seen.tvdb_id)
+            .bind(seen.tvmaze_id)
+            .bind(crate::overrides::MATCH)
+            .execute(&mut *conn)
+            .await?;
+            if set.rows_affected() == 0 {
+                return Ok(());
+            }
+        }
+        match (&self.before, &self.after) {
+            (_, Some(nfo)) => {
+                // Unless the item went meanwhile.
+                sqlx::query(
+                    "INSERT INTO item_nfo (item_id, path, size, mtime, ids, fields, locked)
+                     SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM items WHERE id = ?)
+                     ON CONFLICT(item_id) DO UPDATE SET path = excluded.path, size = excluded.size,
+                        mtime = excluded.mtime, ids = excluded.ids, fields = excluded.fields, locked = excluded.locked",
+                )
+                .bind(self.item_id)
+                .bind(&nfo.path)
+                .bind(nfo.size)
+                .bind(nfo.mtime)
+                .bind(serde_json::to_string(&nfo.ids).map_err(|e| sqlx::Error::Encode(e.into()))?)
+                .bind(serde_json::to_string(&nfo.fields).map_err(|e| sqlx::Error::Encode(e.into()))?)
+                .bind(nfo.locked)
+                .bind(self.item_id)
+                .execute(&mut *conn)
+                .await?;
+            }
+            (Some(_), None) => {
+                sqlx::query("DELETE FROM item_nfo WHERE item_id = ?").bind(self.item_id).execute(&mut *conn).await?;
+            }
+            (None, None) => {}
+        }
+        let now = now();
+        for (column, set, back) in &self.reverts {
+            // `column` comes from `overrides::nfo_values`, so formatting it
+            // into SQL is safe. Only what still holds the NFO file's value
+            // goes back: an edit or a refresh meanwhile wins.
+            let age =
+                if *column == "content_rating" { ", content_rating_country = NULL, rating_age = NULL" } else { "" };
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE items SET {column} = ?{age}, updated_at = ? WHERE id = ? AND {column} IS ?"
+            )))
+            .bind(back)
+            .bind(now)
+            .bind(self.item_id)
+            .bind(set)
+            .execute(&mut *conn)
+            .await?;
+        }
+        if let Some((seen, locked)) = self.locked {
+            sqlx::query("UPDATE items SET metadata_locked = ? WHERE id = ? AND metadata_locked = ?")
+                .bind(locked)
+                .bind(self.item_id)
+                .bind(seen)
+                .execute(&mut *conn)
+                .await?;
+        }
+        if let Some(id) = self.refresh {
+            sqlx::query("UPDATE items SET metadata_at = NULL WHERE id = ?").bind(id).execute(&mut *conn).await?;
+        }
+        Ok(())
+    }
+}
+
+/// The NFO files that appeared, changed or went for `rows` (the movies,
+/// shows, seasons and episodes of a library, `files` their files). Only
+/// those are read; they are found with `sidecars`, the walk's index.
+fn nfo_changes(rows: Vec<NfoRow>, files: Vec<(i64, String)>, sidecars: &Sidecars, cx: &NfoContext) -> Vec<NfoChange> {
+    let mut files_of: HashMap<i64, Vec<String>> = HashMap::new();
+    for (item, path) in files {
+        files_of.entry(item).or_default().push(path);
+    }
+    let movie_ids: HashSet<i64> = rows.iter().filter(|r| r.kind == "movie").map(|r| r.id).collect();
+    // `movie.nfo` is the movie's only in a folder that holds no other.
+    let mut movies_in: HashMap<PathBuf, HashSet<i64>> = HashMap::new();
+    for (item, paths) in &files_of {
+        if movie_ids.contains(item) {
+            for path in paths {
+                if let Some(dir) = Path::new(path).parent() {
+                    movies_in.entry(dir.to_path_buf()).or_default().insert(*item);
+                }
+            }
+        }
+    }
+    // An episode of each show.
+    let mut episode_of: HashMap<i64, i64> = HashMap::new();
+    for row in rows.iter().filter(|r| r.kind == "episode") {
+        if let Some(show) = row.grandparent_id {
+            episode_of.entry(show).or_insert(row.id);
+        }
+    }
+    let unavailable = |path: &Path| cx.unavailable.iter().any(|p| path.starts_with(p));
+    let no_files = Vec::new();
+
+    let mut changes = Vec::new();
+    for row in rows {
+        let before = row.stored();
+        let files = files_of.get(&row.id).unwrap_or(&no_files);
+        let found = if cx.read { find_nfo(&row, files, sidecars, &movies_in) } else { None };
+        let found = found.and_then(|path| {
+            let (size, mtime) = match cx.listed.get(&path) {
+                Some(listed) => *listed,
+                // The listing didn't say.
+                None => {
+                    let meta = std::fs::metadata(&path).ok()?;
+                    (meta.len() as i64, meta.modified().map(crate::util::system_time_secs).unwrap_or(0))
+                }
+            };
+            Some((path_str(&path), size, mtime))
+        });
+        let after = match (&found, &before) {
+            (Some((path, size, mtime)), Some(seen))
+                if *path == seen.path && *size == seen.size && *mtime == seen.mtime =>
+            {
+                continue;
+            }
+            (Some((path, size, mtime)), _) => {
+                tracing::debug!("reading the NFO file {path} of item {}", row.id);
+                // A file that can't be read (too big, a link elsewhere) is as
+                // good as none.
+                nfo::read(Path::new(path)).map(|entries| {
+                    let entry = entry_for(&row, entries);
+                    let (ids, mut fields, locked) = entry.map(|e| (e.ids, e.fields, e.locked)).unwrap_or_default();
+                    if row.kind == "season" {
+                        // A season's NFO file names it and says what it is about.
+                        fields = NfoFields { title: fields.title, summary: fields.summary, ..Default::default() };
+                    }
+                    ItemNfo { path: path.clone(), size: *size, mtime: *mtime, ids, fields, locked }
+                })
+            }
+            (None, _) => None,
+        };
+        match (&before, &after) {
+            (None, None) => continue,
+            // Not gone: its folder couldn't be read this time.
+            (Some(seen), None) if cx.read && unavailable(Path::new(&seen.path)) => continue,
+            _ => {}
+        }
+
+        // A show is named in its episodes' paths.
+        let named_in = match row.kind.as_str() {
+            "show" => episode_of.get(&row.id).and_then(|e| files_of.get(e)).unwrap_or(&no_files),
+            _ => files,
+        };
+        let ids = match (&before, &after) {
+            _ if row.rematched => None,
+            (_, Some(nfo)) if ItemIds::of_nfo(&row.kind, &nfo.ids) != ItemIds::default() => {
+                let same = before.as_ref().is_some_and(|b| b.ids == nfo.ids);
+                if same { None } else { row.ids.with_nfo(&row.kind, &nfo.ids) }
+            }
+            // It gives no ids any more: those it gave make way for the
+            // names', or a search.
+            (Some(seen), _) => row.ids.without_nfo(&row.kind, &seen.ids, || {
+                named(&row, named_in, &cx.roots).map(|names| names.ids).unwrap_or_default()
+            }),
+            (None, _) => None,
+        }
+        .map(|next| (row.ids.clone(), next));
+        let reverts = match &before {
+            Some(seen) => nfo_reverts(&row, &seen.fields, after.as_ref().map(|a| &a.fields), named_in, cx),
+            None => Vec::new(),
+        };
+        // Lockdata goes with the title the file describes.
+        let matched = ids.as_ref().map_or(&row.ids, |(_, next)| next);
+        let locked = after.as_ref().is_some_and(|a| a.locked && nfo_describes(&row.kind, matched, &a.ids));
+        let locked = (row.metadata_locked != locked).then_some((row.metadata_locked, locked));
+        // Online metadata is fetched again when the match changed (an
+        // episode's ids don't decide it), the NFO file went or stopped
+        // setting fields, or it no longer locks the item.
+        let refetch = (ids.is_some() && matches!(row.kind.as_str(), "movie" | "show"))
+            || !reverts.is_empty()
+            || locked == Some((true, false))
+            || (after.is_none() && before.as_ref().is_some_and(ItemNfo::sets_anything));
+        let refresh = if refetch { row.refreshed_with() } else { None };
+        changes.push(NfoChange { item_id: row.id, refresh, before, after, ids, reverts, locked });
+    }
+    changes
+}
+
+/// Where an item's NFO file is: `<video>.nfo` next to a movie's or an
+/// episode's file, or `movie.nfo` in a folder that holds one movie;
+/// `tvshow.nfo` in a show's folder, `season.nfo` in a season's.
+fn find_nfo(
+    row: &NfoRow,
+    files: &[String],
+    sidecars: &Sidecars,
+    movies_in: &HashMap<PathBuf, HashSet<i64>>,
+) -> Option<PathBuf> {
+    let next_to_files = || files.iter().find_map(|file| sidecars.nfo(Path::new(file)));
+    match row.kind.as_str() {
+        "movie" => next_to_files().or_else(|| {
+            let dir = Path::new(files.first()?).parent()?;
+            let alone = movies_in.get(dir).is_some_and(|movies| movies.len() == 1);
+            if alone { sidecars.folder_nfo(dir, &["movie"]) } else { None }
+        }),
+        "episode" => next_to_files(),
+        "show" => sidecars.folder_nfo(Path::new(row.path.as_deref()?), &["tvshow"]),
+        "season" => sidecars.folder_nfo(Path::new(row.path.as_deref()?), &["season"]),
+        _ => None,
+    }
+}
+
+/// The entry of an NFO file that describes `row`: the movie, show or season
+/// it holds, or the link to its page (a movie's mustn't name a show); of a
+/// multi-episode file, the episode with the item's season and number.
+fn entry_for(row: &NfoRow, entries: Vec<Nfo>) -> Option<Nfo> {
+    let mut entries = entries.into_iter();
+    match row.kind.as_str() {
+        "movie" => entries
+            .find(|e| e.kind == NfoKind::Movie || (e.kind == NfoKind::Link && e.links_to != Some(NfoKind::TvShow))),
+        "show" => entries
+            .find(|e| e.kind == NfoKind::TvShow || (e.kind == NfoKind::Link && e.links_to != Some(NfoKind::Movie))),
+        "season" => entries.find(|e| e.kind == NfoKind::Season),
+        "episode" => {
+            let episodes: Vec<Nfo> = entries.filter(|e| e.kind == NfoKind::Episode).collect();
+            if episodes.len() == 1 {
+                return episodes.into_iter().next();
+            }
+            episodes.into_iter().find(|e| e.season == row.season && e.episode == row.idx && row.idx.is_some())
+        }
+        _ => None,
+    }
+}
+
+/// What an item's file and folder names say, before any source described it.
+struct Named {
+    title: String,
+    year: Option<i64>,
+    release_date: Option<String>,
+    /// A movie's or a show's ids (`{tmdb-603}`).
+    ids: ItemIds,
+}
+
+/// What `row`'s names say: a movie's or an episode's file's, a show's
+/// (`files` are then an episode's), a season's number.
+fn named(row: &NfoRow, files: &[String], roots: &[PathBuf]) -> Option<Named> {
+    if row.kind == "season" {
+        return Some(Named { title: season_title(row.idx?), year: None, release_date: None, ids: ItemIds::default() });
+    }
+    let file = Path::new(files.first()?);
+    let root = roots.iter().find(|root| file.starts_with(root))?;
+    Some(match row.kind.as_str() {
+        "movie" => {
+            let name = parse_movie(file, root);
+            let ids = ItemIds { tmdb_id: name.tmdb_id, imdb_id: name.imdb_id, ..Default::default() };
+            Named { title: name.title, year: name.year.map(i64::from), release_date: None, ids }
+        }
+        "show" => {
+            let name = parse_episode(file, root);
+            let ids = ItemIds { tmdb_id: name.show_tmdb_id, ..Default::default() };
+            Named { title: name.show, year: name.show_year.map(i64::from), release_date: None, ids }
+        }
+        "episode" => {
+            let name = parse_episode(file, root);
+            let year = name.air_date.as_deref().and_then(|d| d.get(..4)).and_then(|y| y.parse().ok());
+            Named { title: episode_title(&name, file), year, release_date: name.air_date, ids: ItemIds::default() }
+        }
+        _ => return None,
+    })
+}
+
+/// The columns an NFO file set that it no longer sets (`after` is `None`
+/// when it went): what each holds from it, and what it gets back. Titles,
+/// years and dates come from the names, as for an item no source described:
+/// without an online source nothing else would put them back. The rest is
+/// emptied for the next refresh to fill.
+fn nfo_reverts(
+    row: &NfoRow,
+    before: &NfoFields,
+    after: Option<&NfoFields>,
+    files: &[String],
+    cx: &NfoContext,
+) -> Vec<(&'static str, String, Option<String>)> {
+    let kept: HashSet<&str> = after
+        .map(|a| crate::overrides::nfo_values(&row.kind, a, &cx.region).into_iter().map(|(c, _)| c).collect())
+        .unwrap_or_default();
+    let gone: Vec<(&'static str, String)> = crate::overrides::nfo_values(&row.kind, before, &cx.region)
+        .into_iter()
+        // A rating's country goes with the rating.
+        .filter(|(column, _)| !kept.contains(column) && *column != "content_rating_country")
+        .collect();
+    if gone.is_empty() {
+        return Vec::new();
+    }
+    let names = named(row, files, &cx.roots);
+    let title_back = gone.iter().any(|(c, _)| *c == "title");
+    let mut reverts = Vec::new();
+    for (column, set) in gone {
+        let back = match column {
+            "title" => match &names {
+                Some(names) => Some(names.title.clone()),
+                // Nothing to name it after: the NFO file's title stays.
+                None => continue,
+            },
+            "sort_title" => {
+                let title = match (&names, title_back) {
+                    (Some(names), true) => names.title.as_str(),
+                    (None, true) => continue,
+                    (_, false) => row.title.as_str(),
+                };
+                Some(sort_title(title))
+            }
+            "year" => names.as_ref().and_then(|n| n.year).map(|y| y.to_string()),
+            "release_date" => names.as_ref().and_then(|n| n.release_date.clone()),
+            _ => None,
+        };
+        reverts.push((column, set, back));
+    }
+    reverts
+}
+
+/// Fix Match was undone: the ids of the item's NFO file decide its match
+/// again, as when the file was read, its fields and lockdata are the
+/// item's again, and its metadata is fetched again.
+pub(crate) async fn nfo_match_dropped(db: &Db, item_id: i64) -> sqlx::Result<()> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        kind: String,
+        nfo_ids: String,
+        nfo_locked: bool,
+        metadata_locked: bool,
+        #[sqlx(flatten)]
+        ids: ItemIds,
+    }
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT i.kind, n.ids AS nfo_ids, n.locked AS nfo_locked, i.metadata_locked,
+                i.tmdb_id, i.imdb_id, i.tvdb_id, i.tvmaze_id
+         FROM items i JOIN item_nfo n ON n.item_id = i.id WHERE i.id = ?",
+    )
+    .bind(item_id)
+    .fetch_optional(&db.read)
+    .await?;
+    let Some(row) = row else { return Ok(()) };
+    let Ok(nfo) = serde_json::from_str::<NfoIds>(&row.nfo_ids) else { return Ok(()) };
+    let next = row.ids.with_nfo(&row.kind, &nfo);
+    // Its lockdata is the item's again, with its title.
+    let locked = row.nfo_locked && nfo_describes(&row.kind, next.as_ref().unwrap_or(&row.ids), &nfo);
+    let locked = (locked != row.metadata_locked).then_some((row.metadata_locked, locked));
+    if next.is_none() && locked.is_none() {
+        return Ok(());
+    }
+    let change = NfoChange {
+        item_id,
+        refresh: Some(item_id),
+        before: None,
+        after: None,
+        ids: next.map(|next| (row.ids, next)),
+        reverts: Vec::new(),
+        locked,
+    };
+    let mut tx = db.write.begin().await?;
+    change.save(&mut tx).await?;
+    tx.commit().await?;
+    // The file describes the item again: its fields are the item's.
+    crate::overrides::apply(db, &[item_id]).await
 }
 
 /// Is this file a good candidate for remuxing (copying H.264 into HLS)?
@@ -1216,8 +2335,174 @@ fn extra_title(stem: &str, extra: &Extra) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_scan_says_how_long_its_phase_has_left_from_the_pace_since_it_began() {
+        use std::time::Instant;
+        let mut scan = ScanStatus {
+            library_id: 1,
+            library_name: "Movies".into(),
+            phase: ScanPhase::Walking,
+            processed: 0,
+            total: 0,
+            started_at: 0,
+            first: true,
+            left_secs: None,
+            pace: None,
+        };
+        scan.update(ScanPhase::Walking, 0, 0);
+        assert!(scan.pace.is_none(), "finding files has no count to go by");
+        scan.update(ScanPhase::Probing, 100, 1000);
+        assert_eq!(scan.left_secs, None, "too soon to tell");
+        // 200 files read in 20 seconds: 700 more take 70.
+        scan.pace = Some((ScanPhase::Probing, Pace::measured_since(Instant::now() - Duration::from_secs(20), 100)));
+        scan.update(ScanPhase::Probing, 300, 1000);
+        assert_eq!(scan.left_secs, Some(70));
+        // Fetching details is measured afresh.
+        scan.update(ScanPhase::Metadata, 0, 50);
+        assert_eq!(scan.left_secs, None);
+        assert!(matches!(scan.pace, Some((ScanPhase::Metadata, _))));
+    }
+
     fn library(id: i64, scanned_at: Option<i64>) -> LibraryRow {
-        LibraryRow { id, name: "Movies".into(), kind: "movies".into(), paths: "[]".into(), created_at: 0, scanned_at }
+        LibraryRow {
+            id,
+            name: "Movies".into(),
+            kind: "movies".into(),
+            paths: "[]".into(),
+            created_at: 0,
+            scanned_at,
+            labels_pending: false,
+        }
+    }
+
+    fn ids(tmdb: Option<i64>, imdb: Option<&str>, tvdb: Option<i64>, tvmaze: Option<i64>) -> ItemIds {
+        ItemIds { tmdb_id: tmdb, imdb_id: imdb.map(str::to_owned), tvdb_id: tvdb, tvmaze_id: tvmaze }
+    }
+
+    fn nfo_ids(tmdb: Option<i64>, imdb: Option<&str>, tvdb: Option<i64>) -> NfoIds {
+        NfoIds { tmdb, imdb: imdb.map(str::to_owned), tvdb, ..Default::default() }
+    }
+
+    #[test]
+    fn requests_for_one_library_merge_into_what_either_asked() {
+        let files = ScanRequest { library_id: 1, force: false, files: true, metadata: false };
+        let metadata = ScanRequest { library_id: 1, force: true, files: false, metadata: true };
+        let mut merged = files;
+        merged.merge(metadata);
+        assert!(merged.files && merged.metadata && merged.force);
+        let mut alone = metadata;
+        alone.merge(metadata);
+        assert!(!alone.files && alone.metadata);
+    }
+
+    #[test]
+    fn an_nfo_files_ids_decide_a_match_unless_the_item_has_one_of_them() {
+        let nfo = nfo_ids;
+        let found = ids(None, None, None, None).with_nfo("movie", &nfo(None, Some("tt0133093"), None));
+        assert_eq!(found, Some(ids(None, Some("tt0133093"), None, None)));
+        // One of the item's ids is the NFO file's: the others stay.
+        let matched = ids(Some(603), None, None, None);
+        assert_eq!(
+            matched.with_nfo("movie", &nfo(Some(603), Some("tt0133093"), None)),
+            Some(ids(Some(603), Some("tt0133093"), None, None))
+        );
+        // The same ids change nothing; a movie takes no TheTVDB id.
+        assert_eq!(matched.with_nfo("movie", &nfo(Some(603), None, Some(81189))), None);
+        // None is: a search's or the names' ids give way, whether they
+        // differ or the NFO file names another site.
+        let searched = ids(Some(99), Some("tt0000099"), None, None);
+        assert_eq!(
+            searched.with_nfo("movie", &nfo(None, Some("tt0133093"), None)),
+            Some(ids(None, Some("tt0133093"), None, None))
+        );
+        assert_eq!(matched.with_nfo("movie", &nfo(None, Some("tt0133093"), None)), found);
+        // A show searched on TMDB, named by its TheTVDB id.
+        let show = ids(Some(5), Some("tt0000005"), None, None);
+        assert_eq!(show.with_nfo("show", &nfo(None, None, Some(81189))), Some(ids(None, None, Some(81189), None)));
+        // One refreshed from TVmaze, which the NFO file's TheTVDB id confirms.
+        let show = ids(None, Some("tt0000001"), Some(81189), Some(42));
+        assert_eq!(
+            show.with_nfo("show", &nfo(Some(1399), None, Some(81189))),
+            Some(ids(Some(1399), Some("tt0000001"), Some(81189), Some(42)))
+        );
+        // An episode's ids decide nothing: a missing one is added, and only
+        // another of the same kind means another episode.
+        let episode = ids(Some(7), None, None, None);
+        assert_eq!(episode.with_nfo("episode", &nfo(None, None, Some(9))), Some(ids(Some(7), None, Some(9), None)));
+        let episode = ids(Some(7), None, Some(8), None);
+        assert_eq!(episode.with_nfo("episode", &nfo(None, None, Some(9))), Some(ids(None, None, Some(9), None)));
+        // A season takes none.
+        assert_eq!(ids(None, None, None, None).with_nfo("season", &nfo(Some(1), None, None)), None);
+    }
+
+    #[test]
+    fn the_ids_of_an_nfo_file_that_went_make_way_for_the_names() {
+        let gone = nfo_ids(Some(8077), None, None);
+        let matched = ids(Some(8077), Some("tt0103644"), None, None);
+        assert_eq!(matched.without_nfo("movie", &gone, ItemIds::default), Some(ItemIds::default()));
+        let named = || ids(Some(348), None, None, None);
+        assert_eq!(matched.without_nfo("movie", &gone, named), Some(named()));
+        // Matched to something else meanwhile, it stays.
+        assert_eq!(ids(Some(679), None, None, None).without_nfo("movie", &gone, ItemIds::default), None);
+        let show = ids(None, Some("tt4000001"), Some(290001), Some(4242));
+        assert_eq!(
+            show.without_nfo("show", &nfo_ids(None, None, Some(290001)), ItemIds::default),
+            Some(ItemIds::default())
+        );
+        // An episode's ids decide nothing.
+        assert_eq!(ids(Some(8077), None, None, None).without_nfo("episode", &gone, ItemIds::default), None);
+    }
+
+    /// An NFO file's ids are applied only to the ids the scan saw; when they
+    /// changed meanwhile (a refresh), nothing of the file is kept, so that
+    /// the next scan reads it again rather than taking it as known.
+    #[tokio::test]
+    async fn an_nfo_file_whose_item_changed_meanwhile_is_read_again() {
+        let dir = crate::testing::tempdir();
+        let db = Db::open(&dir.path().join("pley.db")).await.unwrap();
+        for sql in [
+            "INSERT INTO libraries (id, name, kind, paths, created_at) VALUES (1, 'Movies', 'movies', '[]', 0)",
+            "INSERT INTO items (id, library_id, kind, key, title, sort_title, added_at, updated_at)
+             VALUES (1, 1, 'movie', 'm', 'M', 'm', 0, 0)",
+        ] {
+            sqlx::query(sql).execute(&db.write).await.unwrap();
+        }
+        let nfo = ItemNfo {
+            path: "/m/M.nfo".into(),
+            size: 10,
+            mtime: 1,
+            ids: nfo_ids(Some(603), None, None),
+            fields: NfoFields::default(),
+            locked: false,
+        };
+        let change = NfoChange {
+            item_id: 1,
+            refresh: Some(1),
+            before: None,
+            after: Some(nfo),
+            ids: Some((ItemIds::default(), ids(Some(603), None, None, None))),
+            reverts: Vec::new(),
+            locked: None,
+        };
+        async fn stored(db: &Db) -> (Option<i64>, Option<String>, i64) {
+            let item: (Option<i64>, Option<String>) =
+                sqlx::query_as("SELECT tmdb_id, imdb_id FROM items WHERE id = 1").fetch_one(&db.read).await.unwrap();
+            let nfos: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM item_nfo").fetch_one(&db.read).await.unwrap();
+            (item.0, item.1, nfos)
+        }
+
+        // A refresh set an IMDb id since the scan looked.
+        sqlx::query("UPDATE items SET imdb_id = 'tt0000001' WHERE id = 1").execute(&db.write).await.unwrap();
+        let mut conn = db.write.acquire().await.unwrap();
+        change.save(&mut conn).await.unwrap();
+        drop(conn);
+        assert_eq!(stored(&db).await, (None, Some("tt0000001".into()), 0));
+
+        sqlx::query("UPDATE items SET imdb_id = NULL WHERE id = 1").execute(&db.write).await.unwrap();
+        let mut conn = db.write.acquire().await.unwrap();
+        change.save(&mut conn).await.unwrap();
+        drop(conn);
+        assert_eq!(stored(&db).await, (Some(603), None, 1));
     }
 
     #[test]

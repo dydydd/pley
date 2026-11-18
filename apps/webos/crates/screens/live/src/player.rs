@@ -7,8 +7,10 @@
 //! Live TV is watched as it airs: play, pause, rewind and fast forward, Left and Right do nothing. A
 //! channel that doesn't start says why, with Try again, Other channels and Back to the guide; every
 //! connection in use lists what holds each, with Watch here instead where it may be taken over.
-//! Someone taking this channel's connection over (the server's `live_taken_over`) stops it at once,
-//! with the server's words and Watch again.
+//! Someone taking this channel's connection over (the server's `live_taken_over`), or stopping it
+//! from another device or as the server's administrator (`session_stopped`), stops it at once, with
+//! the server's words and Watch again. The user's remote, on another device, changes channel as
+//! channel up and down do.
 
 use std::sync::Arc;
 
@@ -16,6 +18,7 @@ use pley_base::{Align, Color, Icon, Key, Point, Rect, TextOpts};
 use pley_core::http::sentence;
 use pley_core::model::{BusyConnection, LiveCategory, LiveChannel, LiveChannelPage, ServerEvent};
 use pley_core::{ApiError, Device, Promise};
+use pley_i18n::t;
 use pley_kit::button::ROUND_SIZE;
 use pley_kit::{Button, LoadingRing, RoundButton, bar_group, inert};
 use pley_player::live::data::{CHANNEL_PAGE, channel_by_number, channel_name, time_left};
@@ -119,7 +122,7 @@ impl Digits {
             return Some((self.typed.clone(), true));
         }
         let (number, at) = self.not_found.as_ref()?;
-        (now - at < NOT_FOUND).then(|| (format!("No channel {number}"), false))
+        (now - at < NOT_FOUND).then(|| (t!("livetv.player.noChannel", number = number), false))
     }
 
     /// When it next has something to do: the lookup, or the end of "No channel 123".
@@ -156,6 +159,14 @@ struct Marking {
     job: Promise<Result<(), ApiError>>,
 }
 
+/// Channel up or down, its channel still being found: how many channels had been tuned as it
+/// started, and whether the user's remote asked for it.
+#[derive(Clone, Copy, Debug)]
+struct Step {
+    tunes: Option<u32>,
+    remote: bool,
+}
+
 /// The live player.
 pub struct LivePlayerScreen {
     /// The channel asked for first, then the one tuned last.
@@ -172,6 +183,8 @@ pub struct LivePlayerScreen {
     device: Option<Arc<dyn Device>>,
     /// The category's channels, for channel up and down.
     zap: Option<ChannelPages>,
+    /// The channel up or down asked of `zap` last.
+    stepping: Option<Step>,
     digits: Digits,
     lookup: Option<Promise<Result<LiveChannelPage, ApiError>>>,
     overlay: Overlay,
@@ -219,6 +232,7 @@ impl LivePlayerScreen {
             session: None,
             device: None,
             zap: None,
+            stepping: None,
             digits: Digits::default(),
             lookup: None,
             overlay: Overlay::None,
@@ -294,7 +308,7 @@ impl LivePlayerScreen {
                 match answer {
                     Ok(c) => c,
                     Err(e) => {
-                        self.unknown = Some(trouble_of(&e, "This channel"));
+                        self.unknown = Some(trouble_of(&e, t!("livetv.player.thisChannel")));
                         return;
                     }
                 }
@@ -316,6 +330,8 @@ impl LivePlayerScreen {
         // Recently watched goes in the order it had as the player opened: asked before the watch changes it.
         self.zap_pages(cx);
         let mut session = LiveSession::new(channel.clone(), &env, device.engine(), now_ms());
+        // The remote's next and previous go through the category as channel up and down do.
+        session.set_steps(self.zap.is_some());
         self.remember(cx, &channel);
         self.channel_id = channel.id;
         self.unknown = None;
@@ -376,12 +392,32 @@ impl LivePlayerScreen {
     }
 
     /// Channel up (`by` 1) or down (−1) in the category, round its ends; from the channel asked for
-    /// when it couldn't be had (the category's first then, when it isn't in it).
-    fn step(&mut self, cx: &AppCx, by: i64) {
+    /// when it couldn't be had (the category's first then, when it isn't in it). `remote`: the user's
+    /// remote on another device asked for it.
+    fn step(&mut self, cx: &AppCx, by: i64, remote: bool) {
+        // Hidden, nothing is watched: the channel it shows again with is the one it left.
+        if self.hidden {
+            return;
+        }
         let current = self.channel().map_or(self.channel_id, |c| c.id);
         if let Some(zap) = self.zap_pages(cx) {
             zap.neighbor(current, by, now_ms());
+            self.stepping = Some(Step { tunes: self.tunes(), remote });
         }
+    }
+
+    /// Whether the channel `step` found may still be tuned. Its page may come a while after the step:
+    /// by then a channel may have been tuned (from the list, by its number, by a later step, or the
+    /// same one again with Watch again), and it isn't tuned over; nor, for the remote's step, over
+    /// Live TV stopped (from another device, say) or a channel in trouble. A key pressed on the TV
+    /// as it stops still changes channel.
+    fn step_holds(&self, step: Step) -> bool {
+        self.tunes() == step.tunes && !self.hidden && !(step.remote && self.phase() == Some(LivePhase::Error))
+    }
+
+    /// The channels the session has tuned (`LiveState::tunes`); none before it starts.
+    fn tunes(&self) -> Option<u32> {
+        self.session.as_ref().map(|s| s.state().tunes)
     }
 
     fn open_list(&mut self) {
@@ -410,12 +446,15 @@ impl LivePlayerScreen {
     /// Takes what came back: the channel up or down, a number looked up, favourites, what's on.
     fn collect(&mut self, cx: &mut AppCx, now: f64, seconds: i64) {
         let ms = now_ms();
-        let mut tune = None;
-        if let Some(zap) = self.zap.as_mut() {
+        let found = self.zap.as_mut().and_then(|zap| {
             zap.poll(ms);
-            if let Some(found) = zap.take_neighbor() {
-                tune = found;
-            }
+            zap.take_neighbor()
+        });
+        let mut tune = None;
+        if let Some(found) = found
+            && self.stepping.take().is_some_and(|step| self.step_holds(step))
+        {
+            tune = found;
         }
         if let Some(number) = self.digits.due(now) {
             let browse = Category::Search(number).browse(0, CHANNEL_PAGE, None);
@@ -452,11 +491,11 @@ impl LivePlayerScreen {
                     continue;
                 }
                 Some(Err(e)) => sentence(&e.to_string()),
-                None => "The request stopped.".to_string(),
+                None => t!("livetv.favorites.requestStopped").to_string(),
             };
             // The server didn't keep it: undone.
             self.mark(m.id, !m.on);
-            cx.toast_error(format!("The favourite wasn't saved: {why}"));
+            cx.toast_error(t!("livetv.favorites.failed", error = why));
         }
         // What's on, asked again once the programme playing ended.
         if let Some(p) = self.refresh.as_mut()
@@ -511,8 +550,8 @@ impl LivePlayerScreen {
         }
         for k in keys {
             match k.key {
-                Key::ChannelUp | Key::Next if k.pressed && !k.repeat => self.step(cx, 1),
-                Key::ChannelDown | Key::Previous if k.pressed && !k.repeat => self.step(cx, -1),
+                Key::ChannelUp | Key::Next if k.pressed && !k.repeat => self.step(cx, 1, false),
+                Key::ChannelDown | Key::Previous if k.pressed && !k.repeat => self.step(cx, -1, false),
                 Key::Digit(d) if k.pressed && !k.repeat && !self.list.typing() => {
                     self.lookup = None;
                     self.digits.push(d, now);
@@ -639,8 +678,8 @@ impl Screen for LivePlayerScreen {
                 for k in ui.keys().to_vec() {
                     if k.pressed && !k.repeat {
                         match k.key {
-                            Key::Up => self.step(cx, 1),
-                            Key::Down => self.step(cx, -1),
+                            Key::Up => self.step(cx, 1, false),
+                            Key::Down => self.step(cx, -1, false),
                             _ => {}
                         }
                     }
@@ -784,7 +823,7 @@ impl Screen for LivePlayerScreen {
         }
     }
 
-    fn event(&mut self, event: &AppEvent, _cx: &mut AppCx) {
+    fn event(&mut self, event: &AppEvent, cx: &mut AppCx) {
         match event {
             // The TV hid the app: the connection and the decoders are let go, to tune again when it shows.
             AppEvent::Visible(false) => {
@@ -793,6 +832,8 @@ impl Screen for LivePlayerScreen {
                 }
                 self.aside = None;
                 self.hidden = true;
+                // A channel up or down still being found isn't tuned in the background.
+                self.stepping = None;
             }
             AppEvent::Visible(true) => {
                 if let Some(s) = self.session.as_mut() {
@@ -814,6 +855,13 @@ impl Screen for LivePlayerScreen {
             AppEvent::Server(ServerEvent::LiveTakenOver { channel_id, message, .. }) => {
                 if let Some(s) = self.session.as_mut() {
                     s.taken_over(*channel_id, message.as_deref());
+                }
+            }
+            // Stopped from elsewhere, or the remote's channel up or down: the step finds the
+            // channel as the keys' does, and a channel with no other in the category is left be.
+            AppEvent::Server(e) => {
+                if let Some(by) = self.session.as_mut().and_then(|s| s.server_event(e)) {
+                    self.step(cx, by, true);
                 }
             }
             _ => {}
@@ -851,7 +899,7 @@ fn tuning(ui: &mut Ui, cx: &AppCx, stage: Rect, c: &LiveChannel, category: &Live
     y += 36.0 + 18.0;
     centred(ui, &numbered_name(c, category), &theme::SECTION, cx_, y, stage.w - 96.0, theme::FG);
     y += theme::SECTION.line_height + 6.0;
-    let on = c.on_at(seconds).map_or("Tuning…", |p| p.title.as_str());
+    let on = c.on_at(seconds).map_or(t!("livetv.player.tuning"), |p| p.title.as_str());
     centred(ui, on, &theme::BODY, cx_, y, stage.w - 96.0, theme::MUTED);
 }
 
@@ -864,7 +912,7 @@ fn sound_only(ui: &mut Ui, cx: &AppCx, stage: Rect, c: &LiveChannel, seconds: i6
     let well = Well::PAGE.named().styled(theme::TITLE).filled(Color::WHITE.alpha(0.06), radius::DIALOG);
     channel_tile(ui, cx, Rect::new(x - 120.0, y, 240.0, 135.0), c, well);
     y += 135.0 + 18.0;
-    let label = "Sound only";
+    let label = t!("livetv.player.radio");
     let w = 20.0 + 8.0 + measure(ui, label, &theme::LABEL);
     ui.icon(Rect::new(x - w / 2.0, y, 20.0, 20.0), Icon::Radio, theme::MUTED);
     line_mid(ui, label, &theme::LABEL, x - w / 2.0 + 28.0, y, 20.0, w, theme::MUTED);
@@ -969,8 +1017,8 @@ fn info_bar(
             }
             let title = match &on {
                 Some(p) => p.title.as_str(),
-                None if c.has_guide => "Nothing in the guide now",
-                None => "No guide for this channel",
+                None if c.has_guide => t!("livetv.guide.nothingNow"),
+                None => t!("livetv.guide.noGuide"),
             };
             ui.text(Point::new(tx, y), title, &theme::SECTION, &TextOpts::line((x + width - tx).max(1.0)), theme::FG);
             y += theme::SECTION.line_height;
@@ -988,7 +1036,7 @@ fn info_bar(
             }
             if let Some(n) = &next {
                 y += 4.0;
-                let text = format!("Next {} · {}", clock.time(n.start), n.title);
+                let text = t!("livetv.guide.next", time = clock.time(n.start), title = n.title);
                 ui.text(Point::new(x, y), &text, &theme::CAPTION, &TextOpts::line(width), theme::SUBTLE);
             }
 
@@ -1000,13 +1048,19 @@ fn info_bar(
                 if focus {
                     ui.request_focus(channels_id);
                 }
+                // The star alone, as in the details: its label, wider than both buttons, ran under Channels.
                 let favourite = if c.favorite {
-                    RoundButton::new(Icon::Star, "Remove from favourites")
+                    RoundButton::new(Icon::Star, t!("livetv.favorites.remove"))
                 } else {
-                    RoundButton::new(Icon::StarOutline, "Add to favourites")
-                };
+                    RoundButton::new(Icon::StarOutline, t!("livetv.favorites.add"))
+                }
+                .show_label(false);
                 ui.group(id.with("controls"), bar_group(), |ui| {
-                    let r = RoundButton::new(Icon::List, "Channels").show(ui, channels_id, Point::new(x0, at));
+                    let r = RoundButton::new(Icon::List, t!("livetv.player.channels")).show(
+                        ui,
+                        channels_id,
+                        Point::new(x0, at),
+                    );
                     if r.activated {
                         action = Some(BarAction::Channels);
                     }
@@ -1020,7 +1074,7 @@ fn info_bar(
                     }
                 });
             } else {
-                let hint = "▲▼ change channel · OK for channels · hold OK for more";
+                let hint = t!("livetv.player.hint");
                 ui.text(
                     Point::new(x0, below + 12.0),
                     hint,
@@ -1036,7 +1090,7 @@ fn info_bar(
 
 /// Live: a red pill with a white dot, its right edge at `right`, centred on `mid`; its width.
 fn live_pill(ui: &mut Ui, right: f32, mid: f32) -> f32 {
-    let text = ui.layout("LIVE", &theme::BADGE, &TextOpts::default());
+    let text = ui.layout(t!("livetv.player.live"), &theme::BADGE, &TextOpts::default());
     let (tw, th) = (text.size.w, text.size.h);
     let (w, h) = (12.0 + 7.0 + 7.0 + tw + 12.0, 6.0 + th + 6.0);
     let rect = Rect::new(right - w, mid - h / 2.0, w, h);
@@ -1058,7 +1112,7 @@ fn digits_box(ui: &mut Ui, text: &str, code: bool) {
 
 /// "Its 2 connections are watching:".
 pub fn connections_heading(n: usize) -> String {
-    if n == 1 { "Its one connection is watching:".into() } else { format!("Its {n} connections are watching:") }
+    t!("livetv.player.connectionsWatching", count = n)
 }
 
 /// How many of `n` connections the busy card lists with `room` dp for their rows and what follows
@@ -1091,10 +1145,10 @@ fn trouble_card(
     let connections: &[BusyConnection] = &t.connections;
 
     // The buttons, to measure the card by.
-    let again = if t.kind == TroubleKind::Stopped { "Watch again" } else { "Try again" };
+    let again = if t.kind == TroubleKind::Stopped { t!("livetv.player.watchAgain") } else { t!("livetv.player.retry") };
     let retry = t.can_retry.then(|| Button::pill(again).icon(Icon::RefreshCw));
-    let others = Button::pill("Other channels").icon(Icon::List);
-    let back = Button::pill("Back to the guide");
+    let others = Button::pill(t!("livetv.player.otherChannels")).icon(Icon::List);
+    let back = Button::pill(t!("livetv.player.backToGuide"));
     let gap = theme::BUTTON_GAP;
     let mut buttons_w = others.size(ui).w + gap + back.size(ui).w;
     if let Some(r) = &retry {
@@ -1123,15 +1177,18 @@ fn trouble_card(
     // As many connections as the screen has room for, the rest counted (Android lists them all; on a
     // 540 dp screen four or five would push the buttons off it).
     let none_to_take = !connections.iter().any(|c| c.can_take_over);
-    let note = "A channel already being watched can be joined, or try again once one is stopped.";
+    let note = t!("livetv.player.noneToTake");
     let note = (!connections.is_empty() && none_to_take).then(|| ui.layout(note, &theme::CAPTION, &centered(inner)));
     let room = theme::CANVAS_H - 2.0 * theme::SAFE_Y - 2.0 * CARD_PAD - h;
     let note_h = note.as_ref().map_or(0.0, |n| 6.0 + n.size.h);
     let shown = connections_shown(connections.len(), room, note_h, 6.0 + theme::CAPTION.line_height);
     let more = connections.len() - shown;
     let first_to_take = connections.iter().take(shown).find(|c| c.can_take_over).map(|c| c.channel_id);
-    let footnote =
-        if more > 0 { Some(ui.layout(&format!("and {more} more"), &theme::CAPTION, &centered(inner))) } else { note };
+    let footnote = if more > 0 {
+        Some(ui.layout(&t!("livetv.player.andMore", count = more), &theme::CAPTION, &centered(inner)))
+    } else {
+        note
+    };
     let words =
         (connections.is_empty() && !message.is_empty()).then(|| ui.layout(message, &theme::BODY, &centered(inner)));
 
@@ -1174,7 +1231,7 @@ fn trouble_card(
         for (i, c) in connections.iter().take(shown).enumerate() {
             let row = Rect::new(x, y, inner, BUSY_ROW_H);
             ui.fill(row, Color::WHITE.alpha(0.04), radius::CONTROL);
-            let take = c.can_take_over.then(|| Button::pill("Watch here instead"));
+            let take = c.can_take_over.then(|| Button::pill(t!("livetv.player.takeOver")));
             let take_w = take.as_ref().map_or(0.0, |b| b.size(ui).w + 12.0);
             let text_w = (inner - 32.0 - take_w).max(1.0);
             let block = theme::LABEL.line_height + theme::CAPTION.line_height;
@@ -1307,6 +1364,20 @@ mod tests {
     fn the_busy_heading_counts_the_connections() {
         assert_eq!(connections_heading(1), "Its one connection is watching:");
         assert_eq!(connections_heading(3), "Its 3 connections are watching:");
+    }
+
+    #[test]
+    fn the_busy_heading_and_a_missed_number_in_french_and_spanish() {
+        use pley_i18n::{Language, with_language};
+        with_language(Language::Fr, || {
+            assert_eq!(connections_heading(1), "Sa seule connexion diffuse\u{a0}:");
+            assert_eq!(connections_heading(2), "Ses 2 connexions diffusent\u{a0}:");
+            let mut d = Digits::default();
+            d.push(7, 0.0);
+            d.missed(2.0);
+            assert_eq!(d.text(2.5), Some(("Aucune chaîne 7".into(), false)));
+        });
+        with_language(Language::Es, || assert_eq!(connections_heading(4), "Sus 4 conexiones están ocupadas con:"));
     }
 
     #[test]

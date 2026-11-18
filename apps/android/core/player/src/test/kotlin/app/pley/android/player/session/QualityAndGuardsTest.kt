@@ -2,6 +2,7 @@ package app.pley.android.player.session
 
 import app.pley.android.fixtures.FixtureIds
 import app.pley.android.model.DynamicRange
+import app.pley.android.model.PlaybackMethod
 import app.pley.android.model.PlaybackMode
 import app.pley.android.player.PlayRequest
 import app.pley.android.testing.caps.TestDevices
@@ -65,6 +66,23 @@ class QualityAndGuardsTest {
     }
 
     @Test
+    fun `a server that converts no video is offered the original alone, and the quality kept stays`() {
+        use(SessionHarness(quality = "2m"))
+        h.server.convertsVideo = false
+        val c = h.play(PlayRequest(FixtureIds.SAMPLE_1080P))
+        h.engine.ready()
+        // Asked as kept; the answer is the original, which plays on.
+        assertEquals(2_000, h.playbackRequests().single().maxBitrate)
+        assertEquals(PlaybackMethod.Remux, c.state.value.playbackMethod)
+        assertEquals("Original", c.state.value.quality)
+        assertEquals(listOf("original"), c.state.value.qualities.map { it.id })
+        c.selectQuality("2m")
+        h.settle()
+        assertEquals(1, h.playbackRequests().size)
+        assertTrue(h.remembered.isEmpty())
+    }
+
+    @Test
     fun `the original converted by the server stays the original in the menu`() {
         use(SessionHarness(caps = capsOf(TestDevices.sdrPhone)))
         val c = h.play(PlayRequest(FixtureIds.SAMPLE_HDR10))
@@ -83,6 +101,7 @@ class QualityAndGuardsTest {
         assertEquals(listOf(PlaybackMode.Auto, PlaybackMode.Transcode), h.playbackRequests().map { it.mode })
         assertEquals(1, h.engine.prepared.size)
         assertEquals("Transcoding", c.state.value.method)
+        assertEquals(PlaybackMethod.Transcode, c.state.value.playbackMethod)
         // The remux was deleted without moving the resume point.
         assertEquals(1, h.deletes().size)
         assertTrue(h.progress(FixtureIds.DOLBY_VISION_P5).isEmpty())

@@ -13,7 +13,8 @@
 //! - **Tracks.** Audio switched by the engine in direct play, a new session
 //!   for streams; subtitles drawn by the TV (the server's WebVTT, or its
 //!   `.mks` of a picture track), burned in only when the server can't make
-//!   the `.mks`. Choices are saved with `PUT /api/items/{id}/streams`.
+//!   the `.mks`. Choices are saved with `PUT /api/items/{id}/streams`. The
+//!   user's remote picks them the same way, and every report says which play.
 //! - **Quality.** The menu, Original, and Automatic with LG's signals (waits
 //!   and buffer growth) and in-place bitrate changes.
 //! - **Markers, Up Next, the sleep timer, speed, Playback details**, and a
@@ -39,12 +40,13 @@ use pley_core::media::{
     AudioFacts, AudioTrack, EngineEvent, EngineStats, LoadRequest, MediaKind, PlayerEngine, VideoFacts,
 };
 use pley_core::model::{
-    AddSubtitle, AudioChoice, BitrateAnswer, ClientCaps, DynamicRange, ItemDetail, ItemKind, ItemSummary, Marker,
-    MediaFile, MediaStream, PlaybackInfo, PlaybackMethod, PlaybackMode, ProgressReport, ProgressState, ServerEvent,
-    SessionStatus, StreamChoice, StreamKind, SubtitleResult, SubtitleTrack, TranscodeInfo, TrickplayInfo,
+    AddSubtitle, AudioChoice, BitrateAnswer, ClientCaps, Control, DynamicRange, ItemDetail, ItemKind, ItemSummary,
+    Marker, MediaFile, MediaStream, PlaybackInfo, PlaybackMethod, PlaybackMode, ProgressReport, ProgressState,
+    ServerEvent, SessionStatus, StreamChoice, StreamKind, SubtitleResult, SubtitleTrack, TranscodeInfo, TrickplayInfo,
 };
 use pley_core::task::{Cancel, Promise};
 use pley_core::{ApiError, CapsReport};
+use pley_i18n::t;
 use pley_subs::{Fetch, PictureAnswer, PictureTrack, Presenter, Shown, TrackKind, Trouble, clamp_offset};
 
 use crate::autoquality::{AutoOptions, AutoQuality, AutoStep, FIRST_MINUTE_MS, LiveStream, Remembered};
@@ -62,10 +64,11 @@ use crate::plan::{
 };
 use crate::prepare::{PREPARE_LEAD_MS, PREPARE_MAX_MS, warm_stream};
 use crate::quality::{
-    AUTO_ID, ORIGINAL_ID, Quality, auto_ladder, choose_quality, file_hint, live_floor, live_label, named_for, preset,
-    presets, qualities_for, stream_lines,
+    AUTO_ID, ORIGINAL_ID, Quality, auto_ladder, choose_quality, file_hint, live_floor, live_label, named_for,
+    offered_qualities, preset, presets, qualities_for, stream_lines,
 };
 use crate::recovery::{EngineError, Failure, FallbackReason, Recovery, RecoveryAction, StruggleMeter, failure_text};
+use crate::remote::{self, Command, RemoteAction, RemoteKind, RemotePlayer, remote_action, video_controls_with_tracks};
 use crate::sleep::{SleepChoice, SleepItem, SleepState, SleepTimer};
 
 /// The clock of the controller's own checks.
@@ -244,6 +247,13 @@ pub struct PlayerState {
     /// A one-shot toast; `notice_id` changes with each one.
     pub notice: Option<String>,
     pub notice_id: u64,
+    /// What the user's remote on another device just did here ("Paused", "+30 s"), for the
+    /// screen to say briefly in place of its controls ([`crate::remote`]); `remote_notice_id`
+    /// changes with each one.
+    pub remote_notice: Option<String>,
+    pub remote_notice_id: u64,
+    /// The remote paused it, and nothing has played it since.
+    pub paused_by_remote: bool,
     pub subtitle_offset_ms: i32,
     /// The Sync row shows.
     pub subtitle_sync: bool,
@@ -277,7 +287,7 @@ impl Default for PlayerState {
             subtitle: None,
             audio: Vec::new(),
             subtitles: Vec::new(),
-            quality: "Original".into(),
+            quality: t!("player.quality.original").into(),
             qualities: Vec::new(),
             method: None,
             note: None,
@@ -291,6 +301,9 @@ impl Default for PlayerState {
             details: None,
             notice: None,
             notice_id: 0,
+            remote_notice: None,
+            remote_notice_id: 0,
+            paused_by_remote: false,
             subtitle_offset_ms: 0,
             subtitle_sync: false,
             speed: 1.0,
@@ -439,8 +452,12 @@ enum Check {
 /// What a lookup of the next item is for.
 enum NextFor {
     Credits,
-    Ended { sleeping: bool },
+    Ended {
+        sleeping: bool,
+    },
     PlayNext,
+    /// The remote's next, pressed on another device: nothing next says nothing here.
+    Remote,
 }
 
 /// What a task hands back.
@@ -522,6 +539,20 @@ struct Warming {
     promise: Promise<()>,
 }
 
+/// The tracks the session plays, as its reports tell the user's remotes (docs/API.md, "Remote
+/// control"). A pick that needs a new session changes them once that session plays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PlayingTracks {
+    /// The audio's stream index; none while not known.
+    audio: Option<i64>,
+    /// The subtitles shown or burned in, by stream index; -1 for none.
+    subtitle: i64,
+}
+
+impl PlayingTracks {
+    const NONE: PlayingTracks = PlayingTracks { audio: None, subtitle: -1 };
+}
+
 /// One video's playback, then what plays after it.
 pub struct PlaybackController {
     env: PlayerEnv,
@@ -543,8 +574,13 @@ pub struct PlaybackController {
     /// The file's audio track to switch to once the engine lists its tracks.
     audio_pending: Option<(usize, Option<String>)>,
     subtitle: Option<MediaStream>,
+    /// What the session plays of them, for its reports.
+    tracks_now: PlayingTracks,
     /// The quality chosen in the menu: Automatic, the original, or a conversion.
     quality: Quality,
+    /// The server converts no video, as its last play answer had it
+    /// (`original_only`): only the original is offered, and plays.
+    original_only: bool,
     /// Automatic, when chosen.
     auto: Option<AutoQuality>,
     /// Bumped for each Automatic made: answers for an older one are dropped.
@@ -555,6 +591,9 @@ pub struct PlaybackController {
 
     info: Option<PlaybackInfo>,
     session_ended: bool,
+    /// The remote picked a quality that needs a new session: that session reports as it begins, so
+    /// the remote sees the pick (its play request doesn't say it).
+    report_begun: bool,
     /// Bumped by every new start; shared with the tasks opening sessions.
     generation: Arc<AtomicU64>,
     /// The generation of a session being made ready beside the one playing.
@@ -650,13 +689,16 @@ impl PlaybackController {
             audio_picked: false,
             audio_pending: None,
             subtitle: None,
+            tracks_now: PlayingTracks::NONE,
             quality: Quality::original(),
+            original_only: false,
             auto: None,
             auto_id: 0,
             markers: Vec::new(),
             guard_mode: None,
             info: None,
             session_ended: true,
+            report_begun: false,
             generation: Arc::new(AtomicU64::new(0)),
             preparing: None,
             warming: None,
@@ -939,7 +981,8 @@ impl PlaybackController {
     /// Asks the server's memory of networks for Automatic's start; none for a quality picked.
     fn network_start(&mut self, g: u64) {
         let remembered = self.env.quality.remembered();
-        let auto = choose_quality(remembered.as_deref(), &presets()).id == AUTO_ID && !self.local();
+        let auto =
+            choose_quality(remembered.as_deref(), &presets()).id == AUTO_ID && !self.local() && !self.original_only;
         match self.env.network.clone().filter(|_| auto) {
             Some(network) => self.spawn(move || Done::Known { g, known: network.start() }),
             None => {
@@ -984,8 +1027,9 @@ impl PlaybackController {
         self.audio = initial_audio(chosen.as_ref(), req.audio_index);
         self.audio_picked = self.audio.is_some();
         self.subtitle = initial_subtitle(chosen.as_ref(), req.subtitle_index);
-        // Nothing converts a file on a drive: it plays as it is, without Automatic.
-        self.quality = if self.local() {
+        // Nothing converts a file on a drive, nor a server that converts no
+        // video: it plays as it is, without Automatic.
+        self.quality = if self.local() || self.original_only {
             Quality::original()
         } else {
             choose_quality(self.env.quality.remembered().as_deref(), &qualities_for(chosen.as_ref()))
@@ -1128,7 +1172,7 @@ impl PlaybackController {
     fn begin(&mut self, at_ms: i64, g: u64, alongside: bool, restart: bool, flush: bool) {
         let Some(detail_id) = self.item.as_ref().map(|d| d.id) else { return };
         let Some(chosen) = self.file.clone() else {
-            self.fail(details::NO_FILE, false, None);
+            self.fail(details::no_file(), false, None);
             return;
         };
         let mut flush = flush;
@@ -1182,6 +1226,10 @@ impl PlaybackController {
         let (client_id, keyed) = (self.env.client_id.clone(), self.env.keyed_urls);
         let caps = self.caps.clone();
         let local = self.local();
+        let has_next = self.item.as_ref().is_some_and(|d| has_next(d.kind, self.current.queue.as_ref()));
+        let file = Some(&asked.choices.file);
+        let (audio, subtitles) = (!audio_streams(file).is_empty(), !subtitle_streams(file).is_empty());
+        let controls = video_controls_with_tracks(has_next, audio, subtitles, !local);
         let mut asked = asked;
         self.spawn(move || {
             Cancel::new().scope(|| {
@@ -1191,6 +1239,7 @@ impl PlaybackController {
                 let ask = |c: &Choices| {
                     let mut req = playback_request(item_id, c, &client_id, caps.as_ref(), keyed);
                     req.keep_previous = asked.alongside;
+                    req.controls = controls.clone();
                     req
                 };
                 let stale = || generation.load(Ordering::SeqCst) != g;
@@ -1293,7 +1342,7 @@ impl PlaybackController {
         if self.env.keyed_urls && !self.local() && !is_keyed(&info.url) {
             self.discard(&info);
             self.preparing = None;
-            self.fail(details::TOO_OLD, false, None);
+            self.fail(details::too_old(), false, None);
             return;
         }
         if asked.alongside {
@@ -1345,9 +1394,17 @@ impl PlaybackController {
         let Some(chosen) = self.file.clone() else { return };
         // No track picked: the one the server chose for this TV plays, and the menu says so.
         self.audio = asked.audio.clone().or_else(|| playing_audio(Some(&chosen), &info));
+        self.tracks_now.audio = self.audio.as_ref().map(|a| a.index);
         self.session_ended = false;
         self.live = None;
         self.info = Some(info.clone());
+        self.original_only = info.original_only;
+        if self.original_only {
+            // Whatever was asked for, the original plays: the menu says so,
+            // and the quality kept stays for servers that convert.
+            self.quality = Quality::original();
+            self.auto = None;
+        }
         if self.auto.is_some() {
             let live = self.auto_began(&info, asked.original);
             // A new stream of the same quality (a recovery, a track) goes on at the bitrate the last one had come to.
@@ -1366,6 +1423,10 @@ impl PlaybackController {
         self.changed();
         self.publish_choices();
         self.arm_progress();
+        if std::mem::take(&mut self.report_begun) {
+            let state = if self.want_play { ProgressState::Playing } else { ProgressState::Paused };
+            self.report_at(state, asked.at_ms);
+        }
         self.refresh_details(false);
         let video = video_stream_of(Some(&chosen));
         let transcode = info.method == PlaybackMethod::Transcode;
@@ -1418,7 +1479,7 @@ impl PlaybackController {
         self.session_ended = true;
         self.progress_at = None;
         let item_id = self.item.as_ref().map_or(self.current.item_id, |d| d.id);
-        let report = progress(position_ms, info, ProgressState::Stopped);
+        let report = progress(position_ms, info, ProgressState::Stopped, self.tracks_now, self.quality.id);
         let (server, session) = (self.env.server.clone(), info.session_id.clone());
         self.env.reporter.send(move || {
             let _ = server.progress(item_id, &report);
@@ -1470,8 +1531,11 @@ impl PlaybackController {
                 self.apply_pending_audio();
             }
         }
-        match self.subtitle.clone() {
-            None => self.presenter.hide(),
+        let drawn = match self.subtitle.clone() {
+            None => {
+                self.presenter.hide();
+                None
+            }
             Some(sub) if !is_picture(Some(&sub)) => {
                 let path = info
                     .subtitles
@@ -1480,12 +1544,20 @@ impl PlaybackController {
                     .and_then(|t| t.url.clone())
                     .unwrap_or_else(|| text_path(info.file_id, sub.index));
                 self.presenter.show_text(&path);
+                Some(sub.index)
             }
             Some(sub) if !info.burn_subtitles && self.sideload() => {
                 self.presenter.show_pictures(&picture_path(info.file_id, sub.index));
+                Some(sub.index)
             }
-            Some(_) => self.presenter.hide(),
-        }
+            Some(_) => {
+                self.presenter.hide();
+                None
+            }
+        };
+        // What shows: drawn here, else burned into the picture by the stream, else none.
+        let burned = info.subtitle_index.filter(|_| info.burn_subtitles);
+        self.tracks_now.subtitle = drawn.or(burned).unwrap_or(-1);
         self.changed();
     }
 
@@ -1537,7 +1609,7 @@ impl PlaybackController {
         }
         // A file on a drive has no server to burn them in.
         if self.local() {
-            self.notice(details::SUBTITLES_FAILED);
+            self.notice(details::subtitles_failed());
             return;
         }
         self.pictures_unavailable = true;
@@ -1746,7 +1818,7 @@ impl PlaybackController {
         // A file on a drive that still can't be read (the drive pulled out) says so, not that a
         // server is away (`SessionPlaybackController.kt`'s `act`).
         if self.local() && matches!(action, RecoveryAction::Fail { failure: Failure::Network | Failure::Stopped, .. }) {
-            self.fail(details::DRIVE_UNREADABLE, true, None);
+            self.fail(details::drive_unreadable(), true, None);
             return;
         }
         match action {
@@ -1773,13 +1845,15 @@ impl PlaybackController {
                     self.ask_session(&session, Check::Server { starving });
                 }
             }
+            // Not where there is none to choose.
+            RecoveryAction::SuggestLowerQuality if self.original_only => {}
             RecoveryAction::SuggestLowerQuality => {
                 self.state.suggest_lower_quality = true;
-                self.state.note = Some(details::SLOW_SERVER.into());
+                self.state.note = Some(details::slow_server().into());
                 self.changed();
             }
             RecoveryAction::Fail { failure, detail } => {
-                let title = (failure == Failure::Network).then(|| details::OFFLINE_TITLE.to_string());
+                let title = (failure == Failure::Network).then(|| details::offline_title().to_string());
                 self.fail(&failure_text(failure, detail.as_deref()), failure != Failure::Unplayable, title);
             }
         }
@@ -1834,7 +1908,7 @@ impl PlaybackController {
         self.clock.position_ms = duration;
         self.state.skip_label = None;
         self.changed();
-        let has = self.item.as_ref().is_some_and(|d| has_next(d.kind, self.current.queue));
+        let has = self.item.as_ref().is_some_and(|d| has_next(d.kind, self.current.queue.as_ref()));
         if !has {
             self.phase(Phase::Ended);
             return;
@@ -1924,7 +1998,7 @@ impl PlaybackController {
             // again: one whose picture never came isn't one this TV plays; one that played, here
             // or before the file was started again, can't be read any more (the drive pulled out).
             if self.local() {
-                let why = if self.shown_once { details::DRIVE_UNREADABLE } else { details::LOCAL_STUCK };
+                let why = if self.shown_once { details::drive_unreadable() } else { details::local_stuck() };
                 self.fail(why, true, None);
                 return;
             }
@@ -1983,9 +2057,14 @@ impl PlaybackController {
     }
 
     fn report(&mut self, state: ProgressState) {
+        self.report_at(state, self.live_position());
+    }
+
+    /// `position`: where the player went, when the TV's player may not say so yet (just after a seek).
+    fn report_at(&mut self, state: ProgressState, position: i64) {
         let Some(info) = self.info.as_ref().filter(|_| !self.session_ended) else { return };
         let item_id = self.item.as_ref().map_or(self.current.item_id, |d| d.id);
-        let report = progress(self.live_position(), info, state);
+        let report = progress(position, info, state, self.tracks_now, self.quality.id);
         let server = self.env.server.clone();
         self.env.reporter.send(move || {
             let _ = server.progress(item_id, &report);
@@ -2033,7 +2112,7 @@ impl PlaybackController {
             self.session_ended = true;
             self.progress_at = None;
             let item_id = self.item.as_ref().map_or(self.current.item_id, |d| d.id);
-            let report = progress(position, info, ProgressState::Stopped);
+            let report = progress(position, info, ProgressState::Stopped, self.tracks_now, self.quality.id);
             let server = self.env.server.clone();
             self.env.reporter.send(move || {
                 let _ = server.progress(item_id, &report);
@@ -2055,12 +2134,140 @@ impl PlaybackController {
 
     // ---------------------------------------------------------------- commands
 
-    /// What the server says happened elsewhere: a stop of this session.
+    /// What the server says happened elsewhere: a stop of this session, or a command of the
+    /// user's remote on another device.
     pub fn server_event(&mut self, event: &ServerEvent) {
         if let ServerEvent::SessionStopped { session_id, message, by_admin } = event
             && self.info.as_ref().is_some_and(|i| i.session_id == *session_id)
         {
             self.stop_by_server(message.as_deref(), *by_admin);
+        } else if let Some(command) = Command::of(event) {
+            self.obey(&command);
+        }
+    }
+
+    /// A command of the user's remote, on another device, for the session playing
+    /// ([`crate::remote`] has the rule): what changed is reported at once, so the remote sees it.
+    /// A pause reports as any pause does, the next item with its own session; a play or pause
+    /// that finds it so already says it again. A remote's next that finds nothing says nothing
+    /// here, whoever pressed it being elsewhere. What changed is said in a remote notice; what
+    /// changed nothing says nothing, and the next title shows as it begins, as it does by itself.
+    fn obey(&mut self, command: &Command) {
+        if self.closed || self.stopped || self.session_ended || self.in_error() {
+            return;
+        }
+        let Some(info) = self.info.as_ref() else { return };
+        let duration = self.clock.duration_ms;
+        let player = RemotePlayer {
+            kind: RemoteKind::Video,
+            session: Some(&info.session_id),
+            playing: self.want_play && !self.ended,
+            position_ms: self.live_position(),
+            duration_ms: (duration > 0).then_some(duration),
+            has_next: self.item.as_ref().is_some_and(|d| has_next(d.kind, self.current.queue.as_ref())),
+        };
+        match remote_action(&player, command) {
+            RemoteAction::Play => {
+                self.play();
+                self.report(ProgressState::Playing);
+                self.remote_notice(remote::playing().into());
+            }
+            RemoteAction::Pause => {
+                self.pause();
+                // Nobody here paused it: the screen doesn't keep its controls for this pause.
+                self.state.paused_by_remote = true;
+                self.remote_notice(remote::paused().into());
+            }
+            // Playing or paused already: said again, so a remote a little behind settles.
+            RemoteAction::Report => {
+                self.report(if self.want_play { ProgressState::Playing } else { ProgressState::Paused })
+            }
+            RemoteAction::Seek(at) => {
+                self.seek_to(at);
+                // Not a second later, as after the screen's seeks; a seek that started a new
+                // session has that report itself.
+                if self.seek_report_at.take().is_some() {
+                    let state = if self.want_play { ProgressState::Playing } else { ProgressState::Paused };
+                    self.report_at(state, self.last_position_ms);
+                }
+                // A skip says how far it was asked to go, a seek where to.
+                let said = match command.offset_ms.filter(|_| command.command == Control::Skip) {
+                    Some(by) => remote::skipped(by),
+                    None => remote::jumped(at),
+                };
+                self.remote_notice(said);
+            }
+            RemoteAction::Next => match self.next.clone() {
+                Some(known) => self.switch_to(known),
+                None => self.look_up_next(NextFor::Remote),
+            },
+            RemoteAction::Audio(index) => {
+                let before = self.audio.as_ref().map(|a| a.index);
+                self.pick_track(|c| c.select_audio(index));
+                if self.audio.as_ref().map(|a| a.index) != before
+                    && let Some(label) = menu_label(&self.state.audio, Some(index))
+                {
+                    self.remote_notice(remote::audio_picked(&label));
+                }
+            }
+            RemoteAction::Subtitles(index) => {
+                let before = self.subtitle.as_ref().map(|s| s.index);
+                self.pick_track(|c| c.select_subtitle(index));
+                if self.subtitle.as_ref().map(|s| s.index) != before
+                    && let Some(label) = menu_label(&self.state.subtitles, index)
+                {
+                    // The menu's Off row says "Subtitles off".
+                    let shown = index.map(|_| label.as_str());
+                    self.remote_notice(remote::subtitles_picked(shown));
+                }
+            }
+            RemoteAction::Quality(id) => {
+                let before = self.quality.id;
+                self.pick_quality(id);
+                if self.quality.id != before
+                    && let Some(label) = self.state.qualities.iter().find(|q| q.id == id).map(|q| q.label.clone())
+                {
+                    self.remote_notice(remote::quality_picked(&label));
+                }
+            }
+            RemoteAction::None | RemoteAction::Previous | RemoteAction::Channel(_) => {}
+        }
+    }
+
+    /// What the remote did, for the screen to say briefly.
+    fn remote_notice(&mut self, text: String) {
+        self.state.remote_notice = Some(text);
+        self.state.remote_notice_id += 1;
+        self.changed();
+    }
+
+    /// A track the remote picked, through the menu's own path. What this session plays then (a
+    /// track switched in place, or the one playing already, which changes nothing) is reported at
+    /// once with the tracks it plays, so the remote settles; a pick that needs a new session tells
+    /// the server with that session's start.
+    fn pick_track(&mut self, pick: impl FnOnce(&mut PlaybackController)) {
+        let g = self.current_generation();
+        pick(self);
+        if self.current_generation() == g {
+            self.report(if self.want_play { ProgressState::Playing } else { ProgressState::Paused });
+        }
+    }
+
+    /// A quality the remote picked, through the Quality menu's own path, kept for the next titles
+    /// as a pick there is. One the menu doesn't offer for the file does nothing. The one picked
+    /// already, or one the same stream plays on with, is reported at once; one that needs a new
+    /// session is reported as that session begins.
+    fn pick_quality(&mut self, id: &'static str) {
+        if self.local() || !offered_qualities(self.file.as_ref(), self.original_only).iter().any(|q| q.id == id) {
+            return;
+        }
+        let g = self.current_generation();
+        // Set first: the new session may begin before the pick returns.
+        self.report_begun = true;
+        self.select_quality(id);
+        if self.current_generation() == g {
+            self.report_begun = false;
+            self.report(if self.want_play { ProgressState::Playing } else { ProgressState::Paused });
         }
     }
 
@@ -2097,6 +2304,10 @@ impl PlaybackController {
         if play {
             self.sleep.resumed();
             self.sleep_changed();
+            // Played again, by anyone: the remote's pause is over.
+            if std::mem::take(&mut self.state.paused_by_remote) {
+                self.changed();
+            }
         }
         if self.info.is_none() || was == play {
             return;
@@ -2178,6 +2389,7 @@ impl PlaybackController {
         if !info.hls && audio_plays_here(Some(&chosen), self.caps.as_ref()) {
             if self.switch_audio(ordinal, chosen.language.as_deref()) {
                 self.quiet_frames();
+                self.tracks_now.audio = Some(index);
                 return;
             }
             // A new session would load the same file on a drive again and switch nothing.
@@ -2342,7 +2554,8 @@ impl PlaybackController {
     /// again while it plays lower starts afresh at the original. The session
     /// starts again only when it would ask for something else.
     pub fn select_quality(&mut self, id: &str) {
-        let Some(chosen) = qualities_for(self.file.as_ref()).into_iter().find(|p| p.id == id) else { return };
+        let offered = offered_qualities(self.file.as_ref(), self.original_only);
+        let Some(chosen) = offered.into_iter().find(|p| p.id == id) else { return };
         let lowered = self.auto.as_ref().is_some_and(|a| a.playing != ORIGINAL_ID || a.live_lowered());
         if chosen.id == self.quality.id && !lowered {
             return;
@@ -2507,7 +2720,7 @@ impl PlaybackController {
                 from_start: false,
                 audio_index: if self.audio_picked { self.audio.as_ref().map(|a| a.index) } else { None },
                 subtitle_index: self.subtitle.as_ref().map(|s| s.index),
-                queue: self.current.queue,
+                queue: self.current.queue.clone(),
             },
             quality: self.quality.id.to_string(),
             playing: self.want_play,
@@ -2557,7 +2770,7 @@ impl PlaybackController {
     // ---------------------------------------------------------------- Up Next
 
     fn on_credits(&mut self) {
-        let has = self.item.as_ref().is_some_and(|d| has_next(d.kind, self.current.queue));
+        let has = self.item.as_ref().is_some_and(|d| has_next(d.kind, self.current.queue.as_ref()));
         if !has || self.state.up_next.is_some() {
             return;
         }
@@ -2571,7 +2784,7 @@ impl PlaybackController {
         };
         self.next_lookup += 1;
         let lookup = self.next_lookup;
-        let queue = self.current.queue;
+        let queue = self.current.queue.clone();
         let server = self.env.server.clone();
         self.spawn(move || Done::Next { lookup, purpose, result: next_after(server.as_ref(), id, kind, queue) });
     }
@@ -2587,9 +2800,12 @@ impl PlaybackController {
             (NextFor::Ended { sleeping }, Some(f)) => self.show_up_next(f, !sleeping),
             (NextFor::PlayNext, Some(f)) => self.switch_to(f),
             (NextFor::PlayNext, None) => {
-                let text = if self.current.queue.is_some() { details::LAST_IN_QUEUE } else { details::LAST_EPISODE };
+                let text =
+                    if self.current.queue.is_some() { details::last_in_queue() } else { details::last_episode() };
                 self.notice(text);
             }
+            (NextFor::Remote, Some(f)) => self.switch_to(f),
+            (NextFor::Remote, None) => {}
         }
     }
 
@@ -2663,15 +2879,24 @@ impl PlaybackController {
             from_start: false,
             audio_index: None,
             subtitle_index: None,
-            queue: self.current.queue,
+            queue: self.current.queue.clone(),
         };
         // The next title plays at normal speed.
         if self.state.speed != 1.0 {
             self.engine.set_rate(1.0);
         }
-        let (title, sleep, speeds, notice_id) =
-            (self.state.title.clone(), self.state.sleep, self.state.speeds.clone(), self.state.notice_id);
-        self.state = PlayerState { item_id: target.id, title, sleep, speeds, notice_id, ..PlayerState::default() };
+        let s = &self.state;
+        self.state = PlayerState {
+            item_id: target.id,
+            title: s.title.clone(),
+            sleep: s.sleep,
+            speeds: s.speeds.clone(),
+            notice_id: s.notice_id,
+            remote_notice_id: s.remote_notice_id,
+            // A pause goes on into the next title: the remote's is still the remote's.
+            paused_by_remote: s.paused_by_remote,
+            ..PlayerState::default()
+        };
         self.clock.position_ms = req.start_ms.unwrap_or(0);
         self.clock.buffered_ms = 0;
         self.changed();
@@ -2927,7 +3152,7 @@ impl PlaybackController {
 
     fn subtitle_trouble(&mut self, trouble: Option<Trouble>) {
         match trouble {
-            Some(Trouble::Failed) => self.notice(details::SUBTITLES_FAILED),
+            Some(Trouble::Failed) => self.notice(details::subtitles_failed()),
             Some(Trouble::PicturesUnavailable) => self.pictures_failed(),
             None => {}
         }
@@ -3063,7 +3288,7 @@ impl PlaybackController {
         } else {
             let off = TrackChoice {
                 index: None,
-                label: details::SUBTITLES_OFF.into(),
+                label: details::subtitles_off().into(),
                 selected: self.subtitle.is_none(),
                 burn_in: false,
                 added: false,
@@ -3103,13 +3328,13 @@ impl PlaybackController {
         };
         let auto_now = eased.clone().unwrap_or_else(|| {
             if playing.id == ORIGINAL_ID {
-                converted.unwrap_or_else(|| "Original".into())
+                converted.unwrap_or_else(|| t!("player.quality.original").into())
             } else {
                 playing.label.clone()
             }
         });
         // Nothing converts a file on a drive: no Quality to choose.
-        let qualities = qualities_for(file)
+        let qualities = offered_qualities(file, self.original_only)
             .into_iter()
             .filter(|_| !self.local())
             .map(|p| QualityChoice {
@@ -3123,7 +3348,7 @@ impl PlaybackController {
                                 .map(details::lowered_text);
                             details::auto_now(&auto_now, why)
                         }
-                        None => details::AUTO_HINT.into(),
+                        None => details::auto_hint().into(),
                     })
                 } else if p.id == ORIGINAL_ID {
                     hint.clone()
@@ -3200,7 +3425,7 @@ impl PlaybackController {
         // A file on a drive asks nothing of a server: what fails is reading it. What nothing
         // converts says so itself.
         if self.local() && !matches!(e, ApiError::Status { code, .. } if code == "local_file") {
-            self.fail(details::DRIVE_UNREADABLE, true, None);
+            self.fail(details::drive_unreadable(), true, None);
             return;
         }
         if let ApiError::SessionStopped { message } = e {
@@ -3208,7 +3433,7 @@ impl PlaybackController {
             return;
         }
         if e.unreachable() {
-            self.fail(details::OFFLINE_BODY, true, Some(details::OFFLINE_TITLE.into()));
+            self.fail(details::offline_body(), true, Some(details::offline_title().into()));
             return;
         }
         let can_retry = !matches!(e, ApiError::SignedOut) && !matches!(e.status(), Some(401 | 403 | 404));
@@ -3283,7 +3508,7 @@ impl PlaybackController {
             Err(e) if !e.out_of_reach() => self.reach_back(true),
             Err(_) if self.now - since >= OUTAGE_MS => {
                 self.end_outage();
-                self.fail(details::OFFLINE_BODY, true, Some(details::OFFLINE_TITLE.into()));
+                self.fail(details::offline_body(), true, Some(details::offline_title().into()));
             }
             Err(_) => self.ask_again_later(),
         }
@@ -3322,15 +3547,29 @@ impl Drop for PlaybackController {
     }
 }
 
-/// A progress report of `info` at `position_ms`.
-fn progress(position_ms: i64, info: &PlaybackInfo, state: ProgressState) -> ProgressReport {
+/// A progress report of `info` at `position_ms`, with the tracks it plays and the quality picked.
+fn progress(
+    position_ms: i64,
+    info: &PlaybackInfo,
+    state: ProgressState,
+    tracks: PlayingTracks,
+    quality: &str,
+) -> ProgressReport {
     ProgressReport {
         position_ms: position_ms.max(0),
         duration_ms: (info.duration_ms > 0).then_some(info.duration_ms),
         state,
         session_id: Some(info.session_id.clone()),
         age_ms: None,
+        audio_index: tracks.audio,
+        subtitle_index: Some(tracks.subtitle),
+        quality: Some(quality.to_owned()),
     }
+}
+
+/// What the menu of `tracks` calls the track of `index` (none: its Off row).
+fn menu_label(tracks: &[TrackChoice], index: Option<i64>) -> Option<String> {
+    tracks.iter().find(|t| t.index == index).map(|t| t.label.clone())
 }
 
 /// A language code as tracks are compared: its two-letter form where it has one, without a region

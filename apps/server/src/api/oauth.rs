@@ -38,8 +38,8 @@ use serde_json::{Value, json};
 use url::Url;
 
 use super::auth::{
-    NO_WAY_IN, NOT_ALLOWED, PIN_LOCKED, PIN_NEEDED, SwitchError, SwitchTarget, check_own_pin, check_switch,
-    switch_needs, switch_targets,
+    NO_WAY_IN, NOT_ALLOWED, PIN_LOCKED, PIN_NEEDED, SwitchError, SwitchTarget, TICKET_SPENT, check_own_pin,
+    check_switch, check_ticket_switch, switch_needs, switch_targets,
 };
 use crate::auth::grants::{self, GrantRow, IssueError, Issued, NewGrant, RefreshError, RefreshInput, SwitchInput};
 use crate::auth::scopes::{Scope, Scopes};
@@ -344,14 +344,55 @@ pub async fn create_request(
             "redirect": redirect,
         })));
     }
+    let (shown, optional) = shown_scopes(scopes, web.user.account_admin);
     Ok(Json(json!({
         "status": "consent",
         "id": id,
         "expires_at": now() + pending::PENDING_LIFETIME.as_secs() as i64,
         "client": client_dto,
         "redirect": redirect,
-        "scopes": scopes.names(),
+        "scopes": shown,
+        "optional": optional,
     })))
+}
+
+/// What a consent page shows of the scopes an app asked for: those the
+/// account can give ([`Scopes::for_account`]), and of them those the person
+/// may leave out ([`Scope::optional`]: managing the server).
+fn shown_scopes(asked: Scopes, administrator: bool) -> (Vec<&'static str>, Vec<&'static str>) {
+    let shown = asked.for_account(administrator);
+    let optional = Scope::ALL.into_iter().filter(|scope| scope.optional() && shown.contains(*scope));
+    (shown.names(), optional.map(Scope::name).collect())
+}
+
+/// What the person allows of the scopes an app asked for (`asked`): those
+/// the consent page sent (`chosen`), or all of them when it sent none. Of
+/// what the page showed ([`shown_scopes`]) it may leave out only managing
+/// the server ([`Scope::optional`]), which the app works without, and it
+/// adds none. On an account that isn't an administrator's, an
+/// administrator's rights are left out whatever was sent
+/// ([`Scopes::for_account`]).
+fn allowed_scopes(asked: Scopes, chosen: Option<&[String]>, administrator: bool) -> ApiResult<Scopes> {
+    let shown = asked.for_account(administrator);
+    let Some(chosen) = chosen else { return Ok(shown) };
+    if chosen.len() > Scope::ALL.len() {
+        return Err(AppError::bad_request("that is more scopes than Pley has"));
+    }
+    let mut allowed = Scopes::default();
+    for name in chosen {
+        let scope = Scope::from_name(name)
+            .filter(|scope| asked.contains(*scope))
+            .ok_or_else(|| AppError::bad_request("the app didn't ask for one of those scopes"))?;
+        allowed = allowed.with(scope);
+    }
+    let left_out = |scope: &Scope| shown.contains(*scope) && !allowed.contains(*scope);
+    if let Some(needed) = Scope::ALL.into_iter().find(|scope| left_out(scope) && !scope.optional()) {
+        return Err(AppError::bad_request(format!(
+            "the app needs to {}: allow it all, or don't allow the app",
+            needed.words()
+        )));
+    }
+    Ok(allowed.for_account(administrator))
 }
 
 /// The checks of a request whose mistakes go back to the app (d. of
@@ -433,6 +474,10 @@ fn asked_scopes(scope: Option<&str>, client: &clients::Client) -> Result<Scopes,
         // Deciding what everyone asks for: pley's own apps only.
         return Err(fail("only Pley's own apps can approve requests (approvals): ask the app's publisher to fix it"));
     }
+    if asked.contains(Scope::Server) && !client.first_party {
+        // Administration: pley's own apps only.
+        return Err(fail("only Pley's own apps can manage the server (server): ask the app's publisher to fix it"));
+    }
     if client.scope_cap.as_deref().is_some_and(|cap| !asked.is_subset_of(Scopes::from_stored(cap))) {
         return Err(fail("this app asked for more than its description allows: ask the app's publisher to fix it"));
     }
@@ -442,6 +487,10 @@ fn asked_scopes(scope: Option<&str>, client: &clients::Client) -> Result<Scopes,
 #[derive(Deserialize)]
 pub struct Decision {
     allow: bool,
+    /// The scopes the person allows, when the page let them leave some out
+    /// ([`allowed_scopes`]); all those asked when it isn't sent.
+    #[serde(default)]
+    scopes: Option<Vec<String>>,
 }
 
 /// `POST /api/oauth/requests/{id}`: the person allows the app (a code is
@@ -456,8 +505,16 @@ pub async fn decide(
     Json(body): Json<Decision>,
 ) -> ApiResult<Json<Value>> {
     let shown = state.oauth.pending.get(&id, web.user.id, &web.session_hash);
+    // What is allowed, checked before anything is decided. A request that
+    // is over, or a mistake's, gets its own answer below.
+    let allowed = match &shown {
+        Some(shown) if body.allow && shown.error.is_none() => {
+            allowed_scopes(shown.scopes, body.scopes.as_deref(), web.user.account_admin)?
+        }
+        _ => Scopes::default(),
+    };
     if shown.is_some_and(|shown| matches!(shown.kind, Kind::Device(_))) {
-        return decide_for_device(&state, &web, &id, body.allow);
+        return decide_for_device(&state, &web, &id, body.allow, allowed);
     }
     let decided = state.oauth.pending.decide(&id, web.user.id, &web.session_hash, body.allow, |request, back| {
         state.oauth.codes.new_code(CodeGrant {
@@ -466,7 +523,7 @@ pub async fn decide(
             code_challenge: back.code_challenge.clone(),
             user_id: request.user_id,
             session_hash: request.session_hash.clone(),
-            scopes: request.scopes,
+            scopes: allowed,
         })
     });
     match decided {
@@ -753,7 +810,9 @@ async fn exchange_code(
             approved_by: user.id,
             client_id: grant.app.id.clone(),
             client_name: grant.app.name.clone(),
-            scopes: grant.scopes,
+            // No longer an administrator since the person allowed it: none of
+            // an administrator's rights.
+            scopes: grant.scopes.for_account(user.account_admin),
             refresh: grant.app.refresh,
             first_party: grant.app.first_party,
             session_hash: Some(grant.session_hash.clone()),
@@ -873,6 +932,12 @@ fn start_on_device(
         return Err(OAuthError::new("unauthorized_client", "this app doesn't sign in with a code"));
     }
     let scopes = asked_scopes(form.get("scope"), client).map_err(|err| OAuthError::new(err.error, err.description))?;
+    if scopes.contains(Scope::Server) {
+        // A code shown on a screen can be passed to an administrator by
+        // anyone in front of it: managing the server is allowed only to an
+        // app signing in on the device it runs on.
+        return Err(OAuthError::new("invalid_scope", "managing the server can't be allowed with a code"));
+    }
     let issuer = issuer(headers).map_err(|_| OAuthError::invalid_request("the Host header is missing or wrong"))?;
     let app = AppSnapshot::from(client);
     // What the device says it is, so the person typing the code can tell
@@ -997,13 +1062,15 @@ pub async fn verify_user_code(
     }
     let app = &found.app;
     let address = found.asker.address.map(|address| address.to_canonical().to_string());
+    let (shown, optional) = shown_scopes(found.scopes, web.user.account_admin);
     Ok(Json(json!({
         "status": "consent",
         "id": id,
         "expires_at": now() + lifetime.as_secs() as i64,
         "client": ClientDto { id: &app.id, host: &app.host, name: app.name.as_deref(), first_party: app.first_party },
         "redirect": {"kind": "device", "to": devices::shown(&code), "device": found.asker.device, "address": address},
-        "scopes": found.scopes.names(),
+        "scopes": shown,
+        "optional": optional,
     })))
 }
 
@@ -1021,20 +1088,15 @@ async fn signed_in(state: &AppState, session_hash: &str) -> ApiResult<bool> {
     Ok(found.is_some())
 }
 
-/// `POST /api/oauth/requests/{id}` for a TV's request: allowed, the TV acts
-/// as the profile the person uses, who allowed it; refused, it is told so.
-/// The TV gets the answer when it next asks: nothing goes back through the
-/// browser.
-fn decide_for_device(state: &AppState, web: &WebUser, id: &str, allow: bool) -> ApiResult<Json<Value>> {
+/// `POST /api/oauth/requests/{id}` for a TV's request: allowed (with
+/// `scopes`, see [`allowed_scopes`]), the TV acts as the profile the person
+/// uses, who allowed it; refused, it is told so. The TV gets the answer when
+/// it next asks: nothing goes back through the browser.
+fn decide_for_device(state: &AppState, web: &WebUser, id: &str, allow: bool, scopes: Scopes) -> ApiResult<Json<Value>> {
     let decided = state.oauth.pending.decide_device(id, web.user.id, &web.session_hash, allow, |request, key| {
-        state.oauth.devices.decide(key, id, allow, web.user.id, &web.session_hash, request.scopes)?;
+        state.oauth.devices.decide(key, id, allow, web.user.id, &web.session_hash, scopes)?;
         if allow {
-            tracing::info!(
-                "{} may use {}'s account ({}) on a device",
-                request.app.label(),
-                web.user.username,
-                request.scopes
-            );
+            tracing::info!("{} may use {}'s account ({scopes}) on a device", request.app.label(), web.user.username);
         }
         Ok(())
     });
@@ -1100,9 +1162,10 @@ async fn issue_for_device(
     allowed: &devices::DeviceGrant,
 ) -> Result<Issued, OAuthError> {
     // Things may have changed since the person allowed it.
+    let mut administrator = false;
     for id in [allowed.user_id, allowed.approved_by] {
         match AuthUser::load(&state.db, id).await {
-            Ok(Some(_)) => {}
+            Ok(Some(user)) => administrator |= id == allowed.user_id && user.account_admin,
             Ok(None) => return Err(OAuthError::invalid_grant("the account is disabled")),
             Err(err) => return Err(OAuthError::server_error(err)),
         }
@@ -1114,7 +1177,9 @@ async fn issue_for_device(
             approved_by: allowed.approved_by,
             client_id: allowed.app.id.clone(),
             client_name: allowed.app.name.clone(),
-            scopes: allowed.scopes,
+            // No longer an administrator since the person allowed it: none of
+            // an administrator's rights.
+            scopes: allowed.scopes.for_account(administrator),
             refresh: allowed.app.refresh,
             first_party: allowed.app.first_party,
             session_hash: Some(allowed.session_hash.clone()),
@@ -1142,7 +1207,10 @@ async fn issue_for_device(
 /// Profiles that need their password are picked in the browser, where the
 /// app signs in again: apps never see passwords or two-step codes. A
 /// refusal spends nothing. A switch keeps the app, what it was allowed and
-/// whoever allowed it, and ends the tokens it had at once.
+/// whoever allowed it, and ends the tokens it had at once. One a cast's
+/// ticket allowed is kept as such, so the app has none of an
+/// administrator's rights over others on the profile it lands on
+/// ([`AuthUser::role_holds`]) until a profile is picked on the device.
 ///
 /// A switch to the profile the app acts as checks that profile's PIN ("Who's
 /// watching?" as a TV starts) and, when it is right, answers as a switch
@@ -1173,7 +1241,11 @@ async fn switch_profile(
             format!("this app wasn't allowed to {}: sign in to it again to allow it", Scope::Profiles.words()),
         ));
     }
-    if profile == holder.user.id {
+    if let Some(ticket) = form.get("ticket") {
+        // A cast from another profile's remote: this device switches to it.
+        let device = format!("app-{}", holder.grant_id);
+        check_ticket_switch(state, &holder.user, Some(&device), profile, ticket, true).await.map_err(refused_switch)?;
+    } else if profile == holder.user.id {
         // "Who's watching?" as a TV starts: the profile's own PIN, checked
         // and answered as a switch to it would be. Without a PIN to check,
         // the app has nothing to ask (older servers answered this to every
@@ -1190,6 +1262,8 @@ async fn switch_profile(
         token: token.to_owned(),
         grant_id: holder.grant_id,
         user_id: profile,
+        // The ticket stood for a PIN given on the caster's device, not here.
+        by_cast: form.get("ticket").is_some(),
         user_agent: user_agent(headers),
         ip,
     };
@@ -1247,6 +1321,7 @@ fn refused_switch(err: SwitchError) -> OAuthError {
         SwitchError::PinLocked => ("pin_locked", PIN_LOCKED.to_owned()),
         SwitchError::PinNeeded => ("wrong_pin", PIN_NEEDED.to_owned()),
         SwitchError::WrongPin => ("wrong_pin", "wrong PIN".to_owned()),
+        SwitchError::TicketSpent => ("ticket_spent", TICKET_SPENT.to_owned()),
         SwitchError::PasswordNeeded | SwitchError::WrongPassword | SwitchError::TwoStep(_) => (
             "browser",
             "this profile can see more than yours: sign in to the app again, and pick the profile in the browser"
@@ -1445,9 +1520,10 @@ impl From<GrantRow> for AppGrant {
 /// What an app's grant was last used from, by the User-Agent of its token
 /// requests. Pley's apps say "pleyAndroid/1.0 (Android 15)",
 /// "pleyKodi/0.1.0 (Kodi 21.2; Windows)", "pleyRoku/0.1.0 (Roku OS 14.5;
-/// Roku Ultra)", "pleyLG/0.1.0 (webOS 23; OLED65C3PUA)" or
-/// "pleyApple/0.1.0 (iPadOS 16.7; iPad)": the row names the app already,
-/// so the platform it gives in brackets.
+/// Roku Ultra)", "pleyLG/0.1.0 (webOS 23; OLED65C3PUA)",
+/// "pleyApple/0.1.0 (iPadOS 16.7; iPad)" or "pleyHomeAssistant/0.1.0 (Home
+/// Assistant 2026.11.0)": the row names the app already, so the platform it
+/// gives in brackets.
 fn grant_device(user_agent: &str) -> String {
     let apps = [
         ("pleyAndroid/", "Android"),
@@ -1455,6 +1531,7 @@ fn grant_device(user_agent: &str) -> String {
         ("pleyRoku/", "Roku"),
         ("pleyLG/", "webOS"),
         ("pleyApple/", "Apple"),
+        ("pleyHomeAssistant/", "Home Assistant"),
     ];
     for (app, platform) in apps {
         if user_agent.contains(app) {
@@ -1496,16 +1573,18 @@ async fn apps_of(state: &AppState, user_id: i64) -> ApiResult<Vec<AppGrant>> {
     Ok(grants::list(&state.db, user_id).await?.into_iter().map(AppGrant::from).collect())
 }
 
-/// Ends grant `grant_id` when it acts as `user_id` or they allowed it.
-async fn sign_out_app(state: &AppState, user_id: i64, grant_id: i64) -> ApiResult<StatusCode> {
-    let listed = grants::list(&state.db, user_id).await?.into_iter().any(|row| row.id == grant_id);
-    if !listed {
+/// Ends grant `grant_id` when it acts as `user_id` or they allowed it, for
+/// `by`: not for an app on another administrator's account.
+async fn sign_out_app(state: &AppState, by: &AuthUser, user_id: i64, grant_id: i64) -> ApiResult<StatusCode> {
+    let described = describe(state, grant_id).await;
+    let mut tx = state.db.write.begin().await?;
+    super::accounts::not_another_administrator(&mut tx, by, user_id).await?;
+    if !grants::delete_of_user(&mut tx, grant_id, user_id).await? {
         return Err(AppError::not_found("no such app"));
     }
-    let described = describe(state, grant_id).await;
-    if state.auth.end_grant(grant_id).await?
-        && let Some((app, user)) = described
-    {
+    tx.commit().await?;
+    state.auth.forget_grants(&[grant_id]);
+    if let Some((app, user)) = described {
         tracing::info!("{app} was signed out of {user}'s account");
     }
     Ok(StatusCode::NO_CONTENT)
@@ -1523,25 +1602,27 @@ pub async fn sign_out_my_app(
     user: AuthUser,
     Path(id): Path<i64>,
 ) -> ApiResult<StatusCode> {
-    sign_out_app(&state, user.id, id).await
+    sign_out_app(&state, &user, user.id, id).await
 }
 
 /// `GET /api/users/{id}/apps` (administrators).
 pub async fn user_apps(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<Vec<AppGrant>>> {
+    super::accounts::not_ones_own_from_an_app(&admin, id, "see your own apps in Pley's web app")?;
     Ok(Json(apps_of(&state, id).await?))
 }
 
 /// `DELETE /api/users/{id}/apps/{grant}` (administrators).
 pub async fn sign_out_user_app(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    AdminUser(admin): AdminUser,
     Path((id, grant)): Path<(i64, i64)>,
 ) -> ApiResult<StatusCode> {
-    sign_out_app(&state, id, grant).await
+    super::accounts::not_ones_own_from_an_app(&admin, id, "sign your own apps out in Pley's web app")?;
+    sign_out_app(&state, &admin, id, grant).await
 }
 
 #[cfg(test)]
@@ -1558,6 +1639,9 @@ mod tests {
         assert_eq!(grant_device("pleyKodi/0.1.0 (Kodi 21.2; Windows)"), "Kodi 21.2; Windows");
         assert_eq!(grant_device("pleyLG/0.1.0 (webOS 23; OLED65C3PUA)"), "webOS 23; OLED65C3PUA");
         assert_eq!(grant_device("pleyLG/0.1.0"), "webOS");
+        let home_assistant = "pleyHomeAssistant/0.1.0 (Home Assistant 2026.11.0)";
+        assert_eq!(grant_device(home_assistant), "Home Assistant 2026.11.0");
+        assert_eq!(grant_device("pleyHomeAssistant/0.1.0"), "Home Assistant");
     }
 
     #[test]

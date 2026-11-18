@@ -20,17 +20,24 @@ import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.isFocused
-import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.junit4.StateRestorationTester
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation3.runtime.NavKey
 import app.pley.android.data.Loadable
+import app.pley.android.model.HubKeys
 import app.pley.android.model.Hubs
+import app.pley.android.model.ItemKind
+import app.pley.android.model.ItemSummary
 import app.pley.android.model.Library
 import app.pley.android.model.LibraryKind
 import app.pley.android.network.OfflineException
@@ -41,13 +48,13 @@ import app.pley.android.screens.requests.RequestsEntry
 import app.pley.android.testing.Fixtures
 import app.pley.android.ui.tv.kit.LocalTvRailFocus
 import app.pley.android.ui.tv.kit.TvRailFocus
-import app.pley.android.ui.tv.shell.LocalTvNavigator
 import app.pley.android.ui.tv.shell.ANNOUNCE_MS
+import app.pley.android.ui.tv.shell.LocalTvNavigator
 import app.pley.android.ui.tv.shell.LocalTvOffline
-import app.pley.android.ui.tv.shell.TvOfflineNotice
-import app.pley.android.ui.tv.shell.TvOfflineState
 import app.pley.android.ui.tv.shell.RailState
 import app.pley.android.ui.tv.shell.TvNavigator
+import app.pley.android.ui.tv.shell.TvOfflineNotice
+import app.pley.android.ui.tv.shell.TvOfflineState
 import app.pley.android.ui.tv.shell.railItems
 import app.pley.android.ui.tv.shell.requestsItem
 import app.pley.android.ui.tv.theme.TvTheme
@@ -63,10 +70,12 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Home on TV with key events: initial focus on Resume, Down into the
- * rows, the focused tile coming back after the page was away, Back from
- * the rows going to the rail with the page back at its hero, and the
- * states drawn from what was saved without the network.
+ * Home on TV with key events: initial focus on the featured title's Play,
+ * Right through the hero's buttons stopping on the last, the hero turning
+ * by itself while nothing is pressed, Down into the rows, the focused tile coming back after the page was away, Back from
+ * the rows going to the rail with the page back at its hero, Home opening
+ * on its rows with the banner turned off, and the states drawn from what
+ * was saved without the network.
  */
 @OptIn(ExperimentalTestApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -119,13 +128,13 @@ class TvHomeTest {
         compose.onNode(isFocused()).fetchSemanticsNode().config.getOrElse(SemanticsProperties.ContentDescription) { emptyList() }.joinToString()
 
     @Test
-    fun resumeHasFocusFirstAndDownGoesIntoTheRows() {
+    fun playHasFocusFirstAndDownGoesIntoTheRows() {
         show()
         compose.waitForIdle()
-        // Drawn from what was saved: the hero is Continue Watching's first, Severance's "Half Loop".
-        compose.onNodeWithText("Severance").assertExists()
-        compose.onNodeWithText("S1 · E2 · Half Loop").assertExists()
-        compose.onNodeWithText("Resume").assertIsFocused()
+        // Drawn from what was saved: the hero features the newest film with a backdrop.
+        compose.onNodeWithText("Dune: Part Two").assertExists()
+        compose.onNodeWithText("NEW").assertExists()
+        compose.onNodeWithText("Play").assertIsFocused()
 
         press(Key.DirectionDown)
         assertTrue(focusedDescription(), focusedDescription().startsWith("Half Loop"))
@@ -136,6 +145,23 @@ class TvHomeTest {
         assertEquals("See all", focusedDescription())
         press(Key.DirectionLeft)
         assertTrue(focusedDescription(), focusedDescription().startsWith("Dune: Part Two"))
+    }
+
+    @Test
+    fun withTheBannerOffHomeOpensOnItsRows() {
+        sources.bannerOn.value = false
+        show()
+        compose.waitForIdle()
+        // No hero: focus starts on the first row's first tile.
+        compose.onNodeWithText("Play").assertDoesNotExist()
+        compose.onNodeWithText("NEW").assertDoesNotExist()
+        assertTrue(focusedDescription(), focusedDescription().startsWith("Half Loop"))
+
+        press(Key.DirectionRight)
+        assertTrue(focusedDescription(), focusedDescription().startsWith("Arrival"))
+        press(Key.DirectionDown)
+        assertEquals("See all", focusedDescription())
+        compose.onNodeWithText("Play").assertDoesNotExist()
     }
 
     @Test
@@ -154,13 +180,13 @@ class TvHomeTest {
             }
         }
         compose.mainClock.advanceTimeBy(1_000)
-        compose.onNodeWithText("Severance").assertExists()
-        compose.onNodeWithText("Showing what Pley had saved. Reconnecting…").assertIsDisplayed()
-        compose.onNodeWithText("Resume").assertIsFocused()
+        compose.onNodeWithText("Dune: Part Two").assertExists()
+        compose.onNodeWithText("Pley is offline").assertIsDisplayed()
+        compose.onNodeWithText("Play").assertIsFocused()
 
         // Said for a while; the rail's mark stays.
         compose.mainClock.advanceTimeBy(ANNOUNCE_MS + 1_000)
-        compose.onNodeWithText("Showing what Pley had saved. Reconnecting…").assertDoesNotExist()
+        compose.onNodeWithText("Pley is offline").assertDoesNotExist()
         assertTrue(offline.offline)
 
         sources.home.value = Loadable.Ready(saved, fresh = true)
@@ -194,9 +220,172 @@ class TvHomeTest {
         compose.waitForIdle()
         assertEquals(1, rail.asked)
         compose.onNodeWithTag("rail").assertIsFocused()
-        // Coming back from the rail lands on Resume, not on the row left.
+        // Coming back from the rail lands on Play, not on the row left.
         press(Key.DirectionRight)
-        compose.onNodeWithText("Resume").assertIsFocused()
+        compose.onNodeWithText("Play").assertIsFocused()
+    }
+
+    @Test
+    fun rightFromTheLastButtonStaysOnIt() {
+        sources.home.value = Loadable.Ready(twoFeatured(), fresh = false)
+        show()
+        compose.waitForIdle()
+        compose.onNodeWithText("Dune: Part Two").assertExists()
+        compose.onNodeWithText("Play").assertIsFocused()
+        // Play, Info, My List; Right again turns nothing and goes nowhere, the dashes above included.
+        press(Key.DirectionRight, times = 2)
+        assertEquals("Add to My List", focusedDescription())
+        press(Key.DirectionRight, times = 2)
+        compose.onNodeWithText("Dune: Part Two").assertExists()
+        compose.onNodeWithText("Severance").assertDoesNotExist()
+        assertEquals("Add to My List", focusedDescription())
+    }
+
+    @Test
+    fun theHeroTurnsByItselfWhileNothingIsPressed() {
+        sources.home.value = Loadable.Ready(twoFeatured(), fresh = false)
+        compose.mainClock.autoAdvance = false
+        show()
+        compose.mainClock.advanceTimeBy(1_000)
+        compose.onNodeWithText("Dune: Part Two").assertExists()
+        compose.mainClock.advanceTimeBy(9_000)
+        compose.onNodeWithText("Severance").assertExists()
+        compose.onNodeWithText("Play").assertIsFocused()
+    }
+
+    @Test
+    fun theTitleOnStaysOnWhenTheBannersTitlesChange() {
+        val two = twoFeatured()
+        sources.home.value = Loadable.Ready(two, fresh = false)
+        compose.mainClock.autoAdvance = false
+        show()
+        compose.mainClock.advanceTimeBy(10_000)
+        compose.onNodeWithText("Severance").assertExists()
+        // Another title takes its place among them, as the top rated ones do a moment after the newest.
+        val other = ItemSummary(id = 901, libraryId = 2, kind = ItemKind.Show, title = "Driftline", backdropUrl = "/api/items/901/images/backdrop")
+        val three = Hubs(two.hubs.map { if (it.key == "recently_added:2") it.copy(items = listOf(other) + it.items) else it })
+        sources.home.value = Loadable.Ready(three, fresh = true)
+        compose.mainClock.advanceTimeBy(1_000)
+        compose.onNodeWithText("Severance").assertExists()
+        compose.onNodeWithText("Driftline").assertDoesNotExist()
+    }
+
+    @Test
+    fun aKeyPressStartsTheHerosTimeOver() {
+        sources.home.value = Loadable.Ready(twoFeatured(), fresh = false)
+        compose.mainClock.autoAdvance = false
+        show()
+        compose.mainClock.advanceTimeBy(6_000)
+        compose.onRoot().performKeyInput { pressKey(Key.DirectionRight) }
+        compose.mainClock.advanceTimeBy(6_000)
+        // 12 s in, but only 6 since the key: still the first title, focus where the key put it.
+        compose.onNodeWithText("Dune: Part Two").assertExists()
+        assertEquals("Info", focusedDescription())
+        compose.mainClock.advanceTimeBy(3_500)
+        compose.onNodeWithText("Severance").assertExists()
+        compose.onNodeWithText("Play").assertIsFocused()
+    }
+
+    @Test
+    fun upFromTheButtonsReachesTheDashesWhichTurnTheTitles() {
+        sources.home.value = Loadable.Ready(twoFeatured(), fresh = false)
+        show()
+        compose.waitForIdle()
+        press(Key.DirectionRight)
+        assertEquals("Info", focusedDescription())
+        press(Key.DirectionUp)
+        assertEquals("Title 1 of 2", focusedDescription())
+        press(Key.DirectionRight)
+        compose.onNodeWithText("Severance").assertExists()
+        assertEquals("Title 2 of 2", focusedDescription())
+        // On from the last title is the first, and back from the first the last.
+        press(Key.DirectionRight)
+        compose.onNodeWithText("Dune: Part Two").assertExists()
+        press(Key.DirectionLeft)
+        compose.onNodeWithText("Severance").assertExists()
+        assertEquals("Title 2 of 2", focusedDescription())
+        // Down is Play, though the dashes are over none of the buttons.
+        press(Key.DirectionDown)
+        compose.onNodeWithText("Play").assertIsFocused()
+    }
+
+    @Test
+    fun theDashesKeepFocusWhenTheHeroTurnsByItself() {
+        sources.home.value = Loadable.Ready(twoFeatured(), fresh = false)
+        compose.mainClock.autoAdvance = false
+        show()
+        compose.mainClock.advanceTimeBy(1_000)
+        compose.onRoot().performKeyInput { pressKey(Key.DirectionUp) }
+        compose.mainClock.advanceTimeBy(1_000)
+        assertEquals("Title 1 of 2", focusedDescription())
+        compose.mainClock.advanceTimeBy(9_000)
+        compose.onNodeWithText("Severance").assertExists()
+        assertEquals("Title 2 of 2", focusedDescription())
+    }
+
+    @Test
+    fun focusOnTheDashesGoesToPlayWhenTheyGo() {
+        sources.home.value = Loadable.Ready(twoFeatured(), fresh = false)
+        show()
+        compose.waitForIdle()
+        press(Key.DirectionUp)
+        assertEquals("Title 1 of 2", focusedDescription())
+        // One title left to feature: no dashes.
+        sources.home.value = Loadable.Ready(Fixtures.decode<Hubs>("hubs/home.json"), fresh = false)
+        compose.waitForIdle()
+        compose.onNodeWithText("Play").assertIsFocused()
+    }
+
+    @Test
+    fun theHeroWaitsUnderAnotherPage() {
+        sources.home.value = Loadable.Ready(twoFeatured(), fresh = false)
+        compose.mainClock.autoAdvance = false
+        val page = object : LifecycleOwner {
+            val registry = LifecycleRegistry(this)
+            override val lifecycle: Lifecycle get() = registry
+        }
+        page.registry.currentState = Lifecycle.State.RESUMED
+        val vm = HomeViewModel(sources, Dispatchers.Unconfined)
+        compose.setContent { CompositionLocalProvider(LocalLifecycleOwner provides page) { Page(vm) } }
+        compose.mainClock.advanceTimeBy(1_000)
+        // Covered, as the shell keeps the page under the one on top.
+        compose.runOnUiThread { page.registry.currentState = Lifecycle.State.CREATED }
+        compose.mainClock.advanceTimeBy(12_000)
+        compose.onNodeWithText("Dune: Part Two").assertExists()
+        // In front again, the title's time starts over.
+        compose.runOnUiThread { page.registry.currentState = Lifecycle.State.RESUMED }
+        compose.mainClock.advanceTimeBy(8_000)
+        compose.onNodeWithText("Dune: Part Two").assertExists()
+        compose.mainClock.advanceTimeBy(1_500)
+        compose.onNodeWithText("Severance").assertExists()
+    }
+
+    @Test
+    fun leftFromPlayOpensTheRailAndUpFromTheRowsComesBackToTheHero() {
+        sources.home.value = Loadable.Ready(twoFeatured(), fresh = false)
+        show()
+        compose.waitForIdle()
+        press(Key.DirectionDown)
+        assertTrue(focusedDescription(), focusedDescription().startsWith("Half Loop"))
+        press(Key.DirectionUp)
+        compose.onNodeWithText("Play").assertIsFocused()
+        compose.onNodeWithText("Dune: Part Two").assertExists()
+        press(Key.DirectionLeft)
+        compose.onNodeWithTag("rail").assertIsFocused()
+    }
+
+    /** What was saved, with Severance's show in Recently Added too: two titles to feature, a film and a show. */
+    private fun twoFeatured(): Hubs {
+        val saved = Fixtures.decode<Hubs>("hubs/home.json")
+        val episode = saved.hubs.first { it.key == HubKeys.CONTINUE_WATCHING }.items.first()
+        val show = ItemSummary(
+            id = episode.grandparentId ?: 200,
+            libraryId = 2,
+            kind = ItemKind.Show,
+            title = episode.grandparentTitle ?: "Severance",
+            backdropUrl = "/api/items/200/images/backdrop",
+        )
+        return Hubs(saved.hubs.map { if (it.key == "recently_added:2") it.copy(items = listOf(show)) else it })
     }
 
     @Test

@@ -25,6 +25,9 @@ async fn administrators_see_where_pley_listens_and_could() {
     assert_eq!((&reply.body["bonjour"], &reply.body["bonjour_adapters"]), (&json!(false), &json!([])));
     assert_eq!(reply.body["bonjour_host_name"], json!(""));
     assert!(reply.body["bonjour_host_default"].as_str().unwrap().starts_with("pley-"), "{:?}", reply.body);
+    // What this machine is: the tests may run in a container too.
+    let contained = pley::network::on_container_network(pley::network::in_container(), &pley::network::adapters());
+    assert_eq!(reply.body["container_network"], contained);
     assert_eq!(reply.body["windows"], cfg!(windows));
     assert!(reply.body["adapters"].is_array());
     assert!(reply.body["config_file"].as_str().unwrap().ends_with("pley.toml"));
@@ -59,15 +62,15 @@ async fn a_change_is_saved_for_the_next_start() {
 }
 
 #[tokio::test]
-async fn the_jellyfin_api_is_off_until_turned_on_on_pleys_port_or_its_own() {
+async fn the_jellyfin_api_is_on_pleys_port_until_given_its_own_or_turned_off() {
     let app = TestApp::new().await;
     let admin = app.setup_admin().await;
     let now = app.get("/api/network", &admin).await.body;
-    assert_eq!((&now["jellyfin"], &now["jellyfin_on_web"]), (&json!([]), &json!(false)), "off by default");
+    assert_eq!((&now["jellyfin"], &now["jellyfin_on_web"]), (&json!([]), &json!(true)), "on Pley's port by default");
     for (change, saved) in [
-        (json!({"web": ["127.0.0.1:7539"], "jellyfin": [], "jellyfin_on_web": true, "discovery": false}), "web"),
         (json!({"web": ["127.0.0.1:7539"], "jellyfin": ["0.0.0.0:8096"], "discovery": false}), "0.0.0.0:8096"),
         (json!({"web": ["127.0.0.1:7539"], "jellyfin": [], "discovery": false}), "off"),
+        (json!({"web": ["127.0.0.1:7539"], "jellyfin": [], "jellyfin_on_web": true, "discovery": false}), "web"),
     ] {
         let reply = app.put("/api/network", &admin, change.clone()).await;
         assert_eq!(reply.status, StatusCode::OK, "{change}: {:?}", reply.body);

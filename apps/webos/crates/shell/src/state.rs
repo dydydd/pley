@@ -21,14 +21,19 @@ use std::time::Duration;
 use pley_base::{Fetch, FetchError, Waker};
 use pley_core::addresses::origin;
 use pley_core::auth::{AuthError, StoredTokens, Tokens};
-use pley_core::model::{AppProfile, Hub, Hubs, ItemDetail, Library, LiveCategory, LiveChannel, LiveSummary, Me};
-use pley_core::model::{RequestList, RequestQuery, RequestSummary, ScanPhase, ServerEvent, TitleKind};
+use pley_core::model::{
+    AppProfile, Hub, Hubs, ItemDetail, Library, LiveCategory, LiveChannel, LiveSummary, Me, ServerInfo,
+};
+use pley_core::model::{RequestList, RequestQuery, RequestSummary, ScanPhase, ServerEvent, SwitchTicket, TitleKind};
 use pley_core::requests::title_key;
 use pley_core::store::{SavedServer, Snapshots, keys, snapshot_keys};
-use pley_core::{Api, ApiError, CapsOverrides, CapsReport, Device, EventStream, Http, Promise, Settings, Store};
-use pley_core::{StreamNews, Tasks};
+use pley_core::{Api, ApiError, CapsOverrides, CapsReport, CastReceiver, Device, EventStream, Http, Promise, Settings};
+use pley_core::{Store, StreamNews, Tasks};
+use pley_i18n::{Language, t};
 
+use crate::cast::LAST_REPORTS_WAIT;
 use crate::cx::BackgroundSession;
+use crate::language::{Known, wanted};
 use crate::players::Players;
 use crate::request_state::{RequestNotice, RequestState, SUMMARY_POLL};
 use crate::route::Route;
@@ -37,7 +42,7 @@ use crate::screen::AppEvent;
 /// An answer older than this is asked again when something shows it (`REVALIDATE_MS`,
 /// Android's `ResourceCache.kt:279-282`).
 pub const REVALIDATE: f64 = 30.0;
-/// How long "Showing what Pley had saved. Reconnecting…" shows (`OFFLINE_NOTICE_MS`).
+/// How long "Pley is offline" shows (`OFFLINE_NOTICE_MS`).
 pub const OFFLINE_NOTICE: f64 = 6.0;
 /// While the server is out of reach it is asked this often, and given as long to answer
 /// (`OFFLINE_ASK_MS`): the event stream, backing off up to 30 s, then reconnects at once.
@@ -55,9 +60,15 @@ pub const ITEMS_KEPT: usize = 40;
 /// How many of the live channels pages showed are kept, so the player starts with one at once.
 pub const LIVE_CHANNELS_KEPT: usize = 500;
 
-/// What "Showing what Pley had saved. Reconnecting…" says: the shell's notice while the server is
-/// out of reach, then the avatar's mark.
-pub const OFFLINE_TEXT: &str = "Showing what Pley had saved. Reconnecting…";
+/// What the shell's notice says while the server is out of reach, then the avatar's mark.
+pub fn offline_text() -> &'static str {
+    t!("shell.offline")
+}
+
+/// Why a sign-in or a switch can't be asked for: a few words, as `AuthError::Failed` holds them.
+fn no_server() -> AuthError {
+    AuthError::Failed(t!("shell.errors.noServer").into())
+}
 
 /// A library scan the server's events told of.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -88,6 +99,16 @@ impl Fetch for CurrentFetch {
     }
 }
 
+/// The server's event stream while the app follows it, and whether it named the TV a receiver of
+/// Live TV channels as well as titles.
+struct Listening {
+    stream: EventStream,
+    news: Receiver<StreamNews>,
+    live: bool,
+    /// The stream has connected since it started.
+    connected: bool,
+}
+
 /// An answer on its way, with the generation (server, sign-in and profile) it was asked for:
 /// one that comes back for a server or profile since left is dropped.
 struct Pending<T> {
@@ -100,6 +121,9 @@ impl<T> Pending<T> {
         self.promise.take()
     }
 }
+
+/// How long the server is given to say its language.
+const SERVER_LANGUAGE_WAIT: Duration = Duration::from_secs(10);
 
 /// When each answer the state holds came, for asking again past [`REVALIDATE`].
 #[derive(Clone, Copy, Debug, Default)]
@@ -172,6 +196,14 @@ pub struct AppState {
 
     account_me: Option<Pending<Result<Me, ApiError>>>,
     account_libraries: Option<Pending<Result<Vec<Library>, ApiError>>>,
+    /// Who is watching or the libraries changed while they were on their way: they are asked again
+    /// once those land, as their answer may be from before the change ([`AppState::reload_account`]).
+    account_again: bool,
+    /// How many times the libraries were kept ([`AppState::keep_libraries`]), and the count when
+    /// the libraries on their way were asked: libraries kept since (an order change's answer) are
+    /// newer than theirs.
+    libraries_kept: u64,
+    account_libraries_from: u64,
     home_task: Option<Pending<Result<Hubs, ApiError>>>,
     live_task: Option<Pending<Result<LiveSummary, ApiError>>>,
     requests: RequestState,
@@ -180,9 +212,22 @@ pub struct AppState {
     profiles_task: Option<Pending<Result<Vec<AppProfile>, ApiError>>>,
     reach_task: Option<Pending<Result<(), ApiError>>>,
     caps_task: Option<Promise<CapsReport>>,
-    events: Option<(EventStream, Receiver<StreamNews>)>,
+    events: Option<Listening>,
     out: Vec<AppEvent>,
     players: Players,
+
+    /// The language shown.
+    language: Language,
+    /// The language picked on this TV with the globe; none: Automatic.
+    language_choice: Option<Language>,
+    /// The TV's languages, once it has said.
+    tv_languages: Vec<String>,
+    /// The server in use was heard (`GET /api/server`), and its language.
+    server_language: Option<Option<String>>,
+    server_language_task: Option<Pending<Result<ServerInfo, ApiError>>>,
+    /// The servers that answered a choice of the account's language 404 (or 405) in this launch,
+    /// by address: they have no route for it.
+    no_language_route: HashSet<String>,
 }
 
 impl AppState {
@@ -195,6 +240,13 @@ impl AppState {
         let install_id = store.install_id();
         let user_agent = http.user_agent().to_string();
         let players = Players::new(&store, &settings.quality);
+        // The language shown last, so the first frame shows it; else what the TV knows already.
+        let language_choice = store.device_language();
+        let tv_languages = device.languages();
+        let language = store
+            .shown_language()
+            .unwrap_or_else(|| pley_i18n::pick(None, language_choice.map(Language::code), None, &tv_languages));
+        pley_i18n::set_language(language);
         let mut state = AppState {
             device,
             store,
@@ -243,6 +295,9 @@ impl AppState {
             music_hidden_playing: false,
             account_me: None,
             account_libraries: None,
+            account_again: false,
+            libraries_kept: 0,
+            account_libraries_from: 0,
             home_task: None,
             live_task: None,
             requests: RequestState::default(),
@@ -254,6 +309,12 @@ impl AppState {
             events: None,
             out: Vec::new(),
             players,
+            language,
+            language_choice,
+            tv_languages,
+            server_language: None,
+            server_language_task: None,
+            no_language_route: HashSet::new(),
         };
         if let Some(server) = state.store.active_server() {
             state.use_server(&server);
@@ -388,9 +449,9 @@ impl AppState {
 
     /// The first page, from what the TV kept (the Android app's `StartGate`): no server → Servers;
     /// no sign-in → Link; a household of one, or "Who's watching?" answered in this launch → Home.
-    /// Else "Always start as" goes on as the profile the TV was left on, but never past its PIN:
-    /// its pad comes first when it has one, and "Who's watching?" while the TV doesn't know
-    /// whether it has one (or without "Always start as").
+    /// Else Home as the profile the TV was left on when it has no PIN, but never past a PIN: with
+    /// "Always start as" its pad comes first, without it "Who's watching?", which also shows while
+    /// the TV doesn't know whether the profile has one.
     pub fn start_route(&self) -> Route {
         let Some(server) = self.server.clone() else { return Route::Servers };
         if !self.signed_in() {
@@ -399,9 +460,9 @@ impl AppState {
         if self.household_size() <= 1 || self.profile_gate_passed {
             return Route::Home;
         }
-        match (self.always_start_as(), &self.me) {
-            (Some(_), Some(me)) if me.has_pin => Route::Pin { profile: me.id },
-            (Some(_), Some(_)) => Route::Home,
+        match (&self.me, self.always_start_as()) {
+            (Some(me), _) if !me.has_pin => Route::Home,
+            (Some(me), Some(_)) => Route::Pin { profile: me.id },
             _ => Route::Profiles,
         }
     }
@@ -436,6 +497,9 @@ impl AppState {
         self.signed_out = false;
         self.generation += 1;
         self.read_saved();
+        self.server_language = None;
+        self.server_language_task = None;
+        self.ask_server_language();
     }
 
     /// Reads what was saved for the server's last profile: who, the libraries, Live TV's summary
@@ -457,7 +521,7 @@ impl AppState {
     /// then calls [`AppState::signed_in_now`].
     pub fn install_sign_in(&self, tokens: StoredTokens, asked_scope: String) -> Promise<Result<(), AuthError>> {
         let Some(kept) = self.tokens.clone() else {
-            return Promise::resolved(Err(AuthError::Failed("no server is in use".into())));
+            return Promise::resolved(Err(no_server()));
         };
         self.tasks.spawn(move || kept.install(tokens, &asked_scope))
     }
@@ -489,9 +553,28 @@ impl AppState {
     /// calls [`AppState::switched`].
     pub fn switch_profile(&self, profile: i64, pin: Option<String>) -> Promise<Result<(), AuthError>> {
         let Some(tokens) = self.tokens.clone() else {
-            return Promise::resolved(Err(AuthError::Failed("no server is in use".into())));
+            return Promise::resolved(Err(no_server()));
         };
         self.tasks.spawn(move || tokens.switch_profile(profile, pin.as_deref()))
+    }
+
+    /// Asks the server to act as `profile`, the profile of a remote that cast to the TV, with the
+    /// cast's ticket, once the shell has ended what played: its last reports go out first, as the
+    /// profile it played as, for [`LAST_REPORTS_WAIT`] at most; what hasn't gone out by then is
+    /// dropped, never sent as the next profile ([`crate::players`]). On success the shell calls
+    /// [`AppState::switched`].
+    pub fn switch_for_cast(&self, profile: i64, ticket: SwitchTicket) -> Promise<Result<(), AuthError>> {
+        let Some(tokens) = self.tokens.clone() else {
+            return Promise::resolved(Err(no_server()));
+        };
+        let (reporter, fence) = (self.players.reporter(), self.players.fence.clone());
+        self.tasks.spawn(move || {
+            if !reporter.flush(LAST_REPORTS_WAIT) {
+                log::info!("the last reports of what played didn't go out in time: they are dropped");
+            }
+            fence.close();
+            tokens.switch_profile_with_ticket(profile, ticket.as_str())
+        })
     }
 
     /// The app acts as `profile` now: what plays ends, what was shown for the profile before goes,
@@ -596,6 +679,9 @@ impl AppState {
         self.fetch.set(None);
         self.store.clear();
         self.settings = Settings::default();
+        self.language_choice = None;
+        self.server_language = None;
+        self.server_language_task = None;
         self.install_id = self.store.install_id();
         self.caps = None;
         self.caps_task = None;
@@ -643,6 +729,7 @@ impl AppState {
         self.live_last_watched = None;
         self.account_me = None;
         self.account_libraries = None;
+        self.account_again = false;
         self.home_task = None;
         self.live_task = None;
         self.requests.reset();
@@ -749,6 +836,7 @@ impl AppState {
     pub fn keep_libraries(&mut self, libraries: Vec<Library>) {
         self.save_snapshot(snapshot_keys::LIBRARIES, &libraries);
         self.libraries = Some(libraries);
+        self.libraries_kept += 1;
     }
 
     /// Asks for who is watching and the libraries (then the household and Live TV's summary).
@@ -759,8 +847,21 @@ impl AppState {
         let generation = self.generation;
         self.account_me = Some(Pending { generation, promise: self.spawn(|api| api.me()) });
         self.account_libraries = Some(Pending { generation, promise: self.spawn(|api| api.libraries()) });
+        self.account_libraries_from = self.libraries_kept;
         // What requests are for it, alongside.
         self.load_requests(false);
+    }
+
+    /// Asks for who is watching and the libraries because they changed (the server said so, it
+    /// refused an order made from an older list, or the profile's defaults were saved). With an ask
+    /// already on its way, which may have been answered before the change, they are asked again
+    /// once it lands.
+    pub fn reload_account(&mut self) {
+        if self.account_me.is_some() {
+            self.account_again = true;
+            return;
+        }
+        self.load_account();
     }
 
     // Requests.
@@ -1087,8 +1188,8 @@ impl AppState {
         self.offline
     }
 
-    /// Whether "Showing what Pley had saved. Reconnecting…" shows (its first 6 s); after it the
-    /// rail's avatar keeps a mark while [`AppState::offline`].
+    /// Whether "Pley is offline" shows (its first 6 s); after it the rail's avatar keeps a mark
+    /// while [`AppState::offline`].
     pub fn offline_notice(&self) -> bool {
         self.offline && self.notice_until.is_some_and(|t| self.now < t)
     }
@@ -1153,27 +1254,60 @@ impl AppState {
         }
     }
 
-    /// Follows the server's events while the app shows and is signed in.
+    /// Follows the server's events while the app shows and is signed in. The stream names the TV
+    /// a receiver, which the user's remotes cast to while it is open (docs/API.md, "Casting"): by
+    /// its install id, as a TV, of titles and playlists, and of Live TV channels where the profile
+    /// has Live TV.
     pub fn listen(&mut self, on: bool) {
         let Some(api) = self.api.clone().filter(|_| on && self.signed_in()) else {
             self.stop_events();
             return;
         };
         if self.events.is_none() {
-            let (tx, rx) = mpsc::channel();
-            self.events = Some((EventStream::start(api, tx, self.waker.clone()), rx));
+            let (tx, news) = mpsc::channel();
+            let live = self.casts_live();
+            let receiver = CastReceiver { id: self.install_id.clone(), live };
+            let stream = EventStream::start(api, Some(receiver), tx, self.waker.clone());
+            self.events = Some(Listening { stream, news, live, connected: false });
+        }
+    }
+
+    /// Whether the TV takes Live TV channels when cast to: the profile has Live TV, as last
+    /// heard. Before the server first says (no answer saved), it takes them, so that most
+    /// households' streams needn't open again once it does; the server refuses a channel to an
+    /// account without Live TV whatever the TV says, and remotes offer channels only to accounts
+    /// that have it.
+    fn casts_live(&self) -> bool {
+        match (&self.live, self.fetched.live) {
+            (Some(summary), _) => summary.available,
+            (None, heard) => heard.is_none(),
+        }
+    }
+
+    /// Live TV came or went for the profile: a stream open says anew, from a new connection, what
+    /// the TV plays when cast to.
+    fn casts_changed(&mut self) {
+        if self.events.as_ref().is_some_and(|l| l.live != self.casts_live()) {
+            self.stop_events();
+            self.listen(self.visible);
         }
     }
 
     fn stop_events(&mut self) {
-        if let Some((mut stream, _)) = self.events.take() {
-            stream.stop();
+        if let Some(mut listening) = self.events.take() {
+            listening.stream.stop();
         }
     }
 
     /// Whether the event stream runs.
     pub fn listening(&self) -> bool {
         self.events.is_some()
+    }
+
+    /// Whether the event stream runs and has connected (tests wait for it: connecting asks for
+    /// everything again and tells the pages [`AppEvent::Changed`]).
+    pub fn connected(&self) -> bool {
+        self.events.as_ref().is_some_and(|l| l.connected)
     }
 
     fn reconnected(&mut self) {
@@ -1185,6 +1319,9 @@ impl AppState {
         self.load_requests(false);
         if down {
             self.requests.changed(None, self.now);
+        }
+        if self.server_language.is_none() {
+            self.ask_server_language();
         }
         // Nothing is replayed: what is older than 30 s, or anything after the server was out of
         // reach, is fetched again.
@@ -1204,7 +1341,7 @@ impl AppState {
         match &e {
             ServerEvent::LibraryChanged { .. } => self.library_due = Some(self.now + LIBRARY_GATHER),
             ServerEvent::LibrariesChanged => {
-                self.load_account();
+                self.reload_account();
                 self.refresh();
             }
             ServerEvent::WatchlistChanged => self.refresh(),
@@ -1257,6 +1394,142 @@ impl AppState {
         self.refresh();
     }
 
+    // The language.
+
+    /// The language shown.
+    pub fn language(&self) -> Language {
+        self.language
+    }
+
+    /// The language picked on this TV with the globe; none: Automatic.
+    pub fn language_choice(&self) -> Option<Language> {
+        self.language_choice
+    }
+
+    /// What the globe's Automatic is on this TV: its language where Pley has it, else the
+    /// server's, else English.
+    pub fn automatic_language(&self) -> Language {
+        pley_i18n::of_system(self.server_language.clone().flatten().as_deref(), &self.tv_languages)
+    }
+
+    /// What an account's Automatic is on this TV: the language picked with the globe, else
+    /// [`AppState::automatic_language`].
+    pub fn account_automatic_language(&self) -> Language {
+        self.language_choice.unwrap_or_else(|| self.automatic_language())
+    }
+
+    /// The server in use keeps an account's language. False for a Pley from before languages,
+    /// whose `GET /api/server` names none, or one that answered a choice 404 or 405
+    /// ([`AppState::language_route_missing`]): Settings' Language row is then this TV's, as the
+    /// globe picks it. True until the server has said.
+    pub fn keeps_language(&self) -> bool {
+        let Some(server) = self.server.as_deref() else { return true };
+        !self.no_language_route.contains(server) && self.server_language.as_ref().is_none_or(Option::is_some)
+    }
+
+    /// The server in use answered a choice of the account's language 404 or 405: it has no route
+    /// for it, and keeps no account's language.
+    pub fn language_route_missing(&mut self) {
+        if let Some(server) = self.server.clone() {
+            self.no_language_route.insert(server);
+            self.follow_language();
+        }
+    }
+
+    /// Picks this TV's language with the globe, or with Settings on a server that keeps no
+    /// account's language (none: Automatic, which forgets the pick); it shows at once unless the
+    /// account has its own.
+    pub fn choose_language_here(&mut self, choice: Option<Language>) {
+        self.language_choice = choice;
+        if let Err(e) = self.store.set_device_language(choice) {
+            log::warn!("the language picked not kept: {e}");
+        }
+        self.follow_language();
+    }
+
+    /// The account as `PUT /api/me/language` answered it: its language shows at once.
+    pub fn account_changed(&mut self, me: Me) {
+        if self.me.as_ref().is_some_and(|m| m.id == me.id) {
+            self.save_snapshot(snapshot_keys::ME, &me);
+            self.me = Some(me);
+            self.follow_language();
+        }
+    }
+
+    fn ask_server_language(&mut self) {
+        if self.server_language_task.is_some() || self.api.is_none() {
+            return;
+        }
+        let promise = self.spawn(|api| api.reachable(SERVER_LANGUAGE_WAIT));
+        self.server_language_task = Some(Pending { generation: self.generation, promise });
+    }
+
+    fn collect_server_language(&mut self) {
+        let Some(task) = self.server_language_task.as_mut() else { return };
+        let answer = task.take();
+        if answer.is_none() && !task.promise.failed() {
+            return;
+        }
+        let generation = task.generation;
+        self.server_language_task = None;
+        // Out of reach: asked again when the events reconnect.
+        if let Some(Ok(info)) = answer
+            && generation == self.generation
+        {
+            self.server_language = Some(info.language);
+        }
+    }
+
+    /// Shows the language wanted now, once what decides it has been heard.
+    fn follow_language(&mut self) {
+        if self.tv_languages.is_empty() {
+            // The TV says its language a moment after the app starts.
+            self.tv_languages = self.device.languages();
+        }
+        let account = if !self.keeps_language() {
+            // A server that keeps none: nothing of the account to wait for.
+            Some(None)
+        } else if self.fetched.account.is_some() {
+            Some(self.me.as_ref().and_then(|m| m.language.as_deref()))
+        } else {
+            None
+        };
+        let known = Known {
+            signed_in: self.signed_in(),
+            account,
+            choice: self.language_choice,
+            tv: &self.tv_languages,
+            server_in_use: self.server.is_some(),
+            server: self.server_language.as_ref().map(Option::as_deref),
+        };
+        if let Some(language) = wanted(&known)
+            && language != self.language
+        {
+            self.show_language(language);
+        }
+    }
+
+    /// Shows `language` from now on: the pages draw again in it, and Home's rows, which the server
+    /// writes, are asked for again.
+    fn show_language(&mut self, language: Language) {
+        log::info!("the app is in {} now", language.code());
+        self.language = language;
+        pley_i18n::set_language(language);
+        if let Err(e) = self.store.set_shown_language(language) {
+            log::warn!("the language shown not kept: {e}");
+        }
+        self.out.push(AppEvent::Language);
+        // Diagnostics' lines are worded when the TV is probed: probed again, they are in this one.
+        if self.caps.is_some() || self.caps_task.is_some() {
+            self.probe_caps(true);
+        }
+        if self.signed_in() {
+            // An answer on its way is in the language before.
+            self.home_task = None;
+            self.load_home();
+        }
+    }
+
     // The frame.
 
     /// Collects what came back since the last frame (answers, the events' news, timers due) and
@@ -1274,6 +1547,8 @@ impl AppState {
         self.collect_requests();
         self.collect_profiles();
         self.collect_reach();
+        self.collect_server_language();
+        self.follow_language();
         if let Some(p) = self.caps_task.as_mut()
             && let Some(report) = p.take()
         {
@@ -1321,6 +1596,7 @@ impl AppState {
             || self.profiles_task.is_some()
             || self.reach_task.is_some()
             || self.caps_task.is_some()
+            || self.server_language_task.is_some()
     }
 
     fn collect_ended(&mut self) {
@@ -1346,6 +1622,7 @@ impl AppState {
         let libraries = libraries.take().unwrap_or(Err(ApiError::Unreadable("no answer".into())));
         self.account_me = None;
         self.account_libraries = None;
+        let again = std::mem::take(&mut self.account_again);
         if generation != self.generation {
             return;
         }
@@ -1362,7 +1639,10 @@ impl AppState {
                 }
                 self.save_snapshot(snapshot_keys::ME, &me);
                 self.me = Some(me);
-                self.keep_libraries(libraries);
+                // Libraries kept since this was asked (an order change's answer) are newer: they stay.
+                if self.libraries_kept == self.account_libraries_from {
+                    self.keep_libraries(libraries);
+                }
                 if self.tokens.as_ref().is_some_and(|t| t.allows("profiles")) {
                     self.profiles_task = Some(Pending { generation, promise: self.spawn(|api| api.profiles()) });
                 }
@@ -1373,6 +1653,9 @@ impl AppState {
                 self.report_failure(&e);
                 self.account_error = Some(e);
             }
+        }
+        if again {
+            self.load_account();
         }
     }
 
@@ -1439,6 +1722,7 @@ impl AppState {
             // Out of reach: what was kept stays.
             Err(e) => self.report_failure(&e),
         }
+        self.casts_changed();
     }
 
     fn collect_profiles(&mut self) {
@@ -1475,8 +1759,8 @@ impl AppState {
             Ok(()) => {
                 // A stream waiting out its back-off connects now; the app asks again itself, in
                 // case the stream stayed connected through a short blip.
-                if let Some((stream, _)) = &self.events {
-                    stream.retry_now();
+                if let Some(listening) = &self.events {
+                    listening.stream.retry_now();
                 }
                 self.server_answered();
                 self.items.clear();
@@ -1490,9 +1774,9 @@ impl AppState {
     fn collect_events(&mut self) {
         let mut news = Vec::new();
         let mut stopped = false;
-        if let Some((_, rx)) = &self.events {
+        if let Some(listening) = &self.events {
             loop {
-                match rx.try_recv() {
+                match listening.news.try_recv() {
                     Ok(n) => news.push(n),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
@@ -1504,7 +1788,12 @@ impl AppState {
         }
         for n in news {
             match n {
-                StreamNews::Connected => self.reconnected(),
+                StreamNews::Connected => {
+                    if let Some(listening) = self.events.as_mut() {
+                        listening.connected = true;
+                    }
+                    self.reconnected();
+                }
                 StreamNews::Event(e) => self.handle_event(e),
                 StreamNews::Stopped => stopped = true,
                 // Until the events connect again, the summary is asked for every 60 s.

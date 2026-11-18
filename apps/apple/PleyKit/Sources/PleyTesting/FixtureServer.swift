@@ -125,7 +125,7 @@ public final class FixtureServer: Sendable {
         Profile(id: 5, username: "guest", name: "Guest", avatarColor: "#94a3b8", hasAvatar: false, pin: nil, needs: "locked"),
     ]
 
-    public static let allScopes = "library play playlists profiles"
+    public static let allScopes = "library play playlists profiles requests approvals"
 
     /// The client IDs of Pley's Apple apps, which the fixture knows as the server does.
     public static let appleClients = ["ios", "tvos", "macos"].map {
@@ -209,13 +209,19 @@ public final class FixtureServer: Sendable {
         var autoQuality = "8m"
         var adaptive = false
         var delays: [String: Int] = [:]
+        /// The answers held back, by `"METHOD path"`, until the test lets them go (`hold`).
+        var held: [String: [@Sendable () -> Void]] = [:]
         var network = Network()
         var browse = Browse()
         var account = Account()
         var live = Live()
         var subtitleSearch = SubtitleSearch()
+        var requests = Requests()
         var conversions = Conversions()
         var proofs = Proofs()
+        var remote = Remote()
+        /// Events a route sends, pushed to the open streams once it answered.
+        var outbox: [String] = []
     }
 
     /// What the fixture says of the client's network (`/api/playback/network`).
@@ -237,6 +243,25 @@ public final class FixtureServer: Sendable {
         var stopped: String??
         var expired = false
         var deleted = false
+        /// What the play request said for the remote: what its player obeys, and its device's name.
+        var controls: [String] = []
+        var device: String?
+        /// As its player last reported.
+        var state = "playing"
+        var positionMs = 0
+        let durationMs: Int
+        /// The order sessions started in, for `GET /api/sessions`.
+        var order = 0
+        /// Which device plays it, as the server says it: its sign-in's (`app-<grant>`), and what kind.
+        var deviceId = ""
+        var deviceKind = "other"
+        /// The tracks it plays, as its play request started and its reports say (subtitles `-1`: none).
+        var audioIndex: Int?
+        var subtitleIndex: Int?
+        /// The Quality menu's pick, as its reports say; `nil` until one does.
+        var quality: String?
+        /// The device's volume, as a Google Cast device's session says it; `nil` for other players.
+        var volume: Int?
     }
 
     /// NWListener is Sendable from iOS 17 only; it is safe to share, and only
@@ -298,6 +323,12 @@ public final class FixtureServer: Sendable {
 
     public func stop() {
         endEvents()
+        // Nothing waits on an answer held back.
+        let held = state.withLock { s -> [@Sendable () -> Void] in
+            defer { s.held = [:] }
+            return s.held.values.flatMap { $0 }
+        }
+        for send in held { send() }
         let box = state.withLock { s -> Listener? in
             defer { s.listener = nil }
             return s.listener
@@ -479,6 +510,19 @@ public final class FixtureServer: Sendable {
         state.withLock { $0.delays[method.map { "\($0) \(path)" } ?? path] = ms }
     }
 
+    /// Holds back the answers to `method path` until `release(path:method:)`,
+    /// as a server that takes its time (a cast to a Google Cast device): each
+    /// request is handled, and recorded, as it comes; only its answer waits.
+    public func hold(path: String, method: String = "POST") {
+        state.withLock { s in s.held["\(method) \(path)"] = s.held["\(method) \(path)"] ?? [] }
+    }
+
+    /// Sends the answers held back for `method path`, and answers it at once from now on.
+    public func release(path: String, method: String = "POST") {
+        let held = state.withLock { $0.held.removeValue(forKey: "\(method) \(path)") } ?? []
+        for send in held { send() }
+    }
+
     /// How the network routes answer: absent (`404`, an older server), the
     /// server's own network (`local`), or one it asks a speed test on (`probe`).
     public func setNetwork(routes: Bool = true, local: Bool = true, probe: Bool = false) {
@@ -539,6 +583,14 @@ public final class FixtureServer: Sendable {
                 self.openEvents(request, on: connection)
             case .some(.some(let request)):
                 let answer = self.handle(request)
+                let key = "\(request.method) \(request.path)"
+                let held = self.state.withLock { s -> Bool in
+                    guard s.held[key] != nil else { return false }
+                    s.held[key]?.append({ self.send(answer, on: connection) })
+                    return true
+                }
+                // Sent once the test lets it go.
+                if held { break }
                 if let ms = self.state.withLock({
                     $0.delays["\(request.method) \(request.path)"] ?? $0.delays[request.path]
                         ?? $0.delays["\(request.path)?q=\(request.query["q"] ?? "")"]
@@ -643,24 +695,32 @@ public final class FixtureServer: Sendable {
     // MARK: Routes
 
     private func handle(_ request: Request) -> Answer {
+        let (answer, events) = state.withLock { s -> (Answer, [String]) in
+            let answer = Self.respond(&s, request)
+            defer { s.outbox = [] }
+            return (answer, s.outbox)
+        }
+        for event in events { pushEvent(event) }
+        return answer
+    }
+
+    private static func respond(_ s: inout State, _ request: Request) -> Answer {
         let form = request.headers["content-type"]?.hasPrefix("application/x-www-form-urlencoded") == true
             ? request.form : [:]
-        return state.withLock { s in
-            var headers = request.headers
-            if let auth = headers["authorization"] {
-                let token = auth.hasPrefix("Bearer ") ? String(auth.dropFirst(7)) : ""
-                headers["authorization"] = s.accessTokens[token].map { "Bearer #\($0.id)" } ?? "Bearer (unknown)"
-            }
-            s.journal.append(Recorded(method: request.method, path: request.path, query: request.query,
-                                      headers: headers, grantType: form["grant_type"], formKeys: form.keys.sorted()))
-            if let answer = s.answers[request.path] { return answer }
-            if let file = s.files[request.path] {
-                var answer = Self.ranged(file.body, range: request.headers["range"], type: file.type)
-                answer.headers.merge(file.headers) { _, mine in mine }
-                return answer
-            }
-            return Self.route(&s, request, form: form)
+        var headers = request.headers
+        if let auth = headers["authorization"] {
+            let token = auth.hasPrefix("Bearer ") ? String(auth.dropFirst(7)) : ""
+            headers["authorization"] = s.accessTokens[token].map { "Bearer #\($0.id)" } ?? "Bearer (unknown)"
         }
+        s.journal.append(Recorded(method: request.method, path: request.path, query: request.query,
+                                  headers: headers, grantType: form["grant_type"], formKeys: form.keys.sorted()))
+        if let answer = s.answers[request.path] { return answer }
+        if let file = s.files[request.path] {
+            var answer = Self.ranged(file.body, range: request.headers["range"], type: file.type)
+            answer.headers.merge(file.headers) { _, mine in mine }
+            return answer
+        }
+        return route(&s, request, form: form)
     }
 
     private static func route(_ s: inout State, _ request: Request, form: [String: String]) -> Answer {
@@ -703,11 +763,13 @@ public final class FixtureServer: Sendable {
             }
         }
         if let answer = live(&s, request, parts) { return answer }
+        if let answer = requests(&s, request, parts) { return answer }
         if let answer = subtitles(&s, request, parts) { return answer }
         if let answer = downloads(&s, request, parts) { return answer }
         if let answer = browse(&s, request, parts) { return answer }
         if let answer = lists(&s, request, parts) { return answer }
         if let answer = account(&s, request, parts) { return answer }
+        if let answer = remote(&s, request, parts) { return answer }
         if let answer = playback(&s, request, parts) { return answer }
         if get, parts.count == 4, parts[0] == "api", parts[1] == "users", let id = Int(parts[2]), parts[3] == "avatar" {
             return withToken(&s, request) { _, _ in
@@ -744,6 +806,7 @@ public final class FixtureServer: Sendable {
                 if let sid = body["session_id"] as? String, let session = s.sessions[sid] {
                     if case .some(let message) = session.stopped { return stoppedAnswer(message) }
                     if session.expired || session.deleted { return expiredAnswer() }
+                    reported(&s, sid, body)
                 }
                 // As the server keeps the place: at 90 % or more, watched from the start.
                 if let position = body["position_ms"] as? Int, var playable = s.playables[id] {
@@ -778,7 +841,9 @@ public final class FixtureServer: Sendable {
                 return image(width: 320, height: 180, type: "public.jpeg", contentType: "image/jpeg")
             }
         case ("POST", 2, "playback"):
-            return withToken(&s, request, scope: "play") { s, _ in startSession(&s, request.body) }
+            return withToken(&s, request, scope: "play") { s, access in
+                startSession(&s, request.body, deviceId: deviceId(access))
+            }
         case ("GET", 3, "playback") where parts[2] == "network":
             return withToken(&s, request, scope: "play") { s, _ in
                 guard s.network.routes else { return notFound(request.path) }
@@ -812,6 +877,7 @@ public final class FixtureServer: Sendable {
             return withToken(&s, request, scope: "play") { s, _ in
                 guard let session = s.sessions[id] else { return expiredAnswer() }
                 if method == "DELETE" {
+                    if !session.deleted { s.outbox.append(Self.sessionsChanged) }
                     s.sessions[id]?.deleted = true
                     return Answer(status: 204, headers: [:], body: Data())
                 }
@@ -847,7 +913,7 @@ public final class FixtureServer: Sendable {
         }
     }
 
-    private static func startSession(_ s: inout State, _ body: Data) -> Answer {
+    private static func startSession(_ s: inout State, _ body: Data, deviceId: String) -> Answer {
         s.playbackBodies.append(body)
         if let status = s.playbackFails { return json(status, ["code": "unavailable", "message": "no transcode free"]) }
         let asked = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
@@ -865,14 +931,24 @@ public final class FixtureServer: Sendable {
         // The track asked for, else the one picked for the item, else the file's first.
         let audioIndex = asked["audio_index"] as? Int ?? playable.selectedAudio ?? playable.audio.first?.index ?? 1
         let lines = (asked["max_height"] as? Int).map { min($0, playable.height) } ?? playable.height
-        s.sessions[id] = PlaySession(itemId: itemId, key: key, method: method,
-                                     videoOut: "H.264 \(lines * 16 / 9)×\(lines)")
         let hls = method != "direct"
         let autoQuality: Any = method == "transcode" && maxBitrate == nil ? s.autoQuality : NSNull()
         // Picture subtitles asked for are burned into the stream.
         let burned = (asked["subtitle_index"] as? Int).flatMap { index in
             playable.subtitles.first { $0.index == index && $0.textBased == false && hls }?.index
         }
+        s.remote.started += 1
+        s.sessions[id] = PlaySession(itemId: itemId, key: key, method: method,
+                                     videoOut: "H.264 \(lines * 16 / 9)×\(lines)",
+                                     controls: asked["controls"] as? [String] ?? [],
+                                     device: asked["device_name"] as? String,
+                                     positionMs: asked["start_ms"] as? Int ?? 0, durationMs: playable.durationMs,
+                                     order: s.remote.started, deviceId: deviceId,
+                                     deviceKind: asked["device_kind"] as? String ?? "other",
+                                     audioIndex: playable.audio.isEmpty ? nil : audioIndex,
+                                     // As the server says until the player reports: burned in, else the profile's.
+                                     subtitleIndex: burned ?? playable.selectedSubtitle ?? -1)
+        s.outbox.append(Self.sessionsChanged)
         let subtitles: [Any] = playable.subtitles.map { stream in
             let text = stream.textBased != false
             return ["index": stream.index, "codec": stream.codec, "language": stream.language as Any? ?? NSNull(),
@@ -893,7 +969,7 @@ public final class FixtureServer: Sendable {
     }
 
     /// `p` as an `ItemSummary`.
-    private static func summary(_ p: Playable) -> [String: Any] {
+    static func summary(_ p: Playable) -> [String: Any] {
         var out: [String: Any] = [
             "id": p.itemId, "library_id": 1, "kind": p.episode == nil ? "movie" : "episode", "title": p.title,
             "sort_title": p.title, "duration_ms": p.durationMs, "added_at": 1761300000,
@@ -1196,7 +1272,7 @@ public final class FixtureServer: Sendable {
             "token_endpoint_auth_methods_supported": ["none"],
             "revocation_endpoint_auth_methods_supported": ["none"],
             "code_challenge_methods_supported": ["S256"],
-            "scopes_supported": ["library", "play", "playlists", "profiles"],
+            "scopes_supported": ["library", "play", "playlists", "profiles", "requests", "approvals"],
             "authorization_response_iss_parameter_supported": true,
             "client_id_metadata_document_supported": false,
         ]

@@ -210,6 +210,10 @@ struct EpisodeFileRow {
 
 impl EpisodeFileRow {
     fn into_file(self, chromaprint: bool) -> Option<EpisodeFile> {
+        // A `.strm` file's media is read only to play it ([`crate::strm`]).
+        if crate::library::walk::is_strm(std::path::Path::new(&self.path)) {
+            return None;
+        }
         let duration_ms = self.duration_ms.filter(|d| *d > 0)?;
         let info: Option<MediaInfo> = self.media_info.as_deref().and_then(|j| serde_json::from_str(j).ok());
         let current = self.version.is_some_and(|v| v >= ALGORITHM_VERSION)
@@ -309,7 +313,8 @@ impl MarkerService {
             let mut events = this.events.subscribe();
             loop {
                 match events.recv().await {
-                    Ok(ServerEvent::SessionsChanged) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    Ok(ServerEvent::SessionsChanged { .. })
+                    | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         if let Err(err) = this.watch_playing().await {
                             tracing::warn!("intro/credits detection of what plays: {err:#}");
                         }
@@ -333,6 +338,7 @@ impl MarkerService {
              JOIN media_files f ON f.item_id = e.id
              LEFT JOIN marker_analysis a ON a.file_id = f.id
              WHERE f.id IN ({}) AND e.kind = 'episode' AND e.parent_id IS NOT NULL AND f.duration_ms > 0
+               AND f.link_size IS NULL
                AND (a.file_id IS NULL OR a.version < ? OR a.size != f.size OR a.mtime != f.mtime
                     OR (a.fingerprinted = 0 AND ?))",
             vec!["?"; files.len()].join(", ")
@@ -443,12 +449,14 @@ impl MarkerService {
                     Some(next) => next,
                     None => {
                         // Until something is queued, a season is watched, a
-                        // playback starts or ends, or a look again (the hours,
-                        // the processors).
+                        // playback starts or ends, new libraries are done
+                        // filling in, or a look again (the hours, the
+                        // processors).
                         tokio::select! {
                             () = self.more.notified() => {}
                             () = self.wake.notified() => {}
                             () = self.sessions.changed() => {}
+                            () = self.schedule.let_go() => {}
                             () = tokio::time::sleep(schedule::LOOK) => {}
                         }
                         continue;
@@ -514,6 +522,7 @@ impl MarkerService {
                      JOIN media_files f ON f.item_id = e.id
                      LEFT JOIN marker_analysis a ON a.file_id = f.id
                      WHERE e.library_id = ? AND e.kind = 'episode' AND e.parent_id IS NOT NULL AND f.duration_ms > 0
+                       AND f.link_size IS NULL
                        AND (a.file_id IS NULL OR a.version < ? OR a.size != f.size OR a.mtime != f.mtime
                             OR (a.fingerprinted = 0 AND ?))",
                 )
@@ -531,7 +540,7 @@ impl MarkerService {
                     "SELECT DISTINCT f.item_id FROM media_files f
                      JOIN items i ON i.id = f.item_id
                      LEFT JOIN marker_analysis a ON a.file_id = f.id
-                     WHERE f.library_id = ? AND i.kind = 'movie'
+                     WHERE f.library_id = ? AND i.kind = 'movie' AND f.link_size IS NULL
                        AND (a.file_id IS NULL OR a.version < ? OR a.size != f.size OR a.mtime != f.mtime)",
                 )
                 .bind(library_id)
@@ -542,7 +551,7 @@ impl MarkerService {
                     self.movie(id).await?;
                 }
             }
-            LibraryKind::Music => {}
+            LibraryKind::Music | LibraryKind::Audiobooks => {}
         }
         Ok(())
     }
@@ -779,13 +788,14 @@ impl MarkerService {
     /// Background work: playback has the machine to itself, except for the
     /// markers of what plays (which the transcoder holds back while a
     /// playback starts). Transcodes come first, even for those. A season
-    /// whose hours end is put off until its next turn (other programs busy
+    /// whose hours end, or that new libraries filling in hold back, is put
+    /// off until its next turn (other programs busy
     /// meanwhile only keep the next one from beginning: an external
     /// transcoder on this machine counts as one, fingerprinting this one).
     async fn wait_turn(&self, watched: bool) -> Result<(), FpError> {
         loop {
             let class = if watched { None } else { *self.class.lock() };
-            if let Some(Err(schedule::Wait::Hours)) = class.map(|c| self.schedule.turn(c)) {
+            if let Some(Err(schedule::Wait::Hours | schedule::Wait::Scanning)) = class.map(|c| self.schedule.turn(c)) {
                 return Err(FpError::Preempted);
             }
             let quiet = watched || self.sessions.quiet_for() >= QUIET_BEFORE_BACKGROUND_SECS;

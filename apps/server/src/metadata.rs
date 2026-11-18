@@ -50,6 +50,7 @@ struct Candidate {
     year: Option<i64>,
     tmdb_id: Option<i64>,
     imdb_id: Option<String>,
+    tvdb_id: Option<i64>,
     poster: Option<String>,
     backdrop: Option<String>,
 }
@@ -346,6 +347,11 @@ impl MetadataAgent {
         !self.settings.get().tmdb_api_key.is_empty()
     }
 
+    /// Whether scans read NFO files (see [`crate::library::nfo`]).
+    pub fn read_nfo(&self) -> bool {
+        self.settings.get().read_nfo
+    }
+
     /// Whether items of this kind (`movie`, `show`, `episode`, `album`, …)
     /// get metadata from somewhere.
     pub fn can_refresh(&self, kind: &str) -> bool {
@@ -367,6 +373,8 @@ impl MetadataAgent {
             LibraryKind::Movies => "movie",
             LibraryKind::Shows => "show",
             LibraryKind::Music => "album",
+            // No source of audiobooks' metadata yet: their tags are it.
+            LibraryKind::Audiobooks => return false,
         })
     }
 
@@ -381,9 +389,10 @@ impl MetadataAgent {
             LibraryKind::Movies => "movie",
             LibraryKind::Shows => "show",
             LibraryKind::Music => return self.providers.refresh_music_library(lib, force, progress).await,
+            LibraryKind::Audiobooks => return Ok(()),
         };
         let items: Vec<Candidate> = sqlx::query_as(
-            "SELECT id, kind, title, year, tmdb_id, imdb_id, poster, backdrop FROM items
+            "SELECT id, kind, title, year, tmdb_id, imdb_id, tvdb_id, poster, backdrop FROM items
              WHERE library_id = ? AND kind = ? AND metadata_locked = 0 AND (? OR metadata_at IS NULL)
              ORDER BY added_at DESC",
         )
@@ -565,11 +574,16 @@ impl MetadataAgent {
             "track" => parent.context("track without album")?,
             _ => return Ok(()),
         };
-        let item: Candidate =
-            sqlx::query_as("SELECT id, kind, title, year, tmdb_id, imdb_id, poster, backdrop FROM items WHERE id = ?")
-                .bind(target)
-                .fetch_one(&self.db.read)
-                .await?;
+        // Not one locked by its NFO file (Jellyfin's lockdata): that is never
+        // fetched online.
+        let item: Option<Candidate> = sqlx::query_as(
+            "SELECT id, kind, title, year, tmdb_id, imdb_id, tvdb_id, poster, backdrop FROM items
+             WHERE id = ? AND metadata_locked = 0",
+        )
+        .bind(target)
+        .fetch_optional(&self.db.read)
+        .await?;
+        let Some(item) = item else { return Ok(()) };
         self.refresh_candidate(item).await.map_err(|e| anyhow::anyhow!(e.to_string()))
     }
 
@@ -584,7 +598,8 @@ impl MetadataAgent {
             "artist" | "album" => self.providers.refresh_music_item(id).await?,
             _ => return Ok(()),
         }
-        // Hand edits win over whatever was just fetched.
+        // NFO files win over whatever was just fetched, and hand edits over
+        // them.
         crate::overrides::apply_tree(&self.db, id).await.map_err(|e| TmdbError::Other(e.into()))
     }
 
@@ -621,13 +636,34 @@ impl MetadataAgent {
         Ok(out)
     }
 
-    /// Match a movie or show to another TMDB entry and refresh it.
+    /// Match a movie or show to another TMDB entry and refresh it. The
+    /// choice is kept as an override ([`crate::overrides::MATCH`]): the ids
+    /// of the item's NFO file don't undo it.
     pub async fn rematch(&self, item_id: i64, tmdb_id: i64) -> anyhow::Result<()> {
-        sqlx::query("UPDATE items SET tmdb_id = ?, imdb_id = NULL, metadata_at = NULL WHERE id = ? AND kind IN ('movie', 'show')")
-            .bind(tmdb_id)
+        let mut tx = self.db.write.begin().await?;
+        // The other ids were the old title's.
+        let matched = sqlx::query(
+            "UPDATE items SET tmdb_id = ?, imdb_id = NULL, tvdb_id = NULL, tvmaze_id = NULL, metadata_at = NULL
+             WHERE id = ? AND kind IN ('movie', 'show')",
+        )
+        .bind(tmdb_id)
+        .bind(item_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+        if matched {
+            sqlx::query(
+                "INSERT INTO item_overrides (item_id, field, value) VALUES (?, ?, ?)
+                 ON CONFLICT(item_id, field) DO UPDATE SET value = excluded.value",
+            )
             .bind(item_id)
-            .execute(&self.db.write)
+            .bind(crate::overrides::MATCH)
+            .bind(tmdb_id.to_string())
+            .execute(&mut *tx)
             .await?;
+        }
+        tx.commit().await?;
         // A show refreshed from TVmaze or TheTVDB is found there by the ids
         // TMDB has for the chosen entry.
         if matches!(self.providers.tv_source(), Some(TvSource::Tvmaze | TvSource::Tvdb)) {
@@ -643,6 +679,9 @@ impl MetadataAgent {
                 self.providers.rematched(item_id, ids.imdb_id, ids.tvdb_id).await?;
             }
         }
+        // An NFO file naming the old title no longer describes the item:
+        // what it set gives way to the chosen title's metadata.
+        crate::overrides::nfo_set_aside(&self.db, item_id).await?;
         self.refresh_item(item_id).await
     }
 
@@ -789,15 +828,34 @@ impl MetadataAgent {
         Err(TmdbError::Other(anyhow::anyhow!("TMDB rate limit")))
     }
 
-    /// The country of `metadata_language` ("US" for "en-US"; "US" without one).
+    /// The server's country ([`crate::ratings::region_in`]).
     pub(crate) fn region(&self) -> String {
-        let lang = self.settings.get().metadata_language.clone();
-        lang.split(['-', '_']).nth(1).unwrap_or("US").to_ascii_uppercase()
+        crate::ratings::region_in(&self.settings.get())
     }
 
     async fn find_by_imdb(&self, imdb: &str, tv: bool) -> Result<Option<i64>, TmdbError> {
         let found: FindResults = self.get(&format!("/find/{imdb}"), &[("external_source", "imdb_id".into())]).await?;
         Ok(if tv { found.tv_results.first() } else { found.movie_results.first() }.map(|r| r.id))
+    }
+
+    /// The TMDB show a show's IMDb or TheTVDB id (from an NFO file, or an
+    /// earlier source) names, before a search by title.
+    async fn find_show(&self, item: &Candidate) -> Result<Option<i64>, TmdbError> {
+        let ids = [
+            item.imdb_id.clone().filter(|i| i.starts_with("tt")).map(|i| (i, "imdb_id")),
+            item.tvdb_id.map(|i| (i.to_string(), "tvdb_id")),
+        ];
+        for (id, source) in ids.into_iter().flatten() {
+            let found: FindResults = match self.get(&format!("/find/{id}"), &[("external_source", source.into())]).await
+            {
+                Err(TmdbError::NotFound) => continue,
+                other => other?,
+            };
+            if let Some(show) = found.tv_results.first() {
+                return Ok(Some(show.id));
+            }
+        }
+        Ok(None)
     }
 
     async fn search(&self, tv: bool, title: &str, year: Option<i64>) -> Result<Option<i64>, TmdbError> {
@@ -830,22 +888,31 @@ impl MetadataAgent {
         let details: MovieDetails =
             self.get(&format!("/movie/{tmdb_id}"), &[("append_to_response", "release_dates,credits".into())]).await?;
         let region = self.region();
-        let certification = details.release_dates.as_ref().and_then(|rd| {
-            rd.results
-                .iter()
-                .find(|c| c.iso_3166_1 == region)
-                .or_else(|| rd.results.iter().find(|c| c.iso_3166_1 == "US"))
-                .and_then(|c| c.release_dates.iter().map(|r| r.certification.trim()).find(|c| !c.is_empty()))
-                .map(str::to_owned)
-        });
+        // The region's certification, else the US's, with its country.
+        let (certification, country) = details
+            .release_dates
+            .as_ref()
+            .and_then(|rd| {
+                let c = rd
+                    .results
+                    .iter()
+                    .find(|c| c.iso_3166_1 == region)
+                    .or_else(|| rd.results.iter().find(|c| c.iso_3166_1 == "US"))?;
+                let found = c.release_dates.iter().map(|r| r.certification.trim()).find(|c| !c.is_empty())?;
+                Some((found.to_owned(), c.iso_3166_1.clone()))
+            })
+            .unzip();
         let poster = self.artwork(item.poster.as_deref(), details.poster_path.as_deref(), "w780").await;
         let backdrop = self.artwork(item.backdrop.as_deref(), details.backdrop_path.as_deref(), "w1280").await;
         let title = details.title.clone().unwrap_or_else(|| item.title.clone());
         let genres: Vec<String> = details.genres.iter().map(|g| g.name.clone()).collect();
-        let age = certification.as_deref().and_then(crate::ratings::rating_age);
+        let age = certification
+            .as_deref()
+            .and_then(|c| crate::ratings::age(country.as_deref(), crate::ratings::Kind::Film, c));
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE items SET title = ?, sort_title = ?, original_title = ?, year = COALESCE(?, year), summary = ?, tagline = ?,
                 rating = ?, content_rating = CASE WHEN {RATING_LOCKED} THEN content_rating ELSE ? END,
+                content_rating_country = CASE WHEN {RATING_LOCKED} THEN content_rating_country ELSE ? END,
                 rating_age = CASE WHEN {RATING_LOCKED} THEN rating_age ELSE ? END,
                 genres = ?, studio = ?, release_date = ?, duration_ms = COALESCE(duration_ms, ?),
                 tmdb_id = ?, imdb_id = COALESCE(?, imdb_id), poster = COALESCE(?, poster), backdrop = COALESCE(?, backdrop),
@@ -860,6 +927,7 @@ impl MetadataAgent {
         .bind(details.tagline.filter(|s| !s.is_empty()))
         .bind(details.vote_average.filter(|v| *v > 0.0))
         .bind(certification)
+        .bind(country)
         .bind(age)
         .bind(serde_json::to_string(&genres).ok())
         .bind(details.production_companies.first().map(|c| c.name.clone()))
@@ -890,7 +958,10 @@ impl MetadataAgent {
     async fn refresh_show(&self, item: &Candidate) -> Result<(), TmdbError> {
         let tmdb_id = match item.tmdb_id {
             Some(id) => id,
-            None => self.search(true, &item.title, item.year).await?.ok_or(TmdbError::NotFound)?,
+            None => match self.find_show(item).await? {
+                Some(id) => id,
+                None => self.search(true, &item.title, item.year).await?.ok_or(TmdbError::NotFound)?,
+            },
         };
         let details: TvDetails = self
             .get(
@@ -899,22 +970,27 @@ impl MetadataAgent {
             )
             .await?;
         let region = self.region();
-        let rating = details.content_ratings.as_ref().and_then(|r| {
-            r.results
-                .iter()
-                .find(|c| c.iso_3166_1 == region)
-                .or_else(|| r.results.iter().find(|c| c.iso_3166_1 == "US"))
-                .map(|c| c.rating.clone())
-                .filter(|r| !r.is_empty())
-        });
+        let (rating, country) = details
+            .content_ratings
+            .as_ref()
+            .and_then(|r| {
+                r.results
+                    .iter()
+                    .find(|c| c.iso_3166_1 == region)
+                    .or_else(|| r.results.iter().find(|c| c.iso_3166_1 == "US"))
+                    .filter(|c| !c.rating.is_empty())
+                    .map(|c| (c.rating.clone(), c.iso_3166_1.clone()))
+            })
+            .unzip();
         let poster = self.artwork(item.poster.as_deref(), details.poster_path.as_deref(), "w780").await;
         let backdrop = self.artwork(item.backdrop.as_deref(), details.backdrop_path.as_deref(), "w1280").await;
         let title = details.name.clone().unwrap_or_else(|| item.title.clone());
         let genres: Vec<String> = details.genres.iter().map(|g| g.name.clone()).collect();
-        let age = rating.as_deref().and_then(crate::ratings::rating_age);
+        let age = rating.as_deref().and_then(|r| crate::ratings::age(country.as_deref(), crate::ratings::Kind::Tv, r));
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE items SET title = ?, sort_title = ?, original_title = ?, year = COALESCE(?, year), summary = ?, tagline = ?,
                 rating = ?, content_rating = CASE WHEN {RATING_LOCKED} THEN content_rating ELSE ? END,
+                content_rating_country = CASE WHEN {RATING_LOCKED} THEN content_rating_country ELSE ? END,
                 rating_age = CASE WHEN {RATING_LOCKED} THEN rating_age ELSE ? END,
                 genres = ?, studio = ?, release_date = ?, tmdb_id = ?, imdb_id = COALESCE(?, imdb_id),
                 poster = COALESCE(?, poster), backdrop = COALESCE(?, backdrop), metadata_at = ?, updated_at = ?
@@ -928,6 +1004,7 @@ impl MetadataAgent {
         .bind(details.tagline.filter(|s| !s.is_empty()))
         .bind(details.vote_average.filter(|v| *v > 0.0))
         .bind(rating)
+        .bind(country)
         .bind(age)
         .bind(serde_json::to_string(&genres).ok())
         .bind(details.networks.first().map(|n| n.name.clone()))
@@ -965,24 +1042,9 @@ impl MetadataAgent {
             let poster = self.artwork(season_poster.as_deref(), season.poster_path.as_deref(), "w780").await;
             let name = season
                 .name
+                .clone()
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| if number == 0 { "Specials".into() } else { format!("Season {number}") });
-            sqlx::query(
-                "UPDATE items SET title = ?, sort_title = ?, summary = ?, release_date = ?, year = ?, poster = COALESCE(?, poster),
-                    metadata_at = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind(&name)
-            .bind(format!("{number:04}"))
-            .bind(season.overview.filter(|s| !s.is_empty()))
-            .bind(season.air_date.clone().filter(|d| !d.is_empty()))
-            .bind(season.air_date.as_deref().and_then(year_of))
-            .bind(poster)
-            .bind(now())
-            .bind(now())
-            .bind(season_id)
-            .execute(&self.db.write)
-            .await
-            .map_err(|e| TmdbError::Other(e.into()))?;
 
             #[allow(clippy::type_complexity)]
             let episodes: Vec<(i64, Option<i64>, String, Option<i64>, Option<String>)> = sqlx::query_as(
@@ -995,11 +1057,35 @@ impl MetadataAgent {
             .map_err(|e| TmdbError::Other(e.into()))?;
             // Numbers the season's files have, which no other may take by its title.
             let taken: HashSet<i64> = episodes.iter().filter_map(|e| e.1).collect();
+            // The stills first, then the season and its episodes in one
+            // transaction: a commit each kept the database's one writer
+            // busy, and the rest of a new library's fetch waiting for it.
+            let mut found = Vec::new();
             for (episode_id, number, file_title, duration_ms, thumb) in episodes {
                 let item = SeasonItem { number, title: &file_title, duration_ms };
                 let Some(ep) = season_episode(&season.episodes, &item, &taken) else { continue };
-                let ep_number = ep.episode_number;
                 let still = self.artwork(thumb.as_deref(), ep.still_path.as_deref(), "w780").await;
+                found.push((episode_id, ep, still));
+            }
+            let mut tx = self.db.write.begin().await.map_err(|e| TmdbError::Other(e.into()))?;
+            sqlx::query(
+                "UPDATE items SET title = ?, sort_title = ?, summary = ?, release_date = ?, year = ?, poster = COALESCE(?, poster),
+                    metadata_at = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(&name)
+            .bind(format!("{number:04}"))
+            .bind(season.overview.clone().filter(|s| !s.is_empty()))
+            .bind(season.air_date.clone().filter(|d| !d.is_empty()))
+            .bind(season.air_date.as_deref().and_then(year_of))
+            .bind(poster)
+            .bind(now())
+            .bind(now())
+            .bind(season_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| TmdbError::Other(e.into()))?;
+            for (episode_id, ep, still) in found {
+                let ep_number = ep.episode_number;
                 let title = ep.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| format!("Episode {ep_number}"));
                 sqlx::query(
                     "UPDATE items SET idx = ?, title = ?, sort_title = ?, summary = ?, release_date = ?, year = ?, rating = ?,
@@ -1016,13 +1102,14 @@ impl MetadataAgent {
                 .bind(now())
                 .bind(now())
                 .bind(episode_id)
-                .execute(&self.db.write)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| TmdbError::Other(e.into()))?;
-                people::replace(&self.db, episode_id, &people::episode_credits(&ep.guest_stars, &ep.crew))
+                people::replace_in(&mut tx, episode_id, &people::episode_credits(&ep.guest_stars, &ep.crew))
                     .await
                     .map_err(|e| TmdbError::Other(e.into()))?;
             }
+            tx.commit().await.map_err(|e| TmdbError::Other(e.into()))?;
         }
         Ok(())
     }

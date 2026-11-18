@@ -2,6 +2,47 @@ import Foundation
 import PleyModel
 import PleyNetwork
 
+/// Requests that changed: the screens showing them read them again.
+public struct RequestChange: Hashable, Sendable {
+    /// Many changed, or what changed is unknown: whatever shows requests is read again.
+    public var all = false
+    /// Requests that changed, by id.
+    public var ids: Set<Int> = []
+    /// Titles whose requests changed, as `DiscoverTitle.key` gives them (`movie:933260`).
+    public var titles: Set<String> = []
+
+    public init(all: Bool = false, ids: Set<Int> = [], titles: Set<String> = []) {
+        self.all = all
+        self.ids = ids
+        self.titles = titles
+    }
+
+    /// One request, with its title when known.
+    public init(id: Int?, kind: TitleKind?, tmdbId: Int?) {
+        if let id { ids = [id] }
+        if let kind, let tmdbId { titles = ["\(kind.rawValue):\(tmdbId)"] }
+        all = id == nil && tmdbId == nil
+    }
+
+    public static let everything = RequestChange(all: true)
+
+    public var isEmpty: Bool { !all && ids.isEmpty && titles.isEmpty }
+
+    /// Whether it may be about the title `kind` `tmdbId`.
+    public func about(_ kind: TitleKind, tmdbId: Int) -> Bool {
+        all || titles.contains("\(kind.rawValue):\(tmdbId)")
+    }
+
+    /// Whether it may be about request `id`.
+    public func about(request id: Int) -> Bool { all || ids.contains(id) }
+
+    public mutating func merge(_ other: RequestChange) {
+        all = all || other.all
+        ids.formUnion(other.ids)
+        titles.formUnion(other.titles)
+    }
+}
+
 /// What changed on the server, gathered from its events: what the screens
 /// showing it fetch again. Each change has a number of its own, so two
 /// alike still differ.
@@ -23,12 +64,14 @@ public struct ServerChange: Hashable, Sendable {
     public var playlists = false
     /// Live TV's channels (a source added, refreshed or removed, or its access changed).
     public var live = false
+    /// Requests, and the titles they ask for.
+    public var requests = RequestChange()
     /// Everything: the stream connected again, and what came meanwhile is unknown.
     public var everything = false
 
     public init(serial: Int = 0, home: Bool = false, libraries: Bool = false, libraryIds: Set<Int> = [],
                 itemIds: Set<Int> = [], parentIds: Set<Int> = [], watchlist: Bool = false, playlists: Bool = false,
-                live: Bool = false, everything: Bool = false) {
+                live: Bool = false, requests: RequestChange = RequestChange(), everything: Bool = false) {
         self.serial = serial
         self.home = home
         self.libraries = libraries
@@ -38,11 +81,13 @@ public struct ServerChange: Hashable, Sendable {
         self.watchlist = watchlist
         self.playlists = playlists
         self.live = live
+        self.requests = requests
         self.everything = everything
     }
 
     public var isEmpty: Bool {
-        !home && !libraries && libraryIds.isEmpty && itemIds.isEmpty && !watchlist && !playlists && !live && !everything
+        !home && !libraries && libraryIds.isEmpty && itemIds.isEmpty && !watchlist && !playlists && !live
+            && requests.isEmpty && !everything
     }
 
     /// Whether a screen showing `itemId` (whose parent is `parentId`, if any) fetches it again.
@@ -63,6 +108,7 @@ public struct ServerChange: Hashable, Sendable {
         watchlist = watchlist || other.watchlist
         playlists = playlists || other.playlists
         live = live || other.live
+        requests.merge(other.requests)
         everything = everything || other.everything
     }
 }
@@ -70,8 +116,9 @@ public struct ServerChange: Hashable, Sendable {
 /// Turns the server's events into changes for the screens (Android's
 /// `ServerEvents`): the changes of 0.3 seconds go out together, so a burst
 /// of events (a play reaching 90 % sends two) fetches once. The scans
-/// running are told as they move; a playback stopped from elsewhere is
-/// told at once.
+/// running are told as they move; a playback stopped from elsewhere, a
+/// remote's command or cast, the sessions changing and a request's news
+/// are told at once.
 @MainActor
 public final class ServerEvents {
     /// How long changes are gathered before they go out.
@@ -83,7 +130,29 @@ public final class ServerEvents {
     public var onScans: ([Int: ScanStatus]) -> Void = { _ in }
     /// A playback of this profile's was stopped from elsewhere.
     public var onSessionStopped: (_ sessionId: String, _ message: String?, _ byAdmin: Bool) -> Void = { _, _, _ in }
+    /// Someone took the connection of this profile's Live TV session `sessionId`.
+    public var onLiveTakenOver: (_ sessionId: String, _ message: String) -> Void = { _, _ in }
+    /// The profile's remote, on another device, sent a player a command:
+    /// the player of `sessionId`, if it plays here, acts on it.
+    public var onPlayerCommand: (_ sessionId: String, _ command: PlayerCommand) -> Void = { _, _ in }
+    /// The profile's remote, on another device, sent the device of
+    /// `receiverId` something to play: this device plays it, if it is this one.
+    public var onCast: (_ receiverId: String, _ target: CastTarget, _ from: String?) -> Void = { _, _, _ in }
+    /// The profile's sessions started, ended or changed, or may have while
+    /// the stream was down (it connected again): remotes read them again.
+    public var onSessionsChanged: () -> Void = {}
+    /// A request's news, as its event comes.
+    public var onRequestNews: (RequestNews) -> Void = { _ in }
+    /// Requests' changes, as their events come (before they are gathered).
+    public var onRequestChange: (RequestChange) -> Void = { _ in }
+    /// The server's settings for requests changed.
+    public var onRequestsSettings: () -> Void = {}
+    /// The stream connected (`true`) or went down.
+    public var onConnection: (Bool) -> Void = { _ in }
 
+    /// Whether the event stream is connected: while it isn't, what it
+    /// would tell is polled for.
+    public private(set) var connected = false
     public private(set) var scans: [Int: ScanStatus] = [:]
     private var pending = ServerChange()
     private var serial = 0
@@ -115,6 +184,10 @@ public final class ServerEvents {
         flush?.cancel()
         flush = nil
         pending = ServerChange()
+        if connected {
+            connected = false
+            onConnection(false)
+        }
         if !scans.isEmpty {
             scans = [:]
             onScans(scans)
@@ -127,7 +200,17 @@ public final class ServerEvents {
         switch signal {
         case .connected:
             connections += 1
-            if connections > 1 { gather(ServerChange(home: true, libraries: true, watchlist: true, everything: true)) }
+            connected = true
+            onConnection(true)
+            if connections > 1 {
+                gather(ServerChange(home: true, libraries: true, watchlist: true, requests: .everything,
+                                    everything: true))
+                onSessionsChanged()
+            }
+        case .disconnected:
+            guard connected else { return }
+            connected = false
+            onConnection(false)
         case .event(let event):
             heard(event)
         }
@@ -159,11 +242,48 @@ public final class ServerEvents {
             gather(ServerChange(home: true, libraries: true, libraryIds: [id]))
         case .sessionStopped(let id, let message, let byAdmin):
             onSessionStopped(id, message, byAdmin)
+        case .liveTakenOver(let id, let message):
+            onLiveTakenOver(id, message)
+        case .playerCommand(let id, let command):
+            onPlayerCommand(id, command)
+        case .cast(let receiverId, let target, let from):
+            onCast(receiverId, target, from)
+        case .sessionsChanged:
+            onSessionsChanged()
         case .liveChannelsChanged:
             gather(ServerChange(live: true))
-        case .sessionsChanged, .liveTunersChanged, .unknown:
+        case .requestsChanged(let id, let kind, let tmdbId):
+            requests(RequestChange(id: id, kind: kind, tmdbId: tmdbId))
+        case .requestAvailable(let id, let title, let kind, let tmdbId, let itemId, let poster, let seasons, let complete):
+            onRequestNews(.ready(requestId: id, title: title, kind: kind, itemId: itemId, seasons: seasons,
+                                 complete: complete, poster: poster))
+            requests(RequestChange(id: id, kind: kind, tmdbId: tmdbId))
+        case .requestDecided(let id, let title, let kind, let tmdbId, let status, let reason):
+            if status == .declined {
+                onRequestNews(.declined(requestId: id, title: title, reason: reason))
+            } else if status == .approved {
+                onRequestNews(.approved(requestId: id, title: title))
+            }
+            requests(RequestChange(id: id, kind: kind, tmdbId: tmdbId))
+        case .requestCreated(let id, let title, let kind, let tmdbId, let seasons, let by, let status):
+            // Managers hear of every request; only those waiting for them are told.
+            if status == .pending { onRequestNews(.asked(requestId: id, title: title, by: by?.name, seasons: seasons)) }
+            requests(RequestChange(id: id, kind: kind, tmdbId: tmdbId))
+        case .requestFailed(let id, let title, let kind, let reason):
+            onRequestNews(.failed(requestId: id, title: title, kind: kind, reason: reason))
+            // The event doesn't say which title: only the request is read again.
+            requests(RequestChange(ids: [id]))
+        case .requestsSettingsChanged:
+            onRequestsSettings()
+            requests(.everything)
+        case .liveTunersChanged, .unknown:
             break
         }
+    }
+
+    private func requests(_ change: RequestChange) {
+        onRequestChange(change)
+        gather(ServerChange(requests: change))
     }
 
     /// A change this app made itself, gathered with the server's: the

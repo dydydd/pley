@@ -1,5 +1,9 @@
 package app.pley.android.ui.phone.shell
 
+import android.app.Application
+import android.content.ComponentName
+import android.content.Intent
+import android.content.IntentFilter
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.semantics.SemanticsPropertiesAndroid
 import androidx.compose.ui.test.SemanticsMatcher
@@ -7,18 +11,33 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.test.core.app.ApplicationProvider
 import app.pley.android.auth.SignOutReason
+import app.pley.android.common.SavedServer
 import app.pley.android.common.TestTags
+import app.pley.android.data.OtherDevice
+import app.pley.android.data.RemoteSession
 import app.pley.android.data.SessionState
+import app.pley.android.model.CastKind
+import app.pley.android.model.DeviceKind
+import app.pley.android.model.PlayingChannel
+import app.pley.android.model.PlayingKind
+import app.pley.android.model.PlayingSession
+import app.pley.android.model.RemoteDevice
 import app.pley.android.network.ApiException
 import app.pley.android.screens.PleyKey
 import app.pley.android.testing.screens.onboarding.FakeOnboardingSource
 import app.pley.android.ui.phone.item.ITEM_SKELETON
 import app.pley.android.ui.phone.onboarding.LocalOnboardingSource
+import app.pley.android.ui.phone.remote.REMOTE_BAR
+import app.pley.android.ui.phone.remote.REMOTE_BUTTON
 import app.pley.android.ui.phone.theme.PhoneTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -26,6 +45,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
@@ -64,13 +84,13 @@ class PhoneShellTest {
 
     private fun tab(tab: PhoneTab) = compose.onNodeWithTag(TAB_TAG + tab.name)
 
-    private fun show(start: PhoneStart, graph: TestGraph = TestGraph(start.server)): Shell {
+    private fun show(start: PhoneStart, graph: TestGraph = TestGraph(start.server), source: FakeOnboardingSource = FakeOnboardingSource()): Shell {
         TestApplication.graph = graph
         val shell = Shell(graph)
         compose.setContent {
             PhoneTheme {
                 // Getting in reads a fake server: nobody on the network.
-                CompositionLocalProvider(LocalOnboardingSource provides FakeOnboardingSource()) {
+                CompositionLocalProvider(LocalOnboardingSource provides source) {
                     PhoneShell(start, { graph }) { state, navigation ->
                         shell.state = state
                         shell.navigation = navigation
@@ -190,6 +210,42 @@ class PhoneShellTest {
     }
 
     @Test
+    fun signingInAgainOpensTheServersPageThoughTheAppIsSignedInThere() {
+        // A permission the sign-in didn't give (Manage the server left unticked): Continue
+        // opens the page to give it, rather than going back in as the app was.
+        installBrowser()
+        val source = FakeOnboardingSource(saved = listOf(SavedServer(TestGraph.SERVER, "Living room NAS", id = null, lastUsed = 1))).apply {
+            answer(TestGraph.SERVER)
+            tokens += TestGraph.SERVER
+        }
+        val shell = show(PhoneStart(TestGraph.SERVER, signedIn = true), source = source)
+        compose.runOnIdle { shell.state.signInAgain() }
+        signInPage().assertExists()
+        compose.onNodeWithText("Continue in browser").performClick()
+        compose.waitUntil(5_000) { source.browserSignIns.isNotEmpty() }
+        assertEquals(listOf(TestGraph.SERVER), source.browserSignIns.toList())
+        assertEquals(listOf(PleyKey.SignIn(TestGraph.SERVER)), shell.navigation.root.toList())
+    }
+
+    /** A browser, for Continue in browser to open the server's page in. */
+    private fun installBrowser() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val activity = ComponentName("com.example.browser", "com.example.browser.Main")
+        shadowOf(app.packageManager).run {
+            addActivityIfNotPresent(activity)
+            addIntentFilterForActivity(
+                activity,
+                IntentFilter(Intent.ACTION_VIEW).apply {
+                    addCategory(Intent.CATEGORY_DEFAULT)
+                    addCategory(Intent.CATEGORY_BROWSABLE)
+                    addDataScheme("http")
+                    addDataScheme("https")
+                },
+            )
+        }
+    }
+
+    @Test
     fun signedOutByTheServerItGoesBackToSigningInThere() {
         val shell = show(PhoneStart(TestGraph.SERVER, signedIn = true))
         compose.waitUntil(5_000) { "auth" in shell.graph.touched }
@@ -240,6 +296,28 @@ class PhoneShellTest {
         showsHome()
         tab(PhoneTab.Libraries).performClick()
         showsLibraries()
+    }
+
+    @Test
+    fun theRemotesButtonShowsInHomesHeaderWhileAnotherDeviceIsOn() {
+        val shell = show(PhoneStart(TestGraph.SERVER, signedIn = true))
+        showsHome()
+        compose.onNodeWithTag(REMOTE_BUTTON).assertDoesNotExist()
+        val session = RemoteSession(PlayingSession("s1", PlayingKind.Live, "Living room TV", "app-12", channel = PlayingChannel(1, "Pley News HD")), 0)
+        compose.runOnIdle { shell.graph.remoteDevices.value = listOf(OtherDevice("app-12", session = session)) }
+        compose.waitUntil(5_000) { compose.onAllNodesWithTag(REMOTE_BUTTON).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithContentDescription("Remote, 1 device playing").assertExists()
+        // Playing there, not controlled from here: no bar above the tabs.
+        compose.onNodeWithTag(REMOTE_BAR).assertDoesNotExist()
+        // On, playing nothing: still there.
+        compose.runOnIdle {
+            shell.graph.remoteDevices.value = listOf(OtherDevice("app-12", RemoteDevice("tv-1", "app-12", "Living room TV", DeviceKind.Tv, listOf(CastKind.Item))))
+        }
+        compose.waitUntil(5_000) { compose.onAllNodesWithContentDescription("Remote, 1 device ready to play").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag(REMOTE_BUTTON).performClick()
+        compose.waitUntil(5_000) { compose.onAllNodesWithText("Your devices").fetchSemanticsNodes().isNotEmpty() }
+        compose.runOnIdle { shell.graph.remoteDevices.value = emptyList() }
+        compose.waitUntil(5_000) { compose.onAllNodesWithTag(REMOTE_BUTTON).fetchSemanticsNodes().isEmpty() }
     }
 
     private companion object {

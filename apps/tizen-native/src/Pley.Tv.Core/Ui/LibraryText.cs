@@ -23,6 +23,10 @@ public enum LibraryChipKind
     Resolution,
     /// <summary>Opens the Dynamic range panel; says the one chosen, and shows only while one is.</summary>
     DynamicRange,
+    /// <summary>The Collections tab's: opens the Category panel; says the category chosen.</summary>
+    CollectionCategory,
+    /// <summary>The Collections tab's Clear filters, while a category is chosen.</summary>
+    CollectionClear,
 }
 
 /// <summary>A chip (design spec §2.6): what it says, whether it is on (a check leads it then, in place of <see cref="Icon"/>), and its icon by Lucide's name.</summary>
@@ -37,6 +41,8 @@ public enum LibraryPanel
     Year,
     Resolution,
     DynamicRange,
+    /// <summary>The Collections tab's categories.</summary>
+    CollectionCategory,
 }
 
 /// <summary>A row of a library's side panel, and what its <see cref="LibraryPanelRow.Value"/> is.</summary>
@@ -68,6 +74,8 @@ public enum LibraryRowKind
     Resolution,
     /// <summary>A dynamic range (<see cref="LibraryParams.DynamicRanges"/>); null all of them.</summary>
     DynamicRange,
+    /// <summary>A category of collections (<see cref="CategoryChoice.Value"/>).</summary>
+    CollectionCategory,
 }
 
 /// <summary>A row of a library's side panel (design spec §2.7): its label, the check on the choice in force, the value beside it, the chevron of a row that opens another list.</summary>
@@ -144,73 +152,83 @@ public sealed record LibrariesButton(LibrariesAction Action, string Label, strin
 /// </summary>
 public static class LibraryText
 {
-    public const string TabRecommended = "Recommended";
-    public const string TabLibrary = "Library";
-    public const string TabCollections = "Collections";
+    public static string TabRecommended => Strings.T("library.tabs.recommended");
+    public static string TabLibrary => Strings.T("library.tabs.library");
+    public static string TabCollections => Strings.T("library.tabs.collections");
 
-    public const string SortTitle = "Title";
-    public const string SortYear = "Year";
-    public const string SortAdded = "Date added";
-    public const string SortRating = "Rating";
-    public const string SortUserRating = "Your rating";
-    public const string SortRelease = "Release date";
-    public const string SortDuration = "Duration";
-    public const string SortLastPlayed = "Last played";
-    public const string SortBitrate = "Bitrate";
-    public const string SortBy = "Sort by";
-    public const string Order = "Order";
-    public const string Ascending = "Ascending";
-    public const string Descending = "Descending";
+    public static string SortTitle => Strings.T("library.sorts.title");
+    public static string SortYear => Strings.T("library.sorts.year");
+    public static string SortAdded => Strings.T("library.sorts.added");
+    public static string SortRating => Strings.T("library.sorts.rating");
+    public static string SortUserRating => Strings.T("library.sorts.userRating");
+    public static string SortRelease => Strings.T("library.sorts.release");
+    public static string SortDuration => Strings.T("library.sorts.duration");
+    public static string SortLastPlayed => Strings.T("library.sorts.lastPlayed");
+    public static string SortBitrate => Strings.T("library.sorts.bitrate");
+    public static string SortBy => Strings.T("library.panel.sortBy");
+    public static string Order => Strings.T("library.panel.order");
+    public static string Ascending => Strings.T("library.panel.ascending");
+    public static string Descending => Strings.T("library.panel.descending");
 
-    public const string Filter = "Filter";
-    public const string Show = "Show";
-    public const string ShowAll = "All";
-    public const string Unwatched = "Unwatched";
-    public const string Watched = "Watched";
-    public const string Genre = "Genre";
-    public const string AllGenres = "All genres";
-    public const string Year = "Year";
-    public const string AllYears = "All years";
-    public const string Resolution = "Resolution";
-    public const string AllResolutions = "All resolutions";
-    public const string DynamicRange = "Dynamic range";
-    public const string AllDynamicRanges = "All dynamic ranges";
-    public const string ClearFilters = "Clear filters";
-    public const string SaveAs = "Save as…";
+    public static string Filter => Strings.T("library.panel.filter");
+    public static string Show => Strings.T("library.panel.show");
+    public static string ShowAll => Strings.T("library.panel.all");
+    public static string Unwatched => Strings.T("library.panel.unwatched");
+    public static string Watched => Strings.T("library.panel.watched");
+    public static string Genre => Strings.T("library.panel.genre");
+    public static string AllGenres => Strings.T("library.panel.allGenres");
+    public static string Year => Strings.T("library.panel.year");
+    public static string AllYears => Strings.T("library.panel.allYears");
+    public static string Resolution => Strings.T("library.panel.resolution");
+    public static string AllResolutions => Strings.T("library.panel.allResolutions");
+    public static string DynamicRange => Strings.T("library.panel.dynamicRange");
+    public static string AllDynamicRanges => Strings.T("library.panel.allDynamicRanges");
+    public static string ClearFilters => Strings.T("library.panel.clearFilters");
+    public static string Category => Strings.T("library.panel.category");
+    public static string AllCategories => Strings.T("library.panel.allCategories");
+    /// <summary>The collections of no category.</summary>
+    public static string SaveAs => Strings.T("library.panel.saveAs");
 
-    public const string Failed = "Couldn't load this library";
-    public const string MissingTitle = "This library isn't here";
-    public const string MissingBody = "It may have been removed, or this profile may not see it.";
-    public const string EmptyTitle = "This library is empty";
-    public const string EmptyBody = "Nothing here yet. Titles appear as the server adds them.";
-    public const string NoMatchesTitle = "No matches";
-    public const string NoMatchesBody = "Nothing in this library matches the current filters.";
-    public const string RecommendedFailed = "Couldn't load recommendations";
-    public const string RecommendedEmptyTitle = "Nothing to recommend yet";
-    public const string RecommendedEmptyBody = "Recommendations appear once the library has some items.";
-    public const string CollectionsFailed = "Couldn't load collections";
-    public const string CollectionsEmptyTitle = "No collections yet";
-    public const string CollectionsEmptyMovies = "Movies of the same TMDB collection are grouped here once two of them are in this library.";
-    public const string CollectionsEmptyShows = "There are no collections in this library yet.";
-    public const string Retry = "Retry";
-    public const string SeeAll = "See all";
+    // The value beside a Filter panel row while nothing is chosen. English repeats the row's "All
+    // genres"; French and Spanish say "Tous" or "Todas" alone, to fit the value's 120 dp column.
+    public static string NoGenreChosen => Strings.T("library.panel.unchosen.genre");
+    public static string NoYearChosen => Strings.T("library.panel.unchosen.year");
+    public static string NoResolutionChosen => Strings.T("library.panel.unchosen.resolution");
+    public static string NoDynamicRangeChosen => Strings.T("library.panel.unchosen.dynamicRange");
 
-    public const string LibrariesTitle = "Libraries";
-    public const string LibrariesFailed = "Couldn't load your libraries";
-    public const string LibrariesScanning = "Scanning…";
-    public const string SortLibraries = "Sort libraries";
-    public const string SortDone = "Done";
-    public const string ServerOrder = "Use the server's order";
-    public const string OpenLibrary = "Open";
-    public const string MoveLibrary = "Move";
-    public const string SortingHint = "Select a library to move it. Your order applies on all your devices.";
-    public const string MovingHint = "Arrows to move it, OK to drop it here, Back to put it back";
-    public const string SortNeedsNewerServer = "Sorting libraries needs a newer Pley on the server.";
-    public const string NoLibraries = "No libraries yet";
-    public const string NoLibrariesBody = "Ask the server owner to add a library.";
+    public static string Failed => Strings.T("library.messages.failed");
+    public static string MissingTitle => Strings.T("library.messages.missingTitle");
+    public static string MissingBody => Strings.T("library.messages.missingBody");
+    public static string EmptyTitle => Strings.T("library.messages.emptyTitle");
+    public static string EmptyBody => Strings.T("library.messages.emptyBody");
+    public static string NoMatchesTitle => Strings.T("library.messages.noMatchesTitle");
+    public static string NoMatchesBody => Strings.T("library.messages.noMatchesBody");
+    public static string RecommendedFailed => Strings.T("library.messages.recommendedFailed");
+    public static string RecommendedEmptyTitle => Strings.T("library.messages.recommendedEmptyTitle");
+    public static string RecommendedEmptyBody => Strings.T("library.messages.recommendedEmptyBody");
+    public static string CollectionsFailed => Strings.T("library.messages.collectionsFailed");
+    public static string CollectionsEmptyTitle => Strings.T("library.messages.collectionsEmptyTitle");
+    public static string CollectionsEmptyMovies => Strings.T("library.messages.collectionsEmptyMovies");
+    public static string CollectionsEmptyShows => Strings.T("library.messages.collectionsEmptyShows");
+    public static string Retry => Strings.T("library.retry");
+    public static string SeeAll => Strings.T("library.seeAll");
+
+    public static string LibrariesTitle => Strings.T("library.libraries.title");
+    public static string LibrariesFailed => Strings.T("library.libraries.failed");
+    public static string LibrariesScanning => Strings.T("library.libraries.scanning");
+    public static string SortLibraries => Strings.T("library.libraries.sort");
+    public static string SortDone => Strings.T("library.libraries.done");
+    public static string ServerOrder => Strings.T("library.libraries.serverOrder");
+    public static string OpenLibrary => Strings.T("library.libraries.open");
+    public static string MoveLibrary => Strings.T("library.libraries.move");
+    public static string SortingHint => Strings.T("library.libraries.sortingHint");
+    public static string MovingHint => Strings.T("library.libraries.movingHint");
+    public static string SortNeedsNewerServer => Strings.T("library.libraries.needsNewerServer");
+    public static string NoLibraries => Strings.T("library.libraries.noneTitle");
+    public static string NoLibrariesBody => Strings.T("library.libraries.noneBody");
 
     /// <summary>The jump control's description: "Jump to a letter: M".</summary>
-    public static string Jump(string letter) => $"Jump to a letter: {letter}";
+    public static string Jump(string letter) => Strings.T("library.jump", ("letter", letter));
 
     public static string TabLabel(LibraryTab tab) => tab switch
     {
@@ -248,7 +266,7 @@ public static class LibraryText
     /// </summary>
     public static string? DynamicRangeLabel(string? range) => range switch
     {
-        "hdr" => "Any HDR",
+        "hdr" => Strings.T("library.anyHdr"),
         "dolby_vision" => "Dolby Vision",
         "hdr10plus" => "HDR+",
         "hdr10" => "HDR",
@@ -257,46 +275,37 @@ public static class LibraryText
         _ => null,
     };
 
-    /// <summary>The noun a library of <paramref name="kind"/> counts: shows, artists, else movies.</summary>
-    static (string One, string Many) Noun(string? kind) => kind switch
+    /// <summary>"1,500 movies", "38 shows", "120 artists": a listing's count by its library's kind (shows, artists, else movies).</summary>
+    public static string Count(string? kind, long n) => kind switch
     {
-        "shows" => ("show", "shows"),
-        "music" => ("artist", "artists"),
-        _ => ("movie", "movies"),
+        "shows" => Strings.Count("library.count.shows", n),
+        "music" => Strings.Count("library.count.artists", n),
+        _ => Strings.Count("library.count.movies", n),
     };
 
-    /// <summary>"1,500 movies", "38 shows", "120 artists": a listing's count by its library's kind.</summary>
-    public static string Count(string? kind, long n)
-    {
-        var (one, many) = Noun(kind);
-        return Format.Pluralize(n, one, many);
-    }
-
     /// <summary>"23 of 1,500 movies": <paramref name="n"/> of <paramref name="of"/>, the noun by <paramref name="of"/>.</summary>
-    public static string CountOf(string? kind, long n, long of)
+    public static string CountOf(string? kind, long n, long of) => kind switch
     {
-        var (one, many) = Noun(kind);
-        return $"{n.ToString("N0", CultureInfo.InvariantCulture)} of {of.ToString("N0", CultureInfo.InvariantCulture)} {(of == 1 ? one : many)}";
-    }
+        "shows" => Strings.Count("library.countOf.shows", of, ("shown", n)),
+        "music" => Strings.Count("library.countOf.artists", of, ("shown", n)),
+        _ => Strings.Count("library.countOf.movies", of, ("shown", n)),
+    };
 
     /// <summary>"3 collections".</summary>
-    public static string CollectionsCount(long n) => Format.Pluralize(n, "collection");
+    public static string CollectionsCount(long n) => Strings.Count("library.count.collections", n);
 
     /// <summary>A collection's count on its tile: "12 shows" in a library of shows, else "12 movies".</summary>
-    public static string CollectionCount(string? kind, long n) => Format.Pluralize(n, kind == "shows" ? "show" : "movie");
+    public static string CollectionCount(string? kind, long n) =>
+        kind == "shows" ? Strings.Count("library.count.shows", n) : Strings.Count("library.count.movies", n);
 
     /// <summary>"412 movies", "38 shows", "120 artists": what a library holds, by its kind (the Android app's libraryCount).</summary>
-    public static string LibraryCount(Library library)
+    public static string LibraryCount(Library library) => library.Kind switch
     {
-        var (one, many) = library.Kind switch
-        {
-            "movies" => ("movie", "movies"),
-            "shows" => ("show", "shows"),
-            "music" => ("artist", "artists"),
-            _ => ("item", "items"),
-        };
-        return Format.Pluralize(library.ItemCount, one, many);
-    }
+        "movies" => Strings.Count("library.count.movies", library.ItemCount),
+        "shows" => Strings.Count("library.count.shows", library.ItemCount),
+        "music" => Strings.Count("library.count.artists", library.ItemCount),
+        _ => Strings.Count("library.count.items", library.ItemCount),
+    };
 
     /// <summary>A library's icon by kind, by Lucide's name, as the rail draws it.</summary>
     public static string KindIcon(string? kind) => kind switch
@@ -312,7 +321,7 @@ public static class LibraryText
     {
         if (media == null) return "";
         var line = ItemFormat.Join(" · ", ItemFormat.Bitrate(media.Bitrate), ItemFormat.Bytes(media.Size));
-        return line.Length > 0 ? line : "Bitrate unknown";
+        return line.Length > 0 ? line : Strings.T("library.bitrateUnknown");
     }
 
     /// <summary>A grid's tile sorted by bitrate or filtered by quality: 4K and the dynamic range ("4K", "DV"), no other resolution and no codec.</summary>
@@ -374,6 +383,23 @@ public static class LibraryText
         return chips;
     }
 
+    /// <summary>A group's heading: its category's name.</summary>
+    public static string GroupTitle(CollectionGroup group) => group.Category.Title;
+
+    /// <summary>
+    /// The Collections tab's chips (the web's CollectionsTab): Category, saying the one chosen,
+    /// when there is more than one to choose or one is chosen; Clear filters while one is. None
+    /// while the collections aren't known, or there are none.
+    /// </summary>
+    public static IReadOnlyList<LibraryChip> CollectionChips(LibraryState state)
+    {
+        var chips = new List<LibraryChip>();
+        if (state.Collections.Value is not { Total: > 0, Offered: true } view) return chips;
+        chips.Add(new LibraryChip(LibraryChipKind.CollectionCategory, view.Chosen is { } g ? GroupTitle(g) : Category, Selected: view.Filtered));
+        if (view.Filtered) chips.Add(new LibraryChip(LibraryChipKind.CollectionClear, ClearFilters, Icon: "x"));
+        return chips;
+    }
+
     /// <summary>The panel a chip opens; null for Unwatched, which applies at once.</summary>
     public static LibraryPanel? PanelOf(LibraryChipKind chip) => chip switch
     {
@@ -383,6 +409,7 @@ public static class LibraryText
         LibraryChipKind.Year => LibraryPanel.Year,
         LibraryChipKind.Resolution => LibraryPanel.Resolution,
         LibraryChipKind.DynamicRange => LibraryPanel.DynamicRange,
+        LibraryChipKind.CollectionCategory => LibraryPanel.CollectionCategory,
         _ => null,
     };
 
@@ -426,13 +453,13 @@ public static class LibraryText
                     Add(new LibraryPanelRow(LibraryRowKind.Show, label, p.Watched == watched, watched?.ToString().ToLowerInvariant()), p.Watched == watched);
                 if (state.Kind != "music")
                 {
-                    Add(new LibraryPanelRow(LibraryRowKind.Genres, Genre, Detail: p.Genre ?? AllGenres, Opens: true));
-                    Add(new LibraryPanelRow(LibraryRowKind.Years, Year, Detail: p.Year?.ToString(CultureInfo.InvariantCulture) ?? AllYears, Opens: true));
+                    Add(new LibraryPanelRow(LibraryRowKind.Genres, Genre, Detail: p.Genre ?? NoGenreChosen, Opens: true));
+                    Add(new LibraryPanelRow(LibraryRowKind.Years, Year, Detail: p.Year?.ToString(CultureInfo.InvariantCulture) ?? NoYearChosen, Opens: true));
                     // When the library has two or more to choose from, or one is chosen, to change or clear it.
                     if (state.Filters.Resolutions.Count > 0 || p.Resolution != null)
-                        Add(new LibraryPanelRow(LibraryRowKind.Resolutions, Resolution, Detail: ResolutionLabel(p.Resolution) ?? AllResolutions, Opens: true));
+                        Add(new LibraryPanelRow(LibraryRowKind.Resolutions, Resolution, Detail: ResolutionLabel(p.Resolution) ?? NoResolutionChosen, Opens: true));
                     if (state.Filters.DynamicRanges.Count > 0 || p.DynamicRange != null)
-                        Add(new LibraryPanelRow(LibraryRowKind.DynamicRanges, DynamicRange, Detail: DynamicRangeLabel(p.DynamicRange) ?? AllDynamicRanges, Opens: true));
+                        Add(new LibraryPanelRow(LibraryRowKind.DynamicRanges, DynamicRange, Detail: DynamicRangeLabel(p.DynamicRange) ?? NoDynamicRangeChosen, Opens: true));
                 }
                 if (p.Filtered)
                 {
@@ -457,6 +484,17 @@ public static class LibraryText
                 Add(new LibraryPanelRow(LibraryRowKind.DynamicRange, AllDynamicRanges, p.DynamicRange == null), p.DynamicRange == null);
                 foreach (var range in state.Filters.DynamicRanges)
                     Add(new LibraryPanelRow(LibraryRowKind.DynamicRange, DynamicRangeLabel(range) ?? range, range == p.DynamicRange, range), range == p.DynamicRange);
+                break;
+            case LibraryPanel.CollectionCategory:
+                title = Category;
+                var view = state.Collections.Value ?? CollectionsView.Empty;
+                var all = !view.Filtered;
+                Add(new LibraryPanelRow(LibraryRowKind.CollectionCategory, AllCategories, all, new CategoryChoice.All().Value), all);
+                foreach (var group in view.Choices)
+                {
+                    var on = view.Category == group.Choice;
+                    Add(new LibraryPanelRow(LibraryRowKind.CollectionCategory, GroupTitle(group), on, group.Choice.Value), on);
+                }
                 break;
             default:
                 title = Year;
@@ -516,15 +554,15 @@ public static class LibraryText
     /// <summary>The Collections tab's message: they failed with nothing to show, or there are none; null while they show or load.</summary>
     public static LibraryMessage? CollectionsMessage(LibraryState state)
     {
-        var list = state.Collections.Value;
-        if (list == null && state.Collections is Loadable<IReadOnlyList<CollectionTile>>.Failed f)
+        var view = state.Collections.Value;
+        if (view == null && state.Collections is Loadable<CollectionsView>.Failed f)
             return new LibraryMessage(FailedTitle(f.Error, CollectionsFailed), FailedBody(f.Error), MessageAction.Retry);
-        if (list is { Count: 0 }) return new LibraryMessage(CollectionsEmptyTitle, state.Kind == "shows" ? CollectionsEmptyShows : CollectionsEmptyMovies);
+        if (view is { Total: 0 }) return new LibraryMessage(CollectionsEmptyTitle, state.Kind == "shows" ? CollectionsEmptyShows : CollectionsEmptyMovies);
         return null;
     }
 
-    /// <summary>The Collections tab's count: "3 collections"; null while they aren't known.</summary>
-    public static string? CollectionsCountLine(LibraryState state) => state.Collections.Value is { } list ? CollectionsCount(list.Count) : null;
+    /// <summary>The Collections tab's count of those shown: "3 collections"; null while they aren't known.</summary>
+    public static string? CollectionsCountLine(LibraryState state) => state.Collections.Value is { } view ? CollectionsCount(view.Count) : null;
 
     // ---- the Libraries page
 
@@ -558,7 +596,7 @@ public static class LibraryText
     public static string? SortHint(bool sorting, bool moving) => !sorting ? null : moving ? MovingHint : SortingHint;
 
     /// <summary>A card's second line: "412 movies", with "· Scanning…" while the server scans it.</summary>
-    public static string CardLine(LibraryEntry entry) => entry.Scanning ? $"{entry.Count} · {LibrariesScanning}" : entry.Count;
+    public static string CardLine(LibraryEntry entry) => entry.Scanning ? string.Join(" · ", entry.Count, LibrariesScanning) : entry.Count;
 
     /// <summary>A card's actions: Open, and while they can be sorted, Move and the server's order.</summary>
     public static IReadOnlyList<LibrariesButton> CardActions(bool sortable)

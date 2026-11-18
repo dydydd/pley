@@ -44,6 +44,7 @@ import app.pley.android.designsystem.PleyShape
 import app.pley.android.designsystem.icon.Icon
 import app.pley.android.designsystem.icon.PleyIcon
 import app.pley.android.designsystem.icon.PleyIcons
+import app.pley.android.designsystem.text.asString
 import app.pley.android.ui.phone.R
 
 /**
@@ -90,9 +91,19 @@ internal fun DownloadGlyph(entry: DownloadEntry?, size: Dp = 24.dp) {
 internal fun downloadDescription(entry: DownloadEntry?, title: String): String = when (entry?.state) {
     null -> stringResource(R.string.downloads_download_item, title)
     DownloadState.Done -> stringResource(R.string.downloads_downloaded_item, title)
-    DownloadState.Failed -> stringResource(R.string.downloads_failed_toast, entry.error.orEmpty())
-    else -> entry.converting?.let { stringResource(R.string.downloads_preparing_item, title, (it * 100).toInt()) }
-        ?: stringResource(R.string.downloads_downloading_item, title, (entry.fraction * 100).toInt())
+    DownloadState.Failed -> stringResource(R.string.downloads_failed_toast, entry.error?.asString().orEmpty())
+    // Waiting is not downloading at 0 %: what it waits for, as its label and menu say.
+    DownloadState.Waiting -> stringResource(
+        R.string.downloads_status_item,
+        title,
+        stringResource(if (entry.serverAway) R.string.downloads_waiting_server else R.string.downloads_waiting),
+    )
+    DownloadState.Queued, DownloadState.Downloading -> entry.converting?.let { stringResource(R.string.downloads_preparing_item, title, (it * 100).toInt()) }
+        ?: if (entry.state == DownloadState.Queued) {
+            stringResource(R.string.downloads_status_item, title, stringResource(R.string.downloads_queued))
+        } else {
+            stringResource(R.string.downloads_downloading_item, title, (entry.fraction * 100).toInt())
+        }
 }
 
 /**
@@ -155,7 +166,8 @@ internal fun rememberDownloadStarter(download: (List<Long>) -> Unit): (List<Long
 /**
  * What can be done with a download there is, under its button: play it
  * when whole, try it again when it failed, then delete it (or cancel it
- * while it comes); [onOpen], where given, goes to its page.
+ * while it comes); [onOpen], where given, goes to its page. Why it failed,
+ * or what it waits for, is over them.
  */
 @Composable
 internal fun DownloadMenu(
@@ -170,11 +182,15 @@ internal fun DownloadMenu(
     if (entry == null) return
     val coming = entry.state != DownloadState.Done && entry.state != DownloadState.Failed
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss, containerColor = PleyColors.Surface3) {
-        // Why it failed, above what can be done about it.
-        val error = entry.error?.takeIf { entry.state == DownloadState.Failed }
-        if (error != null) {
+        // Why it failed, or what it waits for, above what can be done about it.
+        val note = when (entry.state) {
+            DownloadState.Failed -> entry.error?.asString()
+            DownloadState.Waiting -> stringResource(if (entry.serverAway) R.string.downloads_waiting_server else R.string.downloads_waiting)
+            else -> null
+        }
+        if (note != null) {
             Text(
-                error,
+                note,
                 style = MaterialTheme.typography.bodySmall,
                 color = PleyColors.Muted,
                 modifier = Modifier.widthIn(max = 280.dp).padding(horizontal = 16.dp, vertical = 8.dp),

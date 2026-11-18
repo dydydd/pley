@@ -1,8 +1,11 @@
 import { atHome, origin } from "../auth/addresses";
 import { NOT_YOUR_SERVER, SignedOutError, type Tokens } from "../auth/tokens";
+import { language, t, type Language } from "../i18n";
 import { Cancel, NetworkError, TIMED_OUT, withQuery, type HttpRequest, type HttpResponse, type Transport } from "../net/transport";
 import type {
   Collection,
+  CollectionCategory,
+  Control,
   DiscoverDetail,
   DiscoverList,
   DiscoverPage,
@@ -20,6 +23,7 @@ import type {
   LiveGuide,
   LiveSummary,
   LiveWatching,
+  MergedCollection,
   MediaRequest,
   NetworkAnswer,
   NetworkReport,
@@ -31,6 +35,7 @@ import type {
   PlaybackInfo,
   PlaybackRequest,
   PlaybackState,
+  PlayingTracks,
   Playlist,
   PlaylistEntry,
   RequestList,
@@ -86,7 +91,7 @@ export class SessionStoppedError extends ApiError {
   /** What the one who stopped it wrote, if anything. */
   readonly note: string | null;
   constructor(note: string | null) {
-    super(410, "session_stopped", note ?? "Playback was stopped by the server's administrator");
+    super(410, "session_stopped", note ?? t("player.errors.sessionStopped"));
     this.name = "SessionStoppedError";
     this.note = note;
   }
@@ -125,8 +130,8 @@ function pleyAnswer(e: ApiError): boolean {
 
 /** Why the server answered nothing, as the Android app says it: "Nothing answers there." or "No answer in time." */
 export function unreachableReason(e: unknown): string {
-  if (e instanceof NetworkError && e.message === NOT_YOUR_SERVER) return "Another device answers there.";
-  return e instanceof NetworkError && e.message === TIMED_OUT ? "No answer in time." : "Nothing answers there.";
+  if (e instanceof NetworkError && e.message === NOT_YOUR_SERVER) return t("common.server.anotherDevice");
+  return e instanceof NetworkError && e.message === TIMED_OUT ? t("common.server.noAnswerInTime") : t("common.server.nothingAnswers");
 }
 
 /** A server at home accepts at once or never: after this long without an answer, a quick question tells which. */
@@ -240,7 +245,8 @@ export class Api {
   }
 
   private once(path: string, opts: CallOptions, token: string): Promise<HttpResponse> {
-    const headers: Record<string, string> = { Accept: "application/json" };
+    // The words the server writes itself (Home's rows) in the language shown, for an account and a server without one.
+    const headers: Record<string, string> = { Accept: "application/json", "Accept-Language": language.peek() };
     if (this.ownServer(path)) headers.Authorization = `Bearer ${token}`;
     let body: string | null = null;
     if (opts.body !== undefined) {
@@ -281,6 +287,11 @@ export class Api {
 
   setTrackDefaults(audio: string | null, subtitle: string | null, mode: SubtitleMode): Promise<unknown> {
     return this.call("PUT", "/api/me/track-defaults", { audio_language: audio, subtitle_language: subtitle, subtitle_mode: mode });
+  }
+
+  /** The profile's language on all its devices (`null`: the server's); the profile as `me` answers it. */
+  setLanguage(lang: Language | null): Promise<User> {
+    return this.call("PUT", "/api/me/language", { language: lang }) as Promise<User>;
   }
 
   // ---- browsing
@@ -335,6 +346,16 @@ export class Api {
 
   collection(id: Id, cancel?: Cancel): Promise<Collection & { items: ItemSummary[] }> {
     return this.get(`/api/collections/${id}`, { cancel });
+  }
+
+  /** The categories collections are grouped by, in order. */
+  collectionCategories(cancel?: Cancel): Promise<{ categories: CollectionCategory[] }> {
+    return this.get("/api/collection-categories", { cancel });
+  }
+
+  /** A Home row of several collections of one title, its titles in the row's order. */
+  mergedCollection(ids: Id[], cancel?: Cancel): Promise<MergedCollection> {
+    return this.get(`/api/collections/merged?ids=${ids.join(",")}`, { cancel });
   }
 
   item(id: Id, cancel?: Cancel): Promise<ItemDetail> {
@@ -459,8 +480,10 @@ export class Api {
 
   // ---- playback
 
+  /** Starts a playback session; everything played here plays on the TV, which remotes are told. */
   play(req: PlaybackRequest, cancel?: Cancel): Promise<PlaybackInfo> {
-    return this.send("/api/playback", { method: "POST", body: req, cancel, timeoutMs: 60_000 }).then((r) => r.body as PlaybackInfo);
+    const body: PlaybackRequest = { ...req, device_kind: "tv" };
+    return this.send("/api/playback", { method: "POST", body, cancel, timeoutMs: 60_000 }).then((r) => r.body as PlaybackInfo);
   }
 
   /**
@@ -520,12 +543,21 @@ export class Api {
     return this.call("DELETE", `/api/playback/${encodeURIComponent(session)}`);
   }
 
-  progress(itemId: Id, positionMs: number, durationMs: number | null, state: PlaybackState, session: string | null): Promise<unknown> {
+  /**
+   * Where a playback is. `tracks`: a video's audio and subtitles playing
+   * (`subtitle` `-1`: none), by stream index, and its Quality menu's pick,
+   * which the server keeps on the session for the user's remotes; music has
+   * none to say.
+   */
+  progress(itemId: Id, positionMs: number, durationMs: number | null, state: PlaybackState, session: string | null, tracks?: PlayingTracks): Promise<unknown> {
     return this.call("POST", `/api/items/${itemId}/progress`, {
       position_ms: Math.max(0, Math.round(positionMs)),
       duration_ms: durationMs && durationMs > 0 ? Math.round(durationMs) : undefined,
       state,
       session_id: session ?? undefined,
+      audio_index: tracks && tracks.audio !== null ? tracks.audio : undefined,
+      subtitle_index: tracks ? tracks.subtitle : undefined,
+      quality: tracks?.quality,
     });
   }
 
@@ -591,10 +623,11 @@ export class Api {
    * the TV's player, which can't send the token. The server waits for
    * the provider when it tunes the channel. Every connection being in use
    * (`409`, with `connections`), `takeOver` is the channel whose
-   * connection to take, one the `409` said may be.
+   * connection to take, one the `409` said may be. `controls`: the
+   * remote's commands the player obeys (docs/API.md, "Remote control").
    */
-  watchChannel(channelId: Id, clientId: string, cancel?: Cancel, takeOver?: Id): Promise<LiveWatching> {
-    const body: Record<string, unknown> = { client_id: clientId, keyed_urls: true };
+  watchChannel(channelId: Id, clientId: string, cancel?: Cancel, takeOver?: Id, controls: Control[] = []): Promise<LiveWatching> {
+    const body: Record<string, unknown> = { client_id: clientId, keyed_urls: true, controls, device_kind: "tv" };
     if (takeOver !== undefined) body.take_over = takeOver;
     return this.send(`/api/live/channels/${channelId}/watch`, { method: "POST", body, cancel, timeoutMs: 45_000 }).then((r) => r.body as LiveWatching);
   }
@@ -719,7 +752,7 @@ function invalidToken(res: HttpResponse): boolean {
 
 function toError(res: HttpResponse): ApiError {
   let code = statusCode(res.status);
-  let message = `the server refused (HTTP ${res.status})`;
+  let message = t("common.server.refused", { status: res.status });
   const body = res.body;
   if (body && typeof body === "object" && !(body instanceof Blob)) {
     const o = body as { code?: unknown; message?: unknown };

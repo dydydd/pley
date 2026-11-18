@@ -22,9 +22,16 @@ extension FixtureServer {
         let channelId: Int
         let key: String
         let clientId: String
+        /// What the watch request said for the remote.
+        var controls: [String] = []
+        var device: String?
+        /// The order sessions started in, with the titles'.
+        var order = 0
         var deleted = false
         /// Why it was stopped (`410`); `nil` while it plays.
         var stopped: String?
+        /// Which device watches it, as the server says it (`app-<grant>`).
+        var deviceId = ""
     }
 
     struct Live {
@@ -134,7 +141,7 @@ extension FixtureServer {
             return Answer(status: 200, headers: ["Content-Type": "application/vnd.apple.mpegurl"],
                           body: Data(liveIndex.utf8))
         }
-        return withToken(&s, request, scope: method == "GET" ? "library" : "play") { s, _ in
+        return withToken(&s, request, scope: method == "GET" ? "library" : "play") { s, access in
             if parts.count == 2 && method == "GET" { return summary(s) }
             guard s.live.allowed else {
                 return json(403, ["code": "forbidden", "message": "Live TV isn't open to this account"])
@@ -166,7 +173,7 @@ extension FixtureServer {
                 return Answer(status: 204, headers: [:], body: Data())
             case ("POST", 5, "channels") where parts[4] == "watch":
                 guard let id = Int(parts[3]) else { return notFound(request.path) }
-                return watch(&s, id, request.body)
+                return watch(&s, id, request.body, deviceId: deviceId(access))
             case ("GET", 5, "sessions") where parts[4] == "plan":
                 guard let session = s.live.sessions[parts[3]], !session.deleted else { return notFound(request.path) }
                 if let message = session.stopped { return json(410, ["code": "session_stopped", "message": message]) }
@@ -175,6 +182,7 @@ extension FixtureServer {
             case ("DELETE", 4, "sessions"):
                 guard s.live.sessions[parts[3]]?.deleted == false else { return notFound(request.path) }
                 s.live.sessions[parts[3]]?.deleted = true
+                s.outbox.append(sessionsChanged)
                 return Answer(status: 204, headers: [:], body: Data())
             default:
                 return notFound(request.path)
@@ -264,7 +272,7 @@ extension FixtureServer {
          "image": "/api/live/channels/\(channelId)/programs/\(start)/image"]
     }
 
-    private static func channelJSON(_ s: State, _ c: FixtureChannel) -> [String: Any] {
+    static func channelJSON(_ s: State, _ c: FixtureChannel) -> [String: Any] {
         let now = slot(Int64(Date().timeIntervalSince1970))
         return ["id": c.id, "source_id": c.sourceId, "name": c.name, "number": c.number ?? NSNull(), "group": c.group,
                 "logo": "/api/live/channels/\(c.id)/logo", "favorite": s.live.favorites.contains(c.id),
@@ -286,7 +294,7 @@ extension FixtureServer {
         return json(200, ["from": from, "to": to, "programs": programs])
     }
 
-    private static func watch(_ s: inout State, _ channelId: Int, _ body: Data) -> Answer {
+    private static func watch(_ s: inout State, _ channelId: Int, _ body: Data, deviceId: String) -> Answer {
         s.live.watchBodies.append(body)
         guard let channel = s.live.channels.first(where: { $0.id == channelId }) else {
             return json(404, ["code": "not_found", "message": "channel \(channelId) not found"])
@@ -313,7 +321,12 @@ extension FixtureServer {
         let id = String(format: "%032x", s.live.nextSession)
         s.live.nextSession += 1
         let key = "pley_mk_live\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
-        s.live.sessions[id] = LiveSession(channelId: channelId, key: key, clientId: client)
+        s.remote.started += 1
+        s.live.sessions[id] = LiveSession(channelId: channelId, key: key, clientId: client,
+                                          controls: request["controls"] as? [String] ?? [],
+                                          device: request["device_name"] as? String, order: s.remote.started,
+                                          deviceId: deviceId)
+        s.outbox.append(sessionsChanged)
         s.live.recent.removeAll { $0 == channelId }
         s.live.recent.insert(channelId, at: 0)
         let url = request["keyed_urls"] as? Bool == true

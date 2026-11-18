@@ -45,6 +45,9 @@ public struct PlaybackEnvironment {
     public var local: (any LocalMedia)?
     /// The subtitle style, which the player's Subtitle style menu changes.
     public var subtitleStyle: any SubtitleStyleMemory
+    /// What the profile's remotes call this device (`DeviceName`); `nil`:
+    /// the server names it from the User-Agent.
+    public var deviceName: String?
 
     public init(api: PleyAPI, caps: DeviceCaps, clientId: String, reporter: SessionReporter, late: LateReports?,
                 quality: any QualityMemory = MemoryQuality(), ceiling: any CeilingMemory = MemoryCeiling(),
@@ -53,8 +56,10 @@ public struct PlaybackEnvironment {
                 warmer: (any StreamWarmer)? = nil, networkTiming: NetworkStart.Timing = NetworkStart.Timing(),
                 subtitleOffsets: any SubtitleOffsets = MemorySubtitleOffsets(), profileId: Int? = nil,
                 pictureFolder: URL? = nil, autoplayNext: Bool = true, followsScreen: Bool = Self.screensChange,
-                local: (any LocalMedia)? = nil, subtitleStyle: any SubtitleStyleMemory = MemorySubtitleStyle()) {
+                local: (any LocalMedia)? = nil, subtitleStyle: any SubtitleStyleMemory = MemorySubtitleStyle(),
+                deviceName: String? = nil) {
         self.api = api
+        self.deviceName = deviceName
         self.local = local
         self.subtitleStyle = subtitleStyle
         self.autoplayNext = autoplayNext
@@ -222,6 +227,9 @@ public final class PlaybackController: ObservableObject {
     private var picked = Qualities.automatic
     /// The quality playing: the original or a transcode (Automatic's step, or the one picked).
     private var quality = Qualities.original
+    /// The server converts no video, as its last play answer had it: only
+    /// the original is offered, and plays.
+    private var originalOnly = false
     /// "Quality lowered to …" is said once the next session loads.
     private var autoNoticePending = false
     /// A switch's next session is getting ready: this one's stalls and drops no longer count.
@@ -416,6 +424,96 @@ public final class PlaybackController: ObservableObject {
         }
     }
 
+    // MARK: The profile's remotes
+
+    /// The remote's commands a playback of `kind` (through `queue`, of
+    /// `file`) obeys: a video has no previous, next only where something
+    /// can follow, audio where the file has tracks to choose between,
+    /// subtitles where it has any, and quality, as its own menus offer them.
+    public static func controls(_ kind: ItemKind, queue: PlayQueue? = nil, file: MediaFile? = nil) -> [Control] {
+        var controls: [Control] = [.play, .pause, .seek, .skip]
+        if NextUp.hasNext(kind, queue: queue) { controls.append(.next) }
+        if (file?.streams(.audio).count ?? 0) > 1 { controls.append(.audio) }
+        if !(file?.streams(.subtitle).isEmpty ?? true) { controls.append(.subtitles) }
+        controls.append(.quality)
+        return controls
+    }
+
+    /// What this playback's sessions say they obey.
+    private var controls: [Control]? {
+        item.map { Self.controls($0.kind, queue: request.queue, file: file) }
+    }
+
+    /// A command from the profile's remote on another device, for session
+    /// `sessionId` (`player_command`): acted on only when it is the session
+    /// playing now, then reported at once, so the remote sees it. A seek
+    /// stops at the start and the end, a skip counts from where it is, next
+    /// with nothing next does nothing, and a video has no previous. Audio
+    /// and subtitles change as the player's own menus change them, saved
+    /// for the movie or show, and the quality as its Quality menu does,
+    /// kept as its pick; one that plays already is said again.
+    public func obey(_ command: PlayerCommand, for sessionId: String) {
+        guard !closed, !stopped, !sessionId.isEmpty, let session, session.id == sessionId, !session.local else {
+            return
+        }
+        switch command.command {
+        case .play:
+            // Playing already: said again, so a remote a little behind settles.
+            guard !wantPlay || ended else { return report(.playing) }
+            play()
+            report(.playing)
+        case .pause:
+            // A pause reports by itself; paused already, it is said again.
+            if wantPlay { pause() } else { report(.paused) }
+        case .seek:
+            guard let position = command.positionMs else { return }
+            seek(toMs: position)
+            reportSought()
+        case .skip:
+            guard let offset = command.offsetMs else { return }
+            seek(toMs: livePosition() + offset)
+            reportSought()
+        case .next:
+            guard let item, NextUp.hasNext(item.kind, queue: request.queue) else { return }
+            // The new session tells the server, and so the remote; nothing is said here when none follows.
+            if let next { return switchTo(next) }
+            lookUpNext { [weak self] found in
+                guard let self, let found, self.session === session else { return }
+                self.switchTo(found)
+            }
+        case .audio:
+            guard let index = command.streamIndex else { return }
+            // The menu's own way: in this session when AVPlayer switches it, else in one beside it.
+            selectAudio(index)
+            report(wantPlay ? .playing : .paused)
+        case .subtitles:
+            guard let index = command.streamIndex else { return }
+            selectSubtitle(index < 0 ? nil : index)
+            report(wantPlay ? .playing : .paused)
+        case .quality:
+            guard let id = command.quality else { return }
+            // The menu's own way: kept for this kind of network, and played beside the session playing.
+            selectQuality(id)
+            report(wantPlay ? .playing : .paused)
+        default:
+            // Videos have no previous; a newer remote's command is left alone.
+            break
+        }
+    }
+
+    /// Says `text` over the player for a moment, as its own notices show
+    /// ("Playing from Kitchen tablet").
+    public func say(_ text: String) {
+        guard !closed else { return }
+        state.notice = text
+    }
+
+    /// Reports a remote's seek or skip at once, outside the schedule: at
+    /// the place sought, not the engine's, which may not have moved yet.
+    private func reportSought() {
+        session?.progress(positionMs: state.positionMs, state: wantPlay ? .playing : .paused)
+    }
+
     /// Hides the Up Next card and stops its countdown. At the end, it comes
     /// back with no countdown only if asked for again (`playNext`).
     public func cancelUpNext() {
@@ -520,7 +618,8 @@ public final class PlaybackController: ObservableObject {
     public func selectQuality(_ id: String) {
         guard !closed, !stopped, localFile == nil else { return }
         let wanted = Qualities.byIdOrLabel(id)
-        guard let choice = Qualities.forFile(file).first(where: { $0.id == wanted.id }), choice.id != picked.id else {
+        guard let choice = Qualities.offered(file, originalOnly: originalOnly).first(where: { $0.id == wanted.id }),
+              choice.id != picked.id else {
             return
         }
         let before = quality
@@ -686,11 +785,12 @@ public final class PlaybackController: ObservableObject {
     // MARK: Sessions
 
     private func prepareFirst() async {
-        // What the server knows of the network, asked at once when the quality remembered is Automatic.
+        // What the server knows of the network, asked at once when the quality remembered is Automatic;
+        // not of a server that converts no video (the title before said so), where the original plays.
         let remembered = env.quality.remembered()
         let network = network
-        let lookup: Task<NetworkStart.Lookup, Never>? = Qualities.choose(nil, remembered: remembered).automatic
-            ? Task { await network.lookUp() } : nil
+        let asksNetwork = !originalOnly && Qualities.choose(nil, remembered: remembered).automatic
+        let lookup: Task<NetworkStart.Lookup, Never>? = asksNetwork ? Task { await network.lookUp() } : nil
         defer { lookup?.cancel() }
         do {
             let saved = await env.local?.detail(request.itemId)
@@ -724,7 +824,7 @@ public final class PlaybackController: ObservableObject {
                 quality = Qualities.original
                 state.canFindSubtitles = false
             } else {
-                picked = Qualities.choose(chosen, remembered: remembered)
+                picked = originalOnly ? Qualities.original : Qualities.choose(chosen, remembered: remembered)
                 var start = StartCeiling.device
                 if picked.automatic, let lookup { start = await network.resolve(await lookup.value) }
                 guard !closed else { return }
@@ -777,13 +877,21 @@ public final class PlaybackController: ObservableObject {
         state.positionMs = lastPositionMs
         markers = Markers.forFile(item, fileId: file.id)
         subtitle = file.streams(.subtitle).first { $0.index == file.selectedSubtitle }
+        // Cast with tracks: those play this time, in place of the saved ones, where the file has them.
+        if let wanted = request.subtitleIndex,
+           wanted == SessionTracks.off || file.streams(.subtitle).contains(where: { $0.index == wanted }) {
+            subtitle = file.streams(.subtitle).first { $0.index == wanted }
+        }
+        if localFile?.converted != true, let audio = PlaybackPlan.initialAudio(file, requested: request.audioIndex) {
+            pickedAudio = audio
+        }
         // A download shows only the text tracks saved with it.
         if let localFile, let chosen = subtitle, localFile.subtitles[chosen.index] == nil { subtitle = nil }
         subtitleOffset = SubtitleSync.clamp(env.subtitleOffsets.offset(offsetKey(file.id)))
         state.subtitleOffsetMs = subtitleOffset
         publishSubtitles()
         state.chapters = file.chapters.enumerated().map { n, chapter in
-            ChapterChoice(index: n, title: chapter.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Chapter \(n + 1)",
+            ChapterChoice(index: n, title: chapter.title.flatMap { $0.isEmpty ? nil : $0 } ?? localized("Chapter \(n + 1)"),
                           startMs: chapter.startMs)
         }
         followChapters(lastPositionMs)
@@ -910,14 +1018,16 @@ public final class PlaybackController: ObservableObject {
                                                                            audio: pickedAudio, caps: caps),
                                            sideload: sideloads)
         var sent = PlaybackPlan.request(itemId: item.id, choices, clientId: env.clientId, caps: caps,
-                                        keepPrevious: keepPrevious)
+                                        keepPrevious: keepPrevious, controls: controls,
+                                        deviceName: env.deviceName)
         var started = try await ServerPlaybackSession.start(api: env.api, request: sent, reporter: env.reporter,
                                                             late: env.late)
         if PlaybackPlan.needsIndexes(started.info, sent: sent, choices) {
             started.discard()
             choices.streaming = true
             sent = PlaybackPlan.request(itemId: item.id, choices, clientId: env.clientId, caps: caps,
-                                        keepPrevious: keepPrevious)
+                                        keepPrevious: keepPrevious, controls: controls,
+                                        deviceName: env.deviceName)
             started = try await ServerPlaybackSession.start(api: env.api, request: sent, reporter: env.reporter,
                                                             late: env.late)
         }
@@ -936,6 +1046,14 @@ public final class PlaybackController: ObservableObject {
     private func load(_ started: ServerPlaybackSession, url: URL, at atMs: Int) {
         session = started
         expired = false
+        // Each report says the tracks playing and the quality picked, for the profile's remotes; a download
+        // has no session to keep them.
+        if !started.local {
+            started.tracks = { [weak self] in
+                (self?.playingAudio, self.map { $0.subtitle?.index ?? SessionTracks.off })
+            }
+            started.quality = { [weak self] in self?.picked.id }
+        }
         // The server answered: it is in reach again.
         everLoaded = true
         outOfReachSince = nil
@@ -949,6 +1067,13 @@ public final class PlaybackController: ObservableObject {
             }
         }
         let info = started.info
+        originalOnly = info.originalOnly
+        if originalOnly {
+            // Whatever was asked for, the original plays: the menu says so,
+            // and the quality kept stays for servers that convert.
+            picked = Qualities.original
+            quality = playedFor(picked)
+        }
         state.method = info.method
         state.downloaded = started.local
         state.audioConverted = info.audioConverted
@@ -1137,7 +1262,8 @@ public final class PlaybackController: ObservableObject {
             // Automatic goes lower by itself; otherwise the person is told a lower quality would help.
             if automatic, let step = auto.serverTooSlow(nowMs: env.clock.now()) {
                 applyAuto(step)
-            } else {
+            } else if !originalOnly {
+                // Nothing is suggested where there is none to choose.
                 state.notice = PlayerTexts.slowServer
             }
         case .fail(let failure, let detail):
@@ -1792,7 +1918,7 @@ public final class PlaybackController: ObservableObject {
              Words.bitrate(f.bitrate)].filter { !$0.isEmpty }.joined(separator: " · ")
         }
         let lowered = automatic && (converted != nil || !quality.original)
-        state.qualities = Qualities.forFile(file).map { preset in
+        state.qualities = Qualities.offered(file, originalOnly: originalOnly).map { preset in
             let detail: String? = if preset.automatic {
                 lowered ? [PlayerTexts.now(playing), note].compactMap { $0 }.joined(separator: " · ")
                     : PlayerTexts.automaticHint
@@ -1926,7 +2052,7 @@ public final class PlaybackController: ObservableObject {
             stopByServer(message)
             return
         }
-        let words = (error as? any LocalizedError)?.errorDescription ?? "something went wrong"
+        let words = (error as? any LocalizedError)?.errorDescription ?? localized("something went wrong")
         let canRetry: Bool = switch error as? PleyError {
         case .api(let status, _, _): !(status == 403 || status == 404)
         case .signedOut, .insufficientScope: false

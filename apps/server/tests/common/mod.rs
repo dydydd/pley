@@ -24,6 +24,8 @@ pub use testing::tempdir;
 pub const ANDROID_APP: &str = "https://pley-media-server.github.io/pley/oauth/android.json";
 /// The client_id of pley's desktop app.
 pub const DESKTOP_APP: &str = "https://pley-media-server.github.io/pley/oauth/desktop.json";
+/// The client_id of pley's Home Assistant integration.
+pub const HOMEASSISTANT_APP: &str = "https://pley-media-server.github.io/pley/oauth/homeassistant.json";
 /// The client_id of pley's Apple app on iPhone and iPad.
 pub const IOS_APP: &str = "https://pley-media-server.github.io/pley/oauth/ios.json";
 /// The client_id of pley's Kodi add-on.
@@ -508,7 +510,7 @@ impl TestApp {
     pub async fn set_rating(&self, title: &str, rating: Option<&str>) {
         sqlx::query("UPDATE items SET content_rating = ?, rating_age = ? WHERE title = ?")
             .bind(rating)
-            .bind(rating.and_then(pley::ratings::rating_age))
+            .bind(rating.and_then(|r| pley::ratings::age(Some("US"), pley::ratings::Kind::Film, r)))
             .bind(title)
             .execute(&self.state.db.write)
             .await
@@ -601,6 +603,12 @@ impl PlexTokens {
         self.0.lock().unwrap().insert(token.to_owned(), (user.is_admin, made.clone()));
         made
     }
+}
+
+/// The collections of `/api/libraries/{id}/collections`' answer but the four
+/// Pley makes in each movie and TV library.
+pub fn own_collections(listed: &Value) -> Value {
+    Value::Array(listed["collections"].as_array().unwrap().iter().filter(|c| c["builtin"].is_null()).cloned().collect())
 }
 
 pub fn titles(items: &Value) -> Vec<String> {

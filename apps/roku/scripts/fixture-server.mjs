@@ -196,11 +196,21 @@ const trailer = {
 // shows, over six buttons: the page near its fullest.
 movies[11].summary = "A linguist is called in when twelve ships come to rest above the earth, and she must find a way to speak with those inside before the nations watching them lose patience. As she learns their language, her memories start to come loose from time, and what she remembers of her daughter changes what she will choose to do.";
 const items = new Map([...movies, show, ...seasons, ...episodes, artist, album, newerAlbum, ...tracks, trailer].map((item) => [item.id, item]));
-// Collections: TMDB's of five movies, and a smart one a filter fills with
-// the show.
+// Collections: TMDB's of five movies, under Franchises; a smart one a
+// filter fills with the show, under Highlights; and one of each library
+// called Fixture Favourites, under Other (the category the server gives
+// one without), one row on Home. Other comes before Franchises, as on a
+// new server.
+const categories = [
+  { id: 1, key: "highlights", title: "Highlights", from_label: null, position: 0 },
+  { id: 3, key: "other", title: "Other", from_label: null, position: 1 },
+  { id: 2, key: "franchises", title: "Franchises", from_label: null, position: 2 },
+];
 const collections = [
-  { id: 1, library_id: 1, title: "Fixture Collection", summary: "Five films of the fake server, in the order they came out.", automatic: true, sort: "release", smart_filter: null, poster_url: "", backdrop_url: "", created_at: 0, updated_at: 0, items: movies.slice(0, 5) },
-  { id: 2, library_id: 2, title: "Fixture Dramas", summary: null, automatic: false, sort: "release", smart_filter: "type=2&genre=Drama&sort=year%3Adesc", poster_url: "", backdrop_url: "", created_at: 0, updated_at: 0, items: [show] },
+  { id: 1, library_id: 1, title: "Fixture Collection", summary: "Five films of the fake server, in the order they came out.", automatic: true, sort: "release", smart_filter: null, category: categories[2], poster_url: "", backdrop_url: "", created_at: 0, updated_at: 0, items: movies.slice(0, 5) },
+  { id: 2, library_id: 2, title: "Fixture Dramas", summary: null, automatic: false, sort: "release", smart_filter: "type=2&genre=Drama&sort=year%3Adesc", category: categories[0], poster_url: "", backdrop_url: "", created_at: 0, updated_at: 0, items: [show] },
+  { id: 3, library_id: 2, title: "Fixture Favourites", summary: null, automatic: false, sort: "custom", smart_filter: null, category: categories[1], poster_url: "", backdrop_url: "", created_at: 0, updated_at: 0, items: [show] },
+  { id: 4, library_id: 1, title: "Fixture Favourites", summary: null, automatic: false, sort: "custom", smart_filter: null, category: categories[1], poster_url: "", backdrop_url: "", created_at: 0, updated_at: 0, items: movies.slice(5, 7) },
 ];
 const collectionOf = ({ items: held, ...collection }) => ({ ...collection, item_count: held.length });
 
@@ -270,7 +280,9 @@ function detail(item, myList, picks) {
 // and know nothing of requests, as an older one; `requestsOn` false
 // turns requests off (the summary says so, the rest answers 503);
 // `twoStep` makes GET /api/server say it requires two-step sign-in, which
-// it otherwise leaves out, as an older one does;
+// it otherwise leaves out, as an older one does; `categories` false
+// answers 404 for the collections' categories and gives collections none,
+// as a server from before them does;
 // `playbackDelayMs` holds back the answers to POST /api/playback.
 // What the app asked for and did is kept: requestsAsked (POST
 // /api/requests bodies), requestsActed ({ id, action }), and
@@ -329,7 +341,10 @@ export function startFixture({ accessSeconds = 3600, refuse = [] } = {}) {
     });
     const agent = req.headers["user-agent"] ?? "";
     const auth = req.headers.authorization ?? "";
-    requests.push({ method: req.method, path: url.pathname + url.search, agent, auth: auth ? auth.slice(0, 20) : "", at: Date.now() });
+    const language = req.headers["accept-language"] ?? "";
+    requests.push({ method: req.method, path: url.pathname + url.search, agent, auth: auth ? auth.slice(0, 20) : "", language, at: Date.now() });
+    // The API task's requests (JSON) say the language the app shows.
+    if (req.headers.accept === "application/json" && !/^(en|fr|es)$/.test(language)) problems.push(`${req.method} ${url.pathname}: Accept-Language ${JSON.stringify(language)}`);
     if (!USER_AGENT.test(agent)) problems.push(`${req.method} ${url.pathname}: User-Agent ${JSON.stringify(agent)}`);
     if (url.searchParams.has("token")) problems.push(`${req.method} ${url.pathname}: a token in the address`);
 
@@ -338,6 +353,8 @@ export function startFixture({ accessSeconds = 3600, refuse = [] } = {}) {
       res.end(value === undefined ? "" : JSON.stringify(value));
     };
     const oauthError = (error, description) => json(400, { error, error_description: description });
+    // A collection as a server from before categories lists it: without one.
+    const categoryOf = ({ category, ...collection }) => (fixture.categories ? { ...collection, category } : collection);
     const form = new URLSearchParams(body);
 
     // OAuth: metadata, device codes, tokens, revocation.
@@ -435,7 +452,7 @@ export function startFixture({ accessSeconds = 3600, refuse = [] } = {}) {
     // Everything else needs the access token, in the header, but a keyed
     // session's media, which its key opens.
     if (!url.pathname.startsWith("/api/") || url.pathname === "/api/server") {
-      const server = { id: SERVER_ID, name: "Fixture", version: "0.1.0", setup_required: false, setup_code_required: false, ...(fixture.twoStep ? { two_step_required: true } : {}) };
+      const server = { id: SERVER_ID, name: "Fixture", language: fixture.serverLanguage, version: "0.1.0", setup_required: false, setup_code_required: false, ...(fixture.twoStep ? { two_step_required: true } : {}) };
       const challenge = url.searchParams.get("challenge");
       const grant = Number(url.searchParams.get("proof_id"));
       if (url.pathname !== "/api/server" || challenge === null) return json(200, server);
@@ -470,8 +487,22 @@ export function startFixture({ accessSeconds = 3600, refuse = [] } = {}) {
       res.writeHead(answered.status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...answered.headers });
       return res.end(JSON.stringify(answered.body));
     }
-    const me = () => ({ id: 1, username: "anna", name: "Anna", ...fixture.trackDefaults });
+    const me = () => ({ id: 1, username: "anna", name: "Anna", ...fixture.trackDefaults, language: fixture.language });
     if (path === "/api/auth/me") return json(200, me());
+    // The account's language (docs/API.md, "Language"): one of the three,
+    // or null for Automatic.
+    if (path === "/api/me/language" && req.method === "PUT") {
+      const asked = JSON.parse(body);
+      // A server without the route, though it names its own language.
+      if (!fixture.languageRoute) {
+        fixture.languagesRefused.push(asked.language);
+        return json(404, { code: "not_found", message: "Not found" });
+      }
+      fixture.languagesSaved.push(asked.language);
+      if (asked.language !== null && !["en", "fr", "es"].includes(asked.language)) return json(400, { code: "bad_request", message: "no such language" });
+      fixture.language = asked.language;
+      return json(200, me());
+    }
     // The profile's track defaults (docs/API.md): all three at once.
     if (path === "/api/me/track-defaults" && req.method === "PUT") {
       const asked = JSON.parse(body);
@@ -534,7 +565,8 @@ export function startFixture({ accessSeconds = 3600, refuse = [] } = {}) {
           ...(fixture.myList.length ? [{ key: "my_list", title: "My List", library_id: null, items: fixture.myList.map((id) => items.get(id)).filter(Boolean) }] : []),
           { key: "recently_added:1", title: "Recently Added in Movies", library_id: 1, items: movies.slice(0, 20) },
           { key: "recently_added:2", title: "Recently Added in TV Shows", library_id: 2, items: [show] },
-          { key: "recently_added:3", title: "Recently Added in Music", library_id: 3, items: [album] },
+          { key: "recently_added:3", title: "Recently Added in Music", library_id: 3, collection_ids: [], items: [album] },
+          { key: "collections:4,3", title: "Fixture Favourites", library_id: null, collection_ids: [4, 3], items: [...collections[3].items, ...collections[2].items] },
         ],
       });
     }
@@ -610,7 +642,7 @@ export function startFixture({ accessSeconds = 3600, refuse = [] } = {}) {
       return json(200, { hubs: listed.length ? [{ key: "recently_added", title: "Recently Added", library_id: Number(match[1]), items: listed }, { key: "top_rated", title: "Top Rated", library_id: Number(match[1]), items: listed }] : [] });
     }
     if ((match = path.match(/^\/api\/libraries\/(\d+)\/collections$/))) {
-      return json(200, { collections: collections.filter((c) => c.library_id === Number(match[1])).map(collectionOf) });
+      return json(200, { collections: collections.filter((c) => c.library_id === Number(match[1])).map(collectionOf).map(categoryOf) });
     }
     // Resolutions and dynamic ranges only where they tell titles apart, as
     // the server lists them: the movies differ (Dolby Vision, HDR10 and SDR,
@@ -659,10 +691,18 @@ export function startFixture({ accessSeconds = 3600, refuse = [] } = {}) {
     if ((match = path.match(/^\/api\/people\/(\d+)$/))) {
       return json(200, { id: Number(match[1]), name: "Ada Lovelace", photo_url: `/api/people/${match[1]}/photo?v=1`, credits: [{ item: show, roles: [{ role: "actor", character: "Herself", episodes: 9 }] }, ...movies.slice(0, 3).map((item) => ({ item, roles: [{ role: "director" }] }))] });
     }
+    if (path === "/api/collection-categories") return fixture.categories ? json(200, { categories }) : json(404, { code: "not_found", message: "no such endpoint" });
+    // A Home row of several collections: their titles together.
+    if (path === "/api/collections/merged") {
+      const ids = (url.searchParams.get("ids") ?? "").split(",").map(Number);
+      const held = ids.map((id) => collections.find((c) => c.id === id)).filter(Boolean);
+      if (!held.length) return json(404, { code: "not_found", message: "no collections" });
+      return json(200, { title: held[0].title, collections: held.map((c) => ({ id: c.id, library_id: c.library_id })), items: held.flatMap((c) => c.items) });
+    }
     if ((match = path.match(/^\/api\/collections\/(\d+)$/))) {
       const collection = collections.find((c) => c.id === Number(match[1]));
       if (!collection) return json(404, { code: "not_found", message: `collection ${match[1]} not found` });
-      return json(200, { ...collectionOf(collection), items: collection.items });
+      return json(200, { ...categoryOf(collectionOf(collection)), items: collection.items });
     }
     if (/^\/api\/(people\/\d+\/photo|collections\/\d+\/images\/\w+)$/.test(path)) {
       res.writeHead(200, { "Content-Type": "image/png" });
@@ -696,7 +736,17 @@ export function startFixture({ accessSeconds = 3600, refuse = [] } = {}) {
       return res.end();
     }
     if ((match = path.match(/^\/api\/items\/(\d+)\/progress$/)) && req.method === "POST") {
-      progress.push({ item: Number(match[1]), ...JSON.parse(body) });
+      const told = JSON.parse(body);
+      progress.push({ item: Number(match[1]), ...told });
+      // A video says which audio and subtitles play, for the user's
+      // remotes (-1: none); music, neither.
+      const kind = items.get(Number(match[1]))?.kind;
+      const tracks = [told.audio_index, told.subtitle_index];
+      if (told.session_id && kind === "track" && ("audio_index" in told || "subtitle_index" in told)) problems.push("a track's report that names audio or subtitles");
+      if (told.session_id && (kind === "movie" || kind === "episode")) {
+        if (!tracks.every((index) => Number.isInteger(index) && index >= -1)) problems.push(`a ${kind}'s report with tracks ${JSON.stringify(tracks)}`);
+        fixture.videoReports += 1;
+      }
       res.writeHead(204);
       return res.end();
     }
@@ -708,7 +758,15 @@ export function startFixture({ accessSeconds = 3600, refuse = [] } = {}) {
       const ask = JSON.parse(body);
       if (ask.caps?.caps_version !== 2) problems.push("a playback request without caps_version 2");
       if (!ask.caps?.hls?.master_playlist) problems.push("a playback request without hls.master_playlist");
+      // What the user's remotes see of the player (docs/API.md, "Remote control").
+      if (ask.device_kind !== "tv") problems.push("a playback request that doesn't say it plays on a TV");
+      if (!Array.isArray(ask.controls) || !ask.controls.includes("pause")) problems.push("a playback request without its controls");
       const item = items.get(ask.item_id);
+      // A film's or an episode's file has audio and subtitles for the
+      // remote to pick; music has none to pick.
+      const picks = ["audio", "subtitles"].filter((control) => ask.controls?.includes(control));
+      if (item?.kind === "track" && picks.length > 0) problems.push("music that says the remote picks its tracks");
+      if ((item?.kind === "movie" || item?.kind === "episode") && picks.length !== 2) problems.push(`a ${item.kind} that doesn't say the remote picks its audio and subtitles`);
       // A movie's Director's Cut is its second file.
       const files = item?.kind === "movie" ? [7000 + ask.item_id, 9000 + ask.item_id] : [7000 + ask.item_id];
       if (ask.file_id != null && !files.includes(ask.file_id)) problems.push(`playback of file ${ask.file_id} for item ${ask.item_id}`);
@@ -828,11 +886,18 @@ export function startFixture({ accessSeconds = 3600, refuse = [] } = {}) {
       res.writeHead(200, { "Content-Type": "image/png" });
       return res.end(STILL);
     }
+    // A channel with what's on now: the player asks once its programme ends.
+    if ((match = path.match(/^\/api\/live\/channels\/(\d+)$/)) && req.method === "GET") {
+      const channel = liveChannels().find((c) => c.id === Number(match[1]));
+      return channel ? json(200, channel) : json(404, { code: "not_found", message: "No such channel." });
+    }
     if ((match = path.match(/^\/api\/live\/channels\/(\d+)\/watch$/)) && req.method === "POST") {
       const id = Number(match[1]);
       const ask = body ? JSON.parse(body) : {};
       fixture.liveWatches.push({ id, client_id: ask.client_id ?? null, take_over: ask.take_over ?? null });
       if (!ask.client_id) problems.push("a watch without a client_id");
+      if (ask.device_kind !== "tv") problems.push("a watch that doesn't say it plays on a TV");
+      if (JSON.stringify(ask.controls) !== JSON.stringify(["next", "previous"])) problems.push(`a watch obeying ${JSON.stringify(ask.controls)}`);
       const channel = liveChannels().find((c) => c.id === id);
       if (!channel) return json(404, { code: "not_found", message: "no such channel" });
       // Channel 3's source has one connection, Ben's other device on
@@ -913,9 +978,9 @@ export function startFixture({ accessSeconds = 3600, refuse = [] } = {}) {
     return json(404, { code: "not_found", message: `nothing at ${path}` });
   });
 
-  const fixture = { issuer: "", down: false, qr: true, proofs: 0, requestScopes: true, requestsOn: true, twoStep: false, scopesAsked: [], playbackDelayMs: 0, refreshes: 0, playbacks: [], libraryOrder: [1, 2, 3], orders: [], trackDefaults: { audio_language: null, subtitle_language: null, subtitle_mode: "forced" }, trackDefaultsSaved: [], streams: [], picks: new Map(), ratings: [], myList: [1003], marks: [], playlistEntries: [[1, 1000], [2, 101], [3, 102]], playlistRemoved: [], playlistOrders: [], playlistsAsked: [], playlistsMade: [], smartPlaylists: [], nextPlaylist: 2,
+  const fixture = { issuer: "", down: false, qr: true, proofs: 0, requestScopes: true, requestsOn: true, twoStep: false, scopesAsked: [], playbackDelayMs: 0, refreshes: 0, playbacks: [], libraryOrder: [1, 2, 3], orders: [], trackDefaults: { audio_language: null, subtitle_language: null, subtitle_mode: "forced" }, trackDefaultsSaved: [], serverLanguage: "en", language: null, languagesSaved: [], languageRoute: true, languagesRefused: [], categories: true, streams: [], picks: new Map(), ratings: [], myList: [1003], marks: [], playlistEntries: [[1, 1000], [2, 101], [3, 102]], playlistRemoved: [], playlistOrders: [], playlistsAsked: [], playlistsMade: [], smartPlaylists: [], nextPlaylist: 2,
     household: [{ id: 1, name: "Anna", avatar_url: null, avatar_color: "#38bdf8", current: true, needs: "none" }, { id: 2, name: "Ben", avatar_url: null, avatar_color: "#f472b6", current: false, needs: "none" }],
-    switched: [], subtitlesAdded: [], picturesMissing: false, picturesAsked: [], picturesFetched: [], probed: false, networkTold: [], speedTests: [], requestsAsked: [], requestsActed: [], discoverPictures: [], problems, requests, progress, closed, close: () => server.close(),
+    switched: [], subtitlesAdded: [], picturesMissing: false, picturesAsked: [], picturesFetched: [], probed: false, networkTold: [], speedTests: [], requestsAsked: [], requestsActed: [], discoverPictures: [], problems, requests, progress, videoReports: 0, closed, close: () => server.close(),
     liveRecent: [2], liveBrowses: [], liveFavorites: [], liveFavoriteChanges: [], liveGuides: [], liveWatches: [], liveSessions: new Map(), livePlaylists: [], liveLeft: [] };
   // The channels, each with what's on now and next, by the half hour.
   function liveProgram(channelId, start) {

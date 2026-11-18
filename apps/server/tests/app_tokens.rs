@@ -1,7 +1,8 @@
 //! Apps' tokens (src/auth/grants.rs) open only the routes their scopes allow
 //! (src/auth/scopes.rs), and only from `Authorization: Bearer`: every route
-//! of api/mod.rs is classified, an administrator's app administers nothing,
-//! and the Jellyfin-compatible API refuses them.
+//! of api/mod.rs is classified, an administrator's app administers nothing
+//! unless it is one of pley's own allowed `server`, and the
+//! Jellyfin-compatible API refuses them.
 
 mod common;
 
@@ -10,7 +11,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use futures::StreamExt;
-use pley::auth::scopes::{APP_ROUTES, Need};
+use pley::auth::scopes::{APP_ROUTES, Need, Scope};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -38,10 +39,14 @@ const PUBLIC: &[(&str, &str)] = &[
     // session's own key stands in for it (tests/tv_apps.rs).
     ("GET", "/api/media/{key}/{file}"),
     ("GET", "/api/live/media/{key}/{file}"),
+    // A `.strm` file's media for the transcoder, which has no account: the
+    // key it was given stands in for one, and only it is answered
+    // (tests/strm.rs).
+    ("GET", "/api/strm/{key}/{name}"),
 ];
 
 /// Routes for pley's own sign-in only: how an account signs in, its
-/// profiles and devices, and what everyone is playing.
+/// profiles and devices.
 const FIRST_PARTY: &[(&str, &str)] = &[
     ("PUT", "/api/auth/password"),
     ("GET", "/api/auth/profiles"),
@@ -62,25 +67,30 @@ const FIRST_PARTY: &[(&str, &str)] = &[
     ("GET", "/api/me/compatibility-tokens"),
     ("POST", "/api/me/compatibility-tokens"),
     ("DELETE", "/api/me/compatibility-tokens/{id}"),
-    ("GET", "/api/activity"),
     // Apps have their keys in their token answers.
     ("GET", "/api/server/proof-key"),
 ];
 
-/// Administration.
+/// Administration no app reaches, not even with `server` (what it opens is
+/// in APP_ROUTES): collections, editing titles' details, what holds the
+/// server's keys, passwords and providers' addresses, which stay with the
+/// web app, as do a Plex import and AirPlay pairings, and Live TV's lineup
+/// and tuners, managed there with its sources.
 const ADMIN: &[(&str, &str)] = &[
-    ("POST", "/api/libraries"),
-    ("POST", "/api/libraries/scan"),
-    ("PUT", "/api/libraries/order"),
-    ("PATCH", "/api/libraries/{id}"),
-    ("DELETE", "/api/libraries/{id}"),
-    ("POST", "/api/libraries/{id}/scan"),
     ("POST", "/api/libraries/{id}/collections"),
     ("PATCH", "/api/collections/{id}"),
     ("DELETE", "/api/collections/{id}"),
     ("POST", "/api/collections/{id}/items"),
     ("DELETE", "/api/collections/{id}/items/{item_id}"),
     ("PUT", "/api/collections/{id}/order"),
+    ("POST", "/api/libraries/{id}/collections/defaults"),
+    ("PUT", "/api/libraries/{id}/rows/order"),
+    ("POST", "/api/collection-categories"),
+    ("PUT", "/api/collection-categories/order"),
+    ("PATCH", "/api/collection-categories/{id}"),
+    ("DELETE", "/api/collection-categories/{id}"),
+    ("GET", "/api/home/rows"),
+    ("PUT", "/api/home/rows/order"),
     ("PATCH", "/api/items/{id}"),
     ("GET", "/api/items/{id}/matches"),
     ("POST", "/api/items/{id}/match"),
@@ -90,34 +100,29 @@ const ADMIN: &[(&str, &str)] = &[
     ("POST", "/api/items/{id}/artwork/{kind}/upload"),
     ("POST", "/api/items/{id}/refresh"),
     ("POST", "/api/items/{id}/analyze"),
-    ("GET", "/api/users"),
-    ("POST", "/api/users"),
-    ("PATCH", "/api/users/{id}"),
-    ("DELETE", "/api/users/{id}"),
-    ("GET", "/api/users/{id}/devices"),
-    ("DELETE", "/api/users/{id}/devices"),
-    ("GET", "/api/users/{id}/apps"),
-    ("DELETE", "/api/users/{id}/apps/{grant}"),
-    ("DELETE", "/api/users/{id}/two-step"),
-    ("GET", "/api/invites"),
-    ("POST", "/api/invites"),
-    ("DELETE", "/api/invites/{code}"),
-    ("GET", "/api/system"),
-    ("GET", "/api/system/resources"),
     ("GET", "/api/system/library-work"),
-    ("GET", "/api/system/storage"),
     ("GET", "/api/system/backups"),
     ("POST", "/api/system/backups"),
-    ("POST", "/api/system/storage/clean"),
+    ("GET", "/api/import/plex"),
+    ("DELETE", "/api/import/plex"),
+    ("GET", "/api/import/plex/pin"),
+    ("POST", "/api/import/plex/pin"),
+    ("POST", "/api/import/plex/token"),
+    ("GET", "/api/import/plex/servers"),
+    ("POST", "/api/import/plex/server"),
+    ("GET", "/api/import/plex/plan"),
+    ("POST", "/api/import/plex/folder"),
+    ("GET", "/api/import/plex/users/{id}/picture"),
+    ("POST", "/api/import/plex/start"),
     ("PUT", "/api/system/transcode-dir"),
-    ("GET", "/api/transcoder"),
     ("GET", "/api/settings"),
     ("PUT", "/api/settings"),
     ("POST", "/api/settings/test"),
     ("POST", "/api/settings/arr"),
     ("GET", "/api/network"),
     ("PUT", "/api/network"),
-    ("POST", "/api/fs"),
+    ("GET", "/api/network/airplay"),
+    ("DELETE", "/api/network/airplay/{id}"),
     ("GET", "/api/live/settings"),
     ("PUT", "/api/live/settings"),
     ("GET", "/api/live/sources"),
@@ -367,7 +372,7 @@ async fn an_administrators_app_token_opens_only_app_routes() {
     let admin = app.setup_admin().await;
     app.media_file("movies/Film (2020).mkv", 2048);
     app.library(&admin, "Movies", "movies", "movies").await;
-    let (token, _) = app.app_token(1, "library play playlists profiles requests approvals").await;
+    let (token, _) = app.app_token(1, "library play playlists profiles requests approvals activity").await;
     for (method, path) in api_routes() {
         if PUBLIC.iter().any(|(m, p)| *m == method && *p == path) {
             // No sign-in needed (and logout would end the grant).
@@ -378,6 +383,10 @@ async fn an_administrators_app_token_opens_only_app_routes() {
         let first_party = FIRST_PARTY.iter().chain(ADMIN).any(|(m, p)| *m == method && *p == path);
         if first_party {
             assert_eq!((status, challenge.as_str()), (StatusCode::FORBIDDEN, NO_SCOPE), "{method} {uri}");
+        } else if app_route(&method, &path) == Some(Need::Scope(Scope::Server)) {
+            // Administration: not without `server`.
+            let expected = r#"Bearer error="insufficient_scope", scope="server""#;
+            assert_eq!((status, challenge.as_str()), (StatusCode::FORBIDDEN, expected), "{method} {uri}");
         } else if app_route(&method, &path).is_some() {
             assert!(status != StatusCode::UNAUTHORIZED && challenge.is_empty(), "{method} {uri}: {status} {challenge}");
         } else if COOKIE_ONLY.iter().any(|(m, p)| *m == method && *p == path) {
@@ -402,17 +411,30 @@ async fn each_scope_opens_only_its_routes() {
     let app = TestApp::new().await;
     let admin = app.setup_admin().await;
     let (_, ann) = app.user(&admin, "ann", json!({})).await;
-    for scope in ["library", "play", "playlists", "profiles", "requests", "approvals"] {
+    for scope in ["library", "play", "playlists", "profiles", "requests", "approvals", "activity", "server"] {
         let (token, _) = app.app_token(ann, scope).await;
         for (method, path, need) in APP_ROUTES {
             let uri = concrete(path);
             let (status, challenge) = status_of(&app, bearer(method, &uri, &token)).await;
-            match need {
-                Need::Scope(needed) if needed.name() != scope => {
+            // The scope a token without it is told of, when this one doesn't open the route.
+            let refused = match need {
+                Need::Scope(needed) if needed.name() != scope => Some(needed),
+                Need::Either(one, other) if one.name() != scope && other.name() != scope => Some(one),
+                _ => None,
+            };
+            match refused {
+                Some(needed) => {
                     let expected = format!(r#"Bearer error="insufficient_scope", scope="{}""#, needed.name());
                     assert_eq!((status, challenge), (StatusCode::FORBIDDEN, expected), "{scope}: {method} {uri}");
                 }
-                _ => assert!(challenge.is_empty(), "{scope}: {method} {uri}: {status} {challenge}"),
+                None => assert!(challenge.is_empty(), "{scope}: {method} {uri}: {status} {challenge}"),
+            }
+            // The rating tables are any signed-in user's, as in the web app:
+            // the scope only lets an app read them.
+            if scope == "server" && *need == Need::Scope(Scope::Server) && *path != "/api/ratings/systems" {
+                // Ann isn't an administrator: the scope opens the route,
+                // her role doesn't let her through.
+                assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
             }
         }
     }
@@ -423,8 +445,16 @@ async fn each_scope_opens_only_its_routes() {
         denied.body["message"],
         "this app wasn't allowed to make, change and delete the profile's playlists: sign in to it again to allow it"
     );
+    let devices = app.get("/api/me/devices", &library).await;
+    assert_eq!(devices.body["message"], "apps can't do that: use Pley's web app");
     let settings = app.get("/api/settings", &library).await;
     assert_eq!(settings.body["message"], "apps can't do that: use Pley's web app");
+    let users = app.get("/api/users", &library).await;
+    assert_eq!(
+        users.body["message"],
+        "this app wasn't allowed to manage the server's libraries, accounts and invitations, and see its dashboard, \
+         where the account is an administrator: sign in to it again to allow it"
+    );
 }
 
 #[tokio::test]
@@ -568,17 +598,24 @@ async fn an_administrators_app_sees_everything_but_administers_nothing() {
     assert_eq!(app.get(&format!("/api/playback/{session}"), &admin).await.status, StatusCode::OK);
     assert_eq!(app.get(&format!("/api/playback/{session}"), &token).await.status, StatusCode::FORBIDDEN);
     assert_eq!(app.delete(&format!("/api/playback/{session}"), &token).await.status, StatusCode::FORBIDDEN);
-    assert_eq!(app.get("/api/activity", &token).await.status, StatusCode::FORBIDDEN);
+    let activity = app.get("/api/activity", &token).await;
+    assert_eq!((activity.status, &activity.body["code"]), (StatusCode::FORBIDDEN, &json!("insufficient_scope")));
+    let paths = &app.get("/api/libraries", &token).await.body[0]["paths"];
+    assert_eq!(paths, &json!([]), "no folders");
+    assert_eq!(me.body["account_admin"], json!(true), "pley's own apps are told the account's role");
 
     // Empty curated collections are for administrators to fill.
     let empty = app.post(&format!("/api/libraries/{movies}/collections"), &admin, json!({"title": "Empty"})).await;
     assert_eq!(empty.status, StatusCode::CREATED, "{:?}", empty.body);
     let collection = empty.body["id"].as_i64().unwrap();
     let titles = |reply: common::Reply| common::titles(&reply.body["collections"]);
+    // Administrators see every collection, Pley's own, still empty, too.
     let listed = titles(app.get(&format!("/api/libraries/{movies}/collections"), &admin).await);
-    assert_eq!(listed, ["Empty"]);
+    assert_eq!(listed, ["Empty", "Recently Added", "Recently Released", "Top Rated", "Top Unwatched"]);
+    // The app, like anyone else, only those with something to show: the
+    // films here have no dates or ratings.
     let listed = titles(app.get(&format!("/api/libraries/{movies}/collections"), &token).await);
-    assert!(listed.is_empty(), "{listed:?}");
+    assert_eq!(listed, ["Recently Added"]);
     assert_eq!(app.get(&format!("/api/collections/{collection}"), &token).await.status, StatusCode::NOT_FOUND);
 
     // Administration, and turning into a session.
@@ -593,6 +630,535 @@ async fn an_administrators_app_sees_everything_but_administers_nothing() {
         assert_eq!((reply.status, &reply.body["code"]), (StatusCode::FORBIDDEN, &json!("insufficient_scope")));
         assert!(reply.body.get("token").is_none());
     }
+}
+
+#[tokio::test]
+async fn pleys_own_app_allowed_server_manages_it_on_an_administrators_account() {
+    let app = TestApp::new().await;
+    let admin = app.setup_admin().await;
+    app.media_file("movies/Film (2020).mkv", 2048);
+    let movies = app.library(&admin, "Movies", "movies", "movies").await;
+    let film = app.ids(movies, &admin).await["Film"];
+    let (_, bob_id) = app.user(&admin, "bob", json!({})).await;
+    let (token, _) = app.app_token(1, "library play server").await;
+
+    // Still no administrator itself, told the account's role.
+    let me = app.get("/api/auth/me", &token).await;
+    assert_eq!((&me.body["is_admin"], &me.body["account_admin"]), (&json!(false), &json!(true)));
+    assert_eq!(me.body["scope"], "library play server");
+
+    // What Settings in the web app do, but for what holds keys and passwords.
+    assert_eq!(app.get("/api/system", &token).await.status, StatusCode::OK);
+    for (method, path) in ADMIN {
+        let uri = concrete(path);
+        let (status, challenge) = status_of(&app, bearer(method, &uri, &token)).await;
+        assert_eq!((status, challenge.as_str()), (StatusCode::FORBIDDEN, NO_SCOPE), "{method} {uri}");
+    }
+    let users = app.get("/api/users", &token).await;
+    assert_eq!((users.status, users.body.as_array().map(Vec::len)), (StatusCode::OK, Some(2)));
+    let carol = json!({"username": "carol", "password": "test-pass-1"});
+    assert_eq!(app.app_call(Method::POST, "/api/users", &token, Some(carol)).await.status, StatusCode::CREATED);
+    let library = format!("/api/libraries/{movies}");
+    let renamed = app.app_call(Method::PATCH, &library, &token, Some(json!({"name": "Films"}))).await;
+    assert_eq!(renamed.status, StatusCode::OK, "{:?}", renamed.body);
+    let invite = app.app_call(Method::POST, "/api/invites", &token, Some(json!({}))).await;
+    assert_eq!(invite.status, StatusCode::CREATED, "{:?}", invite.body);
+    // Everyone's pictures, as the list of accounts shows them, outside the household too.
+    let avatars = app.state.config.data_dir.join("avatars");
+    std::fs::create_dir_all(&avatars).unwrap();
+    std::fs::write(avatars.join("bob.jpg"), [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+    sqlx::query("UPDATE users SET avatar = 'bob.jpg', home = 0 WHERE id = ?")
+        .bind(bob_id)
+        .execute(&app.state.db.write)
+        .await
+        .unwrap();
+    let picture = format!("/api/users/{bob_id}/avatar");
+    assert_eq!(app.app_call(Method::GET, &picture, &token, None).await.status, StatusCode::OK);
+    // With the folders it changes, and the dashboard's view of playback.
+    let paths = &app.get("/api/libraries", &token).await.body[0]["paths"];
+    assert_eq!(paths, &json!([app.media_path("movies")]));
+    for user in [1, bob_id] {
+        sqlx::query("INSERT INTO play_history (user_id, item_id, viewed_at) VALUES (?, ?, 1)")
+            .bind(user)
+            .bind(film)
+            .execute(&app.state.db.write)
+            .await
+            .unwrap();
+    }
+    assert_eq!(app.get("/api/history?all=1", &token).await.body["total"], json!(2));
+    assert_eq!(app.get("/api/activity", &token).await.status, StatusCode::OK);
+    // The dashboard removes anyone's play, as the web's does.
+    let theirs: i64 = sqlx::query_scalar("SELECT id FROM play_history WHERE user_id = ?")
+        .bind(bob_id)
+        .fetch_one(&app.state.db.read)
+        .await
+        .unwrap();
+    let (viewer, _) = app.app_token(1, "library play").await;
+    assert_eq!(app.delete(&format!("/api/history/{theirs}"), &viewer).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(app.delete(&format!("/api/history/{theirs}"), &token).await.status, StatusCode::NO_CONTENT);
+    sqlx::query("INSERT INTO play_history (user_id, item_id, viewed_at) VALUES (?, ?, 1)")
+        .bind(bob_id)
+        .bind(film)
+        .execute(&app.state.db.write)
+        .await
+        .unwrap();
+
+    // Its own sign-in stays in Account, as for the web's administrators.
+    let own = [
+        app.app_call(Method::PATCH, "/api/users/1", &token, Some(json!({"password": "another-pass-2"}))).await,
+        app.app_call(Method::PATCH, "/api/users/1", &token, Some(json!({"pin": "1234"}))).await,
+        app.app_call(Method::DELETE, "/api/users/1/two-step", &token, None).await,
+        app.app_call(Method::DELETE, "/api/users/1/devices", &token, None).await,
+        app.app_call(Method::DELETE, "/api/users/1", &token, None).await,
+        app.app_call(Method::PATCH, "/api/users/1", &token, Some(json!({"display_name": "Boss"}))).await,
+        app.app_call(Method::GET, "/api/users/1/devices", &token, None).await,
+        app.app_call(Method::GET, "/api/users/1/apps", &token, None).await,
+        app.app_call(Method::DELETE, "/api/users/1/apps/1", &token, None).await,
+    ];
+    for reply in own {
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{:?}", reply.body);
+    }
+    // Nor its own role, with another administrator left to keep the server
+    // managed: whoever holds a lost phone could take it from its owner.
+    app.user(&admin, "ella", json!({"is_admin": true})).await;
+    for is_admin in [false, true] {
+        let reply = app.app_call(Method::PATCH, "/api/users/1", &token, Some(json!({"is_admin": is_admin}))).await;
+        assert_eq!(
+            (reply.status, &reply.body["message"]),
+            (StatusCode::BAD_REQUEST, &json!("change your own administrator role in Pley's web app")),
+            "{is_admin}"
+        );
+    }
+    assert_eq!(app.get("/api/auth/me", &admin).await.body["is_admin"], json!(true), "still an administrator");
+    // Others' devices and apps, as the web's Users page shows them.
+    for uri in [format!("/api/users/{bob_id}/devices"), format!("/api/users/{bob_id}/apps")] {
+        assert_eq!(app.get(&uri, &token).await.status, StatusCode::OK, "{uri}");
+    }
+    for (method, uri, body) in [
+        (Method::PUT, "/api/auth/password", Some(json!({"current_password": "secret-one", "new_password": "x"}))),
+        (Method::GET, "/api/me/devices", None),
+        (Method::POST, "/api/auth/switch", Some(json!({"user_id": 1}))),
+        (Method::PATCH, "/api/collections/1", Some(json!({"title": "X"}))),
+    ] {
+        let reply = app.app_call(method, uri, &token, body).await;
+        assert_eq!((reply.status, &reply.body["code"]), (StatusCode::FORBIDDEN, &json!("insufficient_scope")), "{uri}");
+    }
+
+    // Nothing for an account that isn't an administrator, an app by another
+    // publisher, or once the role is gone.
+    let (bobs, _) = app.app_token(bob_id, "library play server").await;
+    assert_eq!(app.get("/api/auth/me", &bobs).await.body["account_admin"], json!(false));
+    let other = third_party_token(&app, 1, "library play server").await;
+    assert_eq!(app.get("/api/auth/me", &other).await.body.get("account_admin"), None, "only pley's own apps are told");
+    let (dora, dora_id) = app.user(&admin, "dora", json!({"is_admin": true})).await;
+    let (doras, _) = app.app_token(dora_id, "library play server").await;
+    assert_eq!(app.get("/api/users", &doras).await.status, StatusCode::OK);
+    let demoted = app.patch(&format!("/api/users/{dora_id}"), &admin, json!({"is_admin": false})).await;
+    assert_eq!(demoted.status, StatusCode::OK, "{:?}", demoted.body);
+    for refused in [&bobs, &other, &doras] {
+        let reply = app.get("/api/users", refused).await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{:?}", reply.body);
+        assert_eq!(app.get("/api/libraries", refused).await.body[0]["paths"], json!([]));
+    }
+    assert_eq!(app.get("/api/history?all=1", &bobs).await.body["total"], json!(1), "her own");
+    let (plain, _) = app.app_token(1, "library play").await;
+    let reply = app.app_call(Method::GET, &picture, &plain, None).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "not outside the household without managing the server");
+    drop(dora);
+}
+
+const OTHER_ADMINS: &str = "another administrator's account is changed in Pley's web app";
+const ADMINS_MADE: &str = "an administrator is made in Pley's web app";
+
+/// Every change Manage server makes to someone else's account `id`, whose
+/// app signed in has grant `grant`: `(method, uri, body)`.
+fn changes_to(id: i64, grant: i64) -> Vec<(Method, String, Option<Value>)> {
+    let user = format!("/api/users/{id}");
+    let mut changes: Vec<_> = [
+        json!({"password": "another-pass-2"}),
+        json!({"pin": "1234"}),
+        json!({"pin": null}),
+        json!({"is_admin": false}),
+        json!({"disabled": true}),
+        json!({"display_name": "Someone"}),
+        json!({"home": false}),
+        json!({"all_libraries": false, "library_ids": []}),
+        json!({"max_age": 12}),
+        json!({"birth_month": "2015-03"}),
+        json!({"show_labels": ["Family"]}),
+        json!({"request_access": "off"}),
+    ]
+    .into_iter()
+    .map(|body| (Method::PATCH, user.clone(), Some(body)))
+    .collect();
+    changes.extend([
+        (Method::DELETE, format!("{user}/devices"), None),
+        (Method::DELETE, format!("{user}/apps/{grant}"), None),
+        (Method::DELETE, format!("{user}/two-step"), None),
+        (Method::DELETE, user, None),
+    ]);
+    changes
+}
+
+/// A new account signed in, with two-step sign-in on and an app signed in.
+struct Changed {
+    id: i64,
+    grant: i64,
+    session: String,
+    app_token: String,
+}
+
+async fn account_to_change(app: &TestApp, admin: &str, username: &str, is_admin: bool) -> Changed {
+    let (session, id) = app.user(admin, username, json!({"is_admin": is_admin})).await;
+    app.turn_on_two_step(&session, "test-pass-1").await;
+    let (app_token, _) = app.app_token(id, "library play").await;
+    let grant = sqlx::query_scalar("SELECT id FROM app_grants WHERE user_id = ?")
+        .bind(id)
+        .fetch_one(&app.state.db.read)
+        .await
+        .unwrap();
+    Changed { id, grant, session, app_token }
+}
+
+/// What a change could touch of account `id`, in one string; `None` once
+/// it is gone.
+async fn account_of(app: &TestApp, id: i64) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT json_array(password_hash, pin_hash, pin_failures, is_admin, disabled, display_name, home,
+                           all_libraries, max_age, max_age_system, birth_month, request_access, managed,
+                           (SELECT COUNT(*) FROM sessions WHERE user_id = u.id),
+                           (SELECT COUNT(*) FROM app_grants WHERE user_id = u.id OR approved_by = u.id),
+                           (SELECT COUNT(*) FROM two_step WHERE user_id = u.id),
+                           (SELECT COUNT(*) FROM recovery_codes WHERE user_id = u.id),
+                           (SELECT COUNT(*) FROM user_label_rules WHERE user_id = u.id),
+                           (SELECT COUNT(*) FROM user_libraries WHERE user_id = u.id))
+         FROM users u WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&app.state.db.read)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn an_app_changes_nothing_of_another_administrators_account() {
+    let app = TestApp::new().await;
+    let admin = app.setup_admin().await;
+    let (_, bob_id) = app.user(&admin, "bob", json!({})).await;
+    let dora = account_to_change(&app, &admin, "dora", true).await;
+    let (dora_id, doras_grant) = (dora.id, dora.grant);
+    let (token, _) = app.app_token(1, "library play server").await;
+    let before = account_of(&app, dora_id).await;
+    assert!(before.is_some());
+
+    // Their role, sign-in, devices and apps and the account itself stay
+    // with the web app: a PIN set while the role was away, and the role
+    // given back, would let whoever holds the token in as them.
+    for (method, uri, body) in changes_to(dora_id, doras_grant) {
+        let reply = app.app_call(method.clone(), &uri, &token, body.clone()).await;
+        assert_eq!(
+            (reply.status, &reply.body["message"]),
+            (StatusCode::FORBIDDEN, &json!(OTHER_ADMINS)),
+            "{method} {uri} {body:?}"
+        );
+    }
+    assert_eq!(account_of(&app, dora_id).await, before, "nothing changed");
+    for signed_in in [&dora.session, &dora.app_token] {
+        assert_eq!(app.get("/api/auth/me", signed_in).await.status, StatusCode::OK, "still signed in");
+    }
+
+    // Nor does an app make an administrator.
+    let eve = json!({"username": "eve", "password": "test-pass-1", "is_admin": true});
+    let bobs = format!("/api/users/{bob_id}");
+    for (method, uri, body) in
+        [(Method::POST, "/api/users", eve), (Method::PATCH, bobs.as_str(), json!({"is_admin": true}))]
+    {
+        let reply = app.app_call(method, uri, &token, Some(body)).await;
+        assert_eq!((reply.status, &reply.body["message"]), (StatusCode::FORBIDDEN, &json!(ADMINS_MADE)), "{uri}");
+    }
+    let users = app.get("/api/users", &admin).await.body;
+    let role =
+        |name: &str| users.as_array().unwrap().iter().find(|u| u["username"] == name).map(|u| u["is_admin"].clone());
+    assert_eq!((role("eve"), role("bob")), (None, Some(json!(false))), "nothing changed");
+
+    // It reads their account, as the list of accounts shows it.
+    let listed = app.get("/api/users", &token).await.body;
+    assert!(listed.as_array().unwrap().iter().any(|u| u["id"] == dora_id));
+    for uri in [format!("/api/users/{dora_id}/devices"), format!("/api/users/{dora_id}/apps")] {
+        let reply = app.get(&uri, &token).await;
+        assert_eq!((reply.status, reply.body.as_array().map(Vec::len)), (StatusCode::OK, Some(1)), "{uri}");
+    }
+
+    // The web's administrators change all of it, as before.
+    for i in 0..changes_to(0, 0).len() {
+        let other = account_to_change(&app, &admin, &format!("admin{i}"), true).await;
+        let (method, uri, body) = changes_to(other.id, other.grant).into_iter().nth(i).unwrap();
+        let reply = app.call(method.clone(), &uri, Some(&admin), body.clone(), &[]).await;
+        assert!(reply.status.is_success(), "{method} {uri} {body:?}: {:?}", reply.body);
+    }
+}
+
+#[tokio::test]
+async fn an_app_changes_other_accounts_and_profiles() {
+    let app = TestApp::new().await;
+    let admin = app.setup_admin().await;
+    let (token, _) = app.app_token(1, "library play server").await;
+
+    // Each change, to an account that isn't an administrator's.
+    for i in 0..changes_to(0, 0).len() {
+        let Changed { id, grant, .. } = account_to_change(&app, &admin, &format!("user{i}"), false).await;
+        let before = account_of(&app, id).await;
+        let (method, uri, body) = changes_to(id, grant).into_iter().nth(i).unwrap();
+        let reply = app.app_call(method.clone(), &uri, &token, body.clone()).await;
+        assert!(reply.status.is_success(), "{method} {uri} {body:?}: {:?}", reply.body);
+        if body != Some(json!({"pin": null})) && body != Some(json!({"is_admin": false})) {
+            assert_ne!(account_of(&app, id).await, before, "{method} {uri} {body:?} changed it");
+        }
+    }
+
+    // And a profile without a password, with its PIN.
+    let kid = json!({"username": "kid", "managed": true, "max_age": 7});
+    let made = app.app_call(Method::POST, "/api/users", &token, Some(kid)).await;
+    assert_eq!(made.status, StatusCode::CREATED, "{:?}", made.body);
+    let kids = format!("/api/users/{}", made.body["id"]);
+    for body in [json!({"pin": "1234"}), json!({"max_age": 9, "display_name": "Kid"}), json!({"pin": null})] {
+        let reply = app.app_call(Method::PATCH, &kids, &token, Some(body)).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    }
+    assert_eq!(app.app_call(Method::DELETE, &kids, &token, None).await.status, StatusCode::NO_CONTENT);
+}
+
+/// The answer to `req`, sent to the server on a task of its own.
+fn sent(app: &TestApp, req: Request<Body>) -> tokio::task::JoinHandle<(StatusCode, Value)> {
+    let api = app.api.clone();
+    tokio::spawn(async move {
+        let resp = api.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    })
+}
+
+#[tokio::test]
+async fn an_account_made_an_administrator_while_an_app_changes_it_is_left_as_it_is() {
+    let app = TestApp::new().await;
+    let admin = app.setup_admin().await;
+    let (token, _) = app.app_token(1, "library play server").await;
+
+    for i in 0..changes_to(0, 0).len() {
+        let Changed { id, grant, .. } = account_to_change(&app, &admin, &format!("user{i}"), false).await;
+        let before = account_of(&app, id).await;
+        let (method, uri, body) = changes_to(id, grant).into_iter().nth(i).unwrap();
+        // The web app makes the account an administrator's while the app's
+        // change is on its way: the role is written, not yet committed, so
+        // the change's first look finds no administrator, and its writes
+        // wait for the server's one write connection.
+        let mut promoting = app.state.db.write.begin().await.unwrap();
+        sqlx::query("UPDATE users SET is_admin = 1 WHERE id = ?").bind(id).execute(&mut *promoting).await.unwrap();
+        let req = Request::builder()
+            .method(method.clone())
+            .uri(&uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        let req = match &body {
+            Some(body) => req.header(header::CONTENT_TYPE, "application/json").body(Body::from(body.to_string())),
+            None => req.body(Body::empty()),
+        };
+        let change = sent(&app, req.unwrap());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!change.is_finished(), "{method} {uri} {body:?} waits for the writer");
+        promoting.commit().await.unwrap();
+
+        // The change, made after the role, finds it and changes nothing.
+        let (status, reply) = change.await.unwrap();
+        assert_eq!(
+            (status, &reply["message"]),
+            (StatusCode::FORBIDDEN, &json!(OTHER_ADMINS)),
+            "{method} {uri} {body:?}"
+        );
+        let demoted = sqlx::query("UPDATE users SET is_admin = 0 WHERE id = ? AND is_admin = 1")
+            .bind(id)
+            .execute(&app.state.db.write)
+            .await
+            .unwrap();
+        assert_eq!(demoted.rows_affected(), 1, "{method} {uri} {body:?}: still an administrator");
+        assert_eq!(account_of(&app, id).await, before, "{method} {uri} {body:?}: nothing else changed");
+    }
+}
+
+#[tokio::test]
+async fn an_app_switched_to_an_administrators_profile_administers_nothing() {
+    let app = TestApp::new().await;
+    let admin = app.setup_admin().await;
+    let (_, bob_id) = app.user(&admin, "bob", json!({})).await;
+    let scope = "library play approvals activity server";
+    // Bob's phone, which a cast from the administrator switched to their
+    // profile: it acts as them, allowed by Bob.
+    let issued = app
+        .state
+        .auth
+        .issue(pley::auth::grants::NewGrant {
+            user_id: 1,
+            approved_by: bob_id,
+            client_id: common::ANDROID_APP.into(),
+            client_name: Some("pley".into()),
+            scopes: pley::auth::scopes::Scopes::parse(scope).unwrap(),
+            refresh: true,
+            first_party: true,
+            session_hash: None,
+            user_agent: None,
+            ip: None,
+        })
+        .await
+        .unwrap();
+    let switched = issued.access_token;
+    assert_eq!(app.get("/api/auth/me", &switched).await.body["account_admin"], json!(false));
+    for uri in ["/api/users", "/api/system"] {
+        assert_eq!(app.get(uri, &switched).await.status, StatusCode::FORBIDDEN, "{uri}");
+    }
+    assert_eq!(app.get("/api/libraries", &switched).await.status, StatusCode::OK, "it still plays as them");
+
+    // The administrator's own phone does.
+    let (own, _) = app.app_token(1, scope).await;
+    assert_eq!(app.get("/api/auth/me", &own).await.body["account_admin"], json!(true));
+    assert_eq!(app.get("/api/users", &own).await.status, StatusCode::OK);
+}
+
+/// Tokens of an app by another publisher acting as `user_id`, allowed `scope`.
+async fn third_party_token(app: &TestApp, user_id: i64, scope: &str) -> String {
+    let issued = app
+        .state
+        .auth
+        .issue(pley::auth::grants::NewGrant {
+            user_id,
+            approved_by: user_id,
+            client_id: "https://apps.example.com/player.json".into(),
+            client_name: Some("Example Player".into()),
+            scopes: pley::auth::scopes::Scopes::parse(scope).unwrap(),
+            refresh: true,
+            first_party: false,
+            session_hash: None,
+            user_agent: None,
+            ip: None,
+        })
+        .await
+        .unwrap();
+    issued.access_token
+}
+
+/// Whether `token`'s remote lists the Cast device the server was told of.
+async fn lists_nearby(app: &TestApp, token: &str) -> bool {
+    let devices = app.get("/api/remote/devices?nearby=1", token).await;
+    assert_eq!(devices.status, StatusCode::OK, "{}", devices.text());
+    devices.body.as_array().unwrap().iter().any(|d| d["receiver_id"] == "cast:dev")
+}
+
+/// The devices on the server's network are the home's, as its TVs are: a
+/// home member's own sign-in and Pley's own apps list them, cast to them
+/// and pair with them, and no other app; a cast plays only what the caller
+/// can see.
+#[tokio::test]
+async fn only_home_members_through_pleys_own_apps_reach_the_devices_on_the_network() {
+    // A Cast device the server was told of, and where it reaches Pley;
+    // nothing below connects to it.
+    let app = TestApp::with_config(|config| {
+        config.cast_fixed.device = Some("127.0.0.1:9".parse().unwrap());
+        config.cast_fixed.server = Some("http://pley.test:7539".into());
+    })
+    .await;
+    let admin = app.setup_admin().await;
+    let on = app.put("/api/settings", &admin, json!({"cast_devices": true})).await;
+    assert_eq!(on.status, StatusCode::OK, "{}", on.text());
+    app.media_file("movies/Film (2020).mkv", 2048);
+    let movies = app.library(&admin, "Movies", "movies", "movies").await;
+    let film = app.ids(movies, &admin).await["Film"];
+    let (_, member_id) = app.user(&admin, "member", json!({"home": true})).await;
+    let (own, _) = app.app_token(member_id, "library play").await;
+    assert!(lists_nearby(&app, &own).await);
+
+    let other = third_party_token(&app, member_id, "library play").await;
+    assert!(!lists_nearby(&app, &other).await);
+    let cast = app.post("/api/remote/devices/cast:dev/cast", &other, json!({"item_id": film})).await;
+    assert_eq!(cast.status, StatusCode::NOT_FOUND, "{}", cast.text());
+    let pairing = app.post("/api/remote/devices/cast:dev/pairing", &other, json!({})).await;
+    assert_eq!(pairing.status, StatusCode::NOT_FOUND, "{}", pairing.text());
+    // Pley's own app gets past that, to the device's own answer.
+    let pairing = app.post("/api/remote/devices/cast:dev/pairing", &own, json!({})).await;
+    assert_eq!((pairing.status, pairing.body["code"].clone()), (StatusCode::CONFLICT, json!("not_pairable")));
+
+    // A home member who can't see the title can't cast it either.
+    let (guest, _) = app.user(&admin, "guest", json!({"home": true, "all_libraries": false, "library_ids": []})).await;
+    assert!(lists_nearby(&app, &guest).await);
+    let hidden = app.post("/api/remote/devices/cast:dev/cast", &guest, json!({"item_id": film})).await;
+    assert_eq!(hidden.status, StatusCode::NOT_FOUND, "{}", hidden.text());
+}
+
+/// The users whose sessions `/api/activity` lists to `token`, sorted.
+async fn activity_users(app: &TestApp, token: &str) -> Vec<i64> {
+    let reply = app.get("/api/activity", token).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let mut users: Vec<i64> =
+        reply.body["sessions"].as_array().unwrap().iter().map(|s| s["user_id"].as_i64().unwrap()).collect();
+    users.sort_unstable();
+    users
+}
+
+#[tokio::test]
+async fn an_administrators_own_app_allowed_activity_sees_everyones_sessions() {
+    let app = TestApp::new().await;
+    let admin = app.setup_admin().await;
+    app.media_file("movies/Film (2020).mkv", 2048);
+    let movies = app.library(&admin, "Movies", "movies", "movies").await;
+    let film = app.ids(movies, &admin).await["Film"];
+    let (bob, bob_id) = app.user(&admin, "bob", json!({})).await;
+    let caps = json!({"containers": ["mkv"], "video_codecs": ["h264"], "audio_codecs": ["aac"]});
+    for token in [&admin, &bob] {
+        let play = app.post("/api/playback", token, json!({"item_id": film, "caps": caps, "mode": "direct"})).await;
+        assert_eq!(play.status, StatusCode::OK, "{:?}", play.body);
+    }
+    assert_eq!(activity_users(&app, &admin).await, [1, bob_id], "the dashboard");
+
+    // One of pley's own apps on the administrator's account, allowed
+    // activity: everyone's, as the dashboard, and none of its counters.
+    let (own, _) = app.app_token(1, "library play activity").await;
+    assert_eq!(activity_users(&app, &own).await, [1, bob_id]);
+    let reply = app.get("/api/activity", &own).await;
+    assert_eq!(reply.body["analysis"], Value::Null);
+    assert_eq!(reply.body["library_work"], Value::Null);
+    assert_eq!((&reply.body["seasons_pending"], &reply.body["previews_pending"]), (&json!(0), &json!(0)));
+    assert_eq!(app.get("/api/auth/me", &own).await.body["is_admin"], json!(false), "still no administrator");
+    // Pley for Home Assistant the same.
+    let home = app
+        .state
+        .auth
+        .issue(pley::auth::grants::NewGrant {
+            user_id: 1,
+            approved_by: 1,
+            client_id: common::HOMEASSISTANT_APP.into(),
+            client_name: Some("pley".into()),
+            scopes: pley::auth::scopes::Scopes::parse("library play activity").unwrap(),
+            refresh: true,
+            first_party: true,
+            session_hash: None,
+            user_agent: Some("pleyHomeAssistant/0.1.0 (Home Assistant 2026.11.0)".into()),
+            ip: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(activity_users(&app, &home.access_token).await, [1, bob_id]);
+
+    // Without activity: refused, as any scope's route.
+    let (play_only, _) = app.app_token(1, "library play").await;
+    let refused = app.get("/api/activity", &play_only).await;
+    assert_eq!((refused.status, &refused.body["code"]), (StatusCode::FORBIDDEN, &json!("insufficient_scope")));
+    assert_eq!(refused.headers[header::WWW_AUTHENTICATE], r#"Bearer error="insufficient_scope", scope="activity""#);
+
+    // A non-administrator's app allowed activity: its own alone.
+    let (bobs, _) = app.app_token(bob_id, "library play activity").await;
+    assert_eq!(activity_users(&app, &bobs).await, [bob_id]);
+    // An app by another publisher allowed activity on the administrator's
+    // account: the administrator's own alone.
+    let other = third_party_token(&app, 1, "library activity").await;
+    assert_eq!(activity_users(&app, &other).await, [1]);
 }
 
 #[tokio::test]
@@ -923,4 +1489,87 @@ async fn administration_refuses_app_tokens_even_on_a_route_apps_may_use() {
         .with_state(app.state.clone());
     let resp = router.oneshot(bearer("GET", "/api/libraries", &token)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn no_answer_an_app_reaches_carries_the_servers_secrets() {
+    let app = TestApp::new().await;
+    let admin = app.setup_admin().await;
+    app.media_file("movies/Film (2020).mkv", 2048);
+    app.library(&admin, "Movies", "movies", "movies").await;
+    // Every key and password the server keeps, set as the web app sets them.
+    let secrets = [
+        "tmdb-secret-1111",
+        "tvdb-secret-2222",
+        "subtitles-key-3333",
+        "subtitles-pass-4444",
+        "radarr-secret-5555",
+        "sonarr-secret-6666",
+        "provider-pass-7777",
+    ];
+    let saved = app
+        .put(
+            "/api/settings",
+            &admin,
+            json!({
+                "tmdb_api_key": secrets[0],
+                "tvdb_api_key": secrets[1],
+                "opensubtitles_api_key": secrets[2],
+                "opensubtitles_username": "someone",
+                "opensubtitles_password": secrets[3],
+                "radarr_url": "http://localhost:7878",
+                "radarr_api_key": secrets[4],
+                "sonarr_url": "http://localhost:8989",
+                "sonarr_api_key": secrets[5],
+            }),
+        )
+        .await;
+    assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+    // A Live TV provider whose password is in its channels' addresses.
+    let source: i64 = sqlx::query_scalar(
+        "INSERT INTO live_sources (name, kind, url, username, password, created_at)
+         VALUES ('Provider', 'xtream', 'http://provider.invalid', 'viewer', ?, 0) RETURNING id",
+    )
+    .bind(secrets[6])
+    .fetch_one(&app.state.db.write)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO live_channels (source_id, key, name, stream_url, position)
+         VALUES (?, '1', 'News', ?, 0)",
+    )
+    .bind(source)
+    .bind(format!("http://provider.invalid/live/viewer/{}/1.ts", secrets[6]))
+    .execute(&app.state.db.write)
+    .await
+    .unwrap();
+
+    // The widest token an app can hold: pley's own, every scope, on the
+    // administrator's account.
+    let (token, _) = app.app_token(1, "library play playlists profiles requests approvals activity server").await;
+    let mut read = 0;
+    for (method, path, _) in APP_ROUTES.iter().filter(|(method, _, _)| *method == "GET") {
+        let uri = concrete(path);
+        let resp = app.api.clone().oneshot(bearer(method, &uri, &token)).await.unwrap();
+        // The event stream and media don't end: what came in a moment is enough.
+        let mut body = resp.into_body().into_data_stream();
+        let mut text = Vec::new();
+        while let Ok(Some(Ok(chunk))) = tokio::time::timeout(Duration::from_millis(200), body.next()).await {
+            text.extend_from_slice(&chunk);
+            if text.len() > 4 << 20 {
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&text);
+        for secret in secrets {
+            assert!(!text.contains(secret), "{method} {uri} carries {secret}: {text}");
+        }
+        read += 1;
+    }
+    assert!(read > 50, "{read} routes read");
+    // The channel is read, without its address; the lineup isn't the app's.
+    let channels = app.get("/api/live/channels", &token).await;
+    assert!(channels.body.to_string().contains("\"News\""), "{:?}", channels.body);
+    let lineup = app.get("/api/live/lineup/page", &token).await;
+    assert_eq!(lineup.status, StatusCode::FORBIDDEN, "{:?}", lineup.body);
 }

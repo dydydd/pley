@@ -37,6 +37,9 @@ pub fn section_type(lib: &LibraryRow) -> &'static str {
         crate::library::LibraryKind::Movies => "movie",
         crate::library::LibraryKind::Shows => "show",
         crate::library::LibraryKind::Music => "artist",
+        // Plex has no audiobook sections; the API lists none (see
+        // `AuthUser::audiobooks`).
+        crate::library::LibraryKind::Audiobooks => "artist",
     }
 }
 
@@ -277,6 +280,9 @@ pub struct Detail {
     pub media: bool,
     /// `Marker`s: intro and credits (`includeMarkers=1` in details).
     pub markers: bool,
+    /// `Label`s, in full details, for those told them (see
+    /// `labels::shown_to`).
+    pub labels: bool,
 }
 
 /// `/api/items/{id}/images/{kind}?v={v}` → `(id, version)`.
@@ -553,7 +559,7 @@ pub fn item_node(
             for (id, title) in &extras.collections {
                 node.push(Node::new("Collection").attr("id", *id).attr("tag", title));
             }
-            for label in &extras.labels {
+            for label in extras.labels.iter().filter(|_| detail.labels) {
                 node.push(Node::new("Label").attr("tag", label));
             }
             for name in &extras.locked {

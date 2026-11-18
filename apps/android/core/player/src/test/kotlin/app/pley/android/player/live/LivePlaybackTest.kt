@@ -8,13 +8,16 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.HttpDataSource
 import app.pley.android.caps.CapsSnapshot
+import app.pley.android.common.UiText
 import app.pley.android.model.BusyConnection
+import app.pley.android.model.Control
 import app.pley.android.model.LivePlan
 import app.pley.android.model.ServerEvent
 import app.pley.android.model.caps.ClientCaps
 import app.pley.android.network.ApiException
 import app.pley.android.testing.Fixtures
 import app.pley.android.network.OfflineException
+import app.pley.android.player.inEnglish
 import app.pley.android.testing.data.FakeLiveTv
 import app.pley.android.testing.player.engine.FakePlayerEngine
 import java.io.IOException
@@ -43,7 +46,20 @@ class LivePlaybackTest {
     private val live = FakeLiveTv()
     private val engines = mutableListOf<FakePlayerEngine>()
     private val events = MutableSharedFlow<ServerEvent>(extraBufferCapacity = 8)
-    private val playback = LivePlayback(live, { FakePlayerEngine().also { engines += it } }, { "android-1" }, scope, events = events)
+    /** What the playback told the app of its session, in order (LiveUpdates.playing). */
+    private val held = mutableListOf<Boolean>()
+
+    /** The sessions it said it watches, in order (RemoteRepository.here). */
+    private val here = mutableListOf<String?>()
+    private val playback = LivePlayback(
+        live,
+        { FakePlayerEngine().also { engines += it } },
+        { "android-1" },
+        scope,
+        events = events,
+        playing = { _, playing -> held += playing },
+        here = { _, id -> here += id },
+    )
 
     @After
     fun close() {
@@ -119,7 +135,7 @@ class LivePlaybackTest {
     @Test
     fun `sound the server converts plays from stream ts where this device decodes it or sends it on as it is`() {
         var caps: CapsSnapshot? = CapsSnapshot(ClientCaps(audioCodecs = listOf("aac", "ac3")), emptyList())
-        val playback = LivePlayback(live, { FakePlayerEngine().also { engines += it } }, { "android-1" }, scope) { caps }
+        val playback = LivePlayback(live, { FakePlayerEngine().also { engines += it } }, { "android-1" }, scope, caps = { caps })
         live.plan = Fixtures.decode<LivePlan>("live/plan.json").copy(audio = "aac", audioCodec = "ac3", audioChannels = 6)
         playback.tune(1)
         settle()
@@ -173,7 +189,7 @@ class LivePlaybackTest {
         settle()
         val failed = playback.state.value.phase as LivePhase.Failed
         assertEquals(LiveTrouble.Kind.Busy, failed.trouble.kind)
-        assertEquals(message, failed.trouble.message)
+        assertEquals(message, failed.trouble.text.inEnglish())
         assertTrue(failed.trouble.canRetry)
         // The stream.ts read as the channel was asked for stops; no HLS was asked for.
         assertEquals(Player.STATE_IDLE, engine().player.playbackState)
@@ -200,7 +216,7 @@ class LivePlaybackTest {
         settle()
         assertEquals("watch 1 android-1 taking 2", live.sent.last())
         // Taken over from here later, the server's sentence says who took it, as it is.
-        assertEquals("Bob started watching Film Four on this connection.", LiveTrouble.of(ApiException(410, "gone", "Bob started watching Film Four on this connection.")).message)
+        assertEquals("Bob started watching Film Four on this connection.", LiveTrouble.of(ApiException(410, "gone", "Bob started watching Film Four on this connection.")).text.inEnglish())
     }
 
     @Test
@@ -220,7 +236,7 @@ class LivePlaybackTest {
         assertEquals(listOf("watch 1 android-1"), live.sent)
         val failed = playback.state.value.phase as LivePhase.Failed
         assertEquals(LiveTrouble.Kind.Busy, failed.trouble.kind)
-        assertEquals(message, failed.trouble.message)
+        assertEquals(message, failed.trouble.text.inEnglish())
     }
 
     @Test
@@ -266,7 +282,7 @@ class LivePlaybackTest {
         settle()
         val failed = playback.state.value.phase as LivePhase.Failed
         assertEquals(LiveTrouble.Kind.Stopped, failed.trouble.kind)
-        assertEquals(why, failed.trouble.message)
+        assertEquals(why, failed.trouble.text.inEnglish())
         // Gone at the server already: not left, not watched again.
         assertEquals(listOf("watch 1 android-1"), live.sent)
     }
@@ -287,7 +303,7 @@ class LivePlaybackTest {
         events.tryEmit(ServerEvent.LiveTakenOver("stream-session", 1, why))
         settle()
         val failed = playback.state.value.phase as LivePhase.Failed
-        assertEquals(LiveTrouble(LiveTrouble.Kind.Stopped, why), failed.trouble)
+        assertEquals(LiveTrouble(LiveTrouble.Kind.Stopped, UiText.Sentence(UiText.raw(why))), failed.trouble)
         assertTrue(failed.trouble.canRetry)
 
         // The 410 and the stream's end that follow change nothing; gone at the server already: not left.
@@ -446,7 +462,7 @@ class LivePlaybackTest {
         playback.resume()
         settle()
         assertEquals(stopped, playback.state.value.phase)
-        assertEquals(LiveTrouble(LiveTrouble.Kind.Stopped, why), (playback.state.value.phase as LivePhase.Failed).trouble)
+        assertEquals(LiveTrouble(LiveTrouble.Kind.Stopped, UiText.Sentence(UiText.raw(why))), (playback.state.value.phase as LivePhase.Failed).trouble)
         assertEquals(listOf("watch 1 android-1"), live.sent)
 
         // Watch again tunes it again.
@@ -454,6 +470,79 @@ class LivePlaybackTest {
         settle()
         assertEquals(2, live.sent.count { it.startsWith("watch 1") })
         assertEquals(LivePhase.Tuning, playback.state.value.phase)
+    }
+
+    @Test
+    fun `stopped from elsewhere, it stops and says who and why`() {
+        playback.tune(1)
+        settle()
+        engine().player.ready()
+        settle()
+        events.tryEmit(ServerEvent.SessionStopped("someone-else", "Bye", byAdmin = true))
+        settle()
+        assertEquals(LivePhase.Playing, playback.state.value.phase)
+
+        events.tryEmit(ServerEvent.SessionStopped("live-1", "Server maintenance", byAdmin = true))
+        settle()
+        val trouble = (playback.state.value.phase as LivePhase.Failed).trouble
+        assertEquals(LiveTrouble(LiveTrouble.Kind.Stopped, LivePlayback.stoppedText("Server maintenance", byAdmin = true)), trouble)
+        assertEquals("Live TV was stopped by the server's administrator.\nServer maintenance", trouble.text.inEnglish())
+        assertTrue(trouble.canRetry)
+        // Gone at the server already: nothing is let go, and nothing tunes it again by itself.
+        assertEquals(listOf("watch 1 android-1"), live.sent)
+        assertEquals("Live TV was stopped from another device.", LivePlayback.stoppedText(null, byAdmin = false).inEnglish())
+    }
+
+    @Test
+    fun `the remote's next and previous change channel, where the player goes through channels`() {
+        val zaps = mutableListOf<Int>()
+        playback.zap = { by -> zaps += by }
+        playback.tune(1)
+        settle()
+        assertEquals(listOf(listOf(Control.Next, Control.Previous)), live.watchedControls)
+        events.tryEmit(ServerEvent.PlayerCommand("live-1", Control.Next))
+        events.tryEmit(ServerEvent.PlayerCommand("live-1", Control.Previous))
+        // No pausing or going back on Live TV, and another session's are someone else's.
+        events.tryEmit(ServerEvent.PlayerCommand("live-1", Control.Pause))
+        events.tryEmit(ServerEvent.PlayerCommand("someone-else", Control.Next))
+        settle()
+        assertEquals(listOf(1, -1), zaps)
+    }
+
+    @Test
+    fun `without channels to go through, it declares and obeys nothing`() {
+        playback.tune(1)
+        settle()
+        assertEquals(listOf(emptyList<Control>()), live.watchedControls)
+        events.tryEmit(ServerEvent.PlayerCommand("live-1", Control.Next))
+        settle()
+        assertEquals(listOf("watch 1 android-1"), live.sent)
+    }
+
+    @Test
+    fun `the event stream is held while a session is`() {
+        playback.tune(1)
+        settle()
+        assertEquals(true, held.last())
+        playback.stop()
+        settle()
+        assertEquals(false, held.last())
+        playback.resume()
+        settle()
+        assertEquals(true, held.last())
+        playback.close()
+        assertEquals(false, held.last())
+    }
+
+    @Test
+    fun `the remote is told which session watches here`() {
+        playback.tune(1)
+        settle()
+        assertEquals("live-1", here.last())
+        playback.stop()
+        settle()
+        assertNull(here.last())
+        playback.close()
     }
 
     @Test

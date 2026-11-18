@@ -16,6 +16,8 @@ use crate::auth::{
 };
 use crate::error::{ApiResult, AppError};
 use crate::events::ServerEvent;
+use crate::i18n;
+use crate::ratings;
 use crate::requests::{self, RequestAccess};
 use crate::state::AppState;
 use crate::streams::{self, SubtitleMode};
@@ -28,17 +30,89 @@ fn check_age(max_age: Option<i64>) -> ApiResult<()> {
     }
 }
 
-async fn admins_left_after(state: &AppState, without: i64) -> ApiResult<i64> {
-    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_admin = 1 AND disabled = 0 AND id != ?")
-        .bind(without)
-        .fetch_one(&state.db.read)
-        .await?)
+/// The rating system an age limit is shown in, as stored: a country with
+/// ratings ("GB"), or "age".
+fn check_system(system: Option<&str>) -> ApiResult<Option<String>> {
+    match system.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(s) if s.eq_ignore_ascii_case(AGE_SYSTEM) => Ok(Some(AGE_SYSTEM.to_owned())),
+        Some(s) => match ratings::system(s) {
+            Some(system) => Ok(Some(system.country.to_owned())),
+            None => Err(AppError::bad_request("unknown rating system")),
+        },
+    }
+}
+
+/// The rating system of plain ages.
+const AGE_SYSTEM: &str = "age";
+
+#[derive(Serialize)]
+pub struct RatingSystems {
+    /// The server's country (ISO 3166-1 alpha-2): its system, when it has
+    /// one, is where an age limit is picked first.
+    region: String,
+    systems: Vec<RatingSystem>,
+}
+
+#[derive(Serialize)]
+struct RatingSystem {
+    country: &'static str,
+    name: &'static str,
+    ratings: Vec<SystemRating>,
+}
+
+#[derive(Serialize)]
+struct SystemRating {
+    name: &'static str,
+    age: i64,
+    /// "film" or "tv"; `None`: both.
+    kind: Option<&'static str>,
+}
+
+/// The rating systems an age limit is picked and shown in, each country's
+/// ratings youngest first. Names are as short as the boards' own allow:
+/// Denmark's "Tilladt for alle" is "A".
+pub async fn rating_systems(State(state): State<AppState>, _user: AuthUser) -> ApiResult<Json<RatingSystems>> {
+    let systems = ratings::SYSTEMS
+        .iter()
+        .map(|s| RatingSystem {
+            country: s.country,
+            name: s.name,
+            ratings: s
+                .ratings
+                .iter()
+                .map(|r| SystemRating {
+                    name: r.short_name(),
+                    age: r.age,
+                    kind: r.kind.map(|k| match k {
+                        ratings::Kind::Film => "film",
+                        ratings::Kind::Tv => "tv",
+                    }),
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(Json(RatingSystems { region: ratings::region(&state.db).await?, systems }))
 }
 
 // ------------------------------------------------------------------ admin: users
 
 pub async fn list_users(State(state): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Vec<UserDto>>> {
-    Ok(Json(accounts::users(&state.db).await?))
+    Ok(Json(accounts::for_administrators(&state.db, accounts::users(&state.db).await?).await?))
+}
+
+/// A user as an administrator sees it: with their birthday.
+async fn admin_view(state: &AppState, id: i64) -> ApiResult<UserDto> {
+    let user = accounts::user(&state.db, id).await?.ok_or_else(|| AppError::not_found("user not found"))?;
+    Ok(accounts::for_administrators(&state.db, vec![user]).await?.remove(0))
+}
+
+/// An age limit is fixed or follows a birthday, not both.
+fn one_limit(max_age: bool, birth_month: bool) -> ApiResult<()> {
+    if max_age && birth_month {
+        return Err(AppError::bad_request("an age limit is fixed or follows a birthday, not both"));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -62,6 +136,18 @@ pub struct NewUser {
     #[serde(default)]
     max_age: Option<i64>,
     #[serde(default)]
+    max_age_system: Option<String>,
+    /// "2015-03": the age limit is the profile's age (see
+    /// `accounts::birthday_limit`), instead of `max_age`.
+    #[serde(default)]
+    birth_month: Option<String>,
+    /// Labels whose titles it sees even above its age limit, and labels
+    /// whose titles it never sees (see `catalog::VISIBLE`).
+    #[serde(default)]
+    show_labels: Vec<String>,
+    #[serde(default)]
+    hide_labels: Vec<String>,
+    #[serde(default)]
     pin: Option<String>,
     /// Left out: profiles without a password and accounts with an age limit
     /// may not ask for titles, others ask an administrator.
@@ -75,12 +161,28 @@ fn yes() -> bool {
 
 pub async fn create_user(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    AdminUser(admin): AdminUser,
     Json(body): Json<NewUser>,
 ) -> ApiResult<(StatusCode, Json<UserDto>)> {
+    if body.is_admin && admin.app.is_some() {
+        return Err(AppError::forbidden(ADMINS_MADE_IN_THE_WEB_APP));
+    }
     let username = body.username.trim().to_owned();
     validate_username(&username)?;
     check_age(body.max_age)?;
+    let max_age_system = check_system(body.max_age_system.as_deref())?;
+    one_limit(body.max_age.is_some(), body.birth_month.is_some())?;
+    let show_labels = accounts::check_label_rules(&body.show_labels)?;
+    let hide_labels = accounts::check_label_rules(&body.hide_labels)?;
+    accounts::check_rules_apart(&show_labels, &hide_labels)?;
+    let birth_month = match body.birth_month.as_deref() {
+        Some(born) => Some(accounts::check_birth_month(born, &accounts::local_month(&state.db).await?)?),
+        None => None,
+    };
+    let max_age = match &birth_month {
+        Some(born) => accounts::birthday_limit(born, &accounts::local_month(&state.db).await?),
+        None => body.max_age,
+    };
     if body.managed && body.is_admin {
         return Err(AppError::bad_request("a managed profile can't be an administrator"));
     }
@@ -106,15 +208,17 @@ pub async fn create_user(
     if exists.is_some() {
         return Err(AppError::conflict(format!("user '{username}' already exists")));
     }
-    let request_access = body.request_access.unwrap_or(if body.managed || body.max_age.is_some() {
+    let request_access = body.request_access.unwrap_or(if body.managed || max_age.is_some() {
         RequestAccess::Off
     } else {
         RequestAccess::Ask
     });
+    // The rules are made with the profile: it never exists without them.
+    let mut tx = state.db.write.begin().await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO users (id, username, password_hash, display_name, is_admin, managed, home, all_libraries, max_age,
-                            pin_hash, request_access, created_at)
-         VALUES ((SELECT last + 1 FROM user_ids), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                            max_age_system, birth_month, pin_hash, request_access, created_at)
+         VALUES ((SELECT last + 1 FROM user_ids), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&username)
     .bind(password_hash)
@@ -123,17 +227,21 @@ pub async fn create_user(
     .bind(body.managed)
     .bind(body.home)
     .bind(body.all_libraries)
-    .bind(body.max_age)
+    .bind(max_age)
+    .bind(max_age_system)
+    .bind(birth_month)
     .bind(pin_hash)
     .bind(request_access.as_str())
     .bind(now())
-    .fetch_one(&state.db.write)
+    .fetch_one(&mut *tx)
     .await?;
+    accounts::add_label_rules(&mut tx, id, "show", &show_labels).await?;
+    accounts::add_label_rules(&mut tx, id, "hide", &hide_labels).await?;
+    tx.commit().await?;
     if !body.all_libraries {
         accounts::set_libraries(&state.db, id, &body.library_ids).await?;
     }
-    let user = accounts::user(&state.db, id).await?.ok_or_else(|| AppError::not_found("user not found"))?;
-    Ok((StatusCode::CREATED, Json(user)))
+    Ok((StatusCode::CREATED, Json(admin_view(&state, id).await?)))
 }
 
 #[derive(Deserialize)]
@@ -154,6 +262,19 @@ pub struct UserPatch {
     library_ids: Option<Vec<i64>>,
     #[serde(default, deserialize_with = "nullable")]
     max_age: Option<Option<i64>>,
+    /// `null`: the server's country's.
+    #[serde(default, deserialize_with = "nullable")]
+    max_age_system: Option<Option<String>>,
+    /// "2015-03": the age limit follows the profile's age from now on;
+    /// `null` stops it following (the limit stays as it is). A `max_age`
+    /// stops it too.
+    #[serde(default, deserialize_with = "nullable")]
+    birth_month: Option<Option<String>>,
+    /// Replace the profile's label rules (see [`NewUser`]).
+    #[serde(default)]
+    show_labels: Option<Vec<String>>,
+    #[serde(default)]
+    hide_labels: Option<Vec<String>>,
     /// `null` removes the PIN.
     #[serde(default, deserialize_with = "nullable")]
     pin: Option<Option<String>>,
@@ -168,7 +289,26 @@ pub async fn update_user(
     Json(body): Json<UserPatch>,
 ) -> ApiResult<Json<UserDto>> {
     let current = accounts::user(&state.db, id).await?.ok_or_else(|| AppError::not_found("user not found"))?;
-    // Check everything first: a refused update changes nothing.
+    // Check everything first: a refused update changes nothing. One's own
+    // is refused below, in its own words. Another administrator's account
+    // is looked at again as the update is written (see
+    // `not_another_administrator`): this is only the first look. Whether an
+    // administrator is left is counted only there.
+    if admin.app.is_some() && id != admin.id {
+        if current.is_admin {
+            return Err(AppError::forbidden(OTHER_ADMINS_IN_THE_WEB_APP));
+        }
+        if body.is_admin == Some(true) {
+            return Err(AppError::forbidden(ADMINS_MADE_IN_THE_WEB_APP));
+        }
+    }
+    if body.display_name.is_some() {
+        not_ones_own_from_an_app(&admin, id, "change your own name in Pley's web app")?;
+    }
+    if body.is_admin.is_some() {
+        // Whoever holds a lost phone could otherwise take its owner's role.
+        not_ones_own_from_an_app(&admin, id, "change your own administrator role in Pley's web app")?;
+    }
     if let Some(password) = &body.password {
         // One's own, from Account, which asks for the current one first and
         // signs one's other devices out: a session alone isn't enough.
@@ -177,25 +317,31 @@ pub async fn update_user(
         }
         validate_password(password, &current.username)?;
     }
-    if let Some(is_admin) = body.is_admin {
-        if !is_admin && current.is_admin && admins_left_after(&state, id).await? == 0 {
-            return Err(AppError::bad_request("Pley needs at least one administrator"));
-        }
-        if is_admin && current.managed {
-            return Err(AppError::bad_request("a managed profile can't be an administrator"));
-        }
+    if body.is_admin == Some(true) && current.managed {
+        return Err(AppError::bad_request("a managed profile can't be an administrator"));
     }
-    if body.disabled == Some(true) {
-        if id == admin.id {
-            return Err(AppError::bad_request("you can't disable your own account"));
-        }
-        if current.is_admin && admins_left_after(&state, id).await? == 0 {
-            return Err(AppError::bad_request("Pley needs at least one administrator"));
-        }
+    if body.disabled == Some(true) && id == admin.id {
+        return Err(AppError::bad_request("you can't disable your own account"));
     }
     if let Some(max_age) = body.max_age {
         check_age(max_age)?;
     }
+    let max_age_system = match &body.max_age_system {
+        Some(system) => Some(check_system(system.as_deref())?),
+        None => None,
+    };
+    one_limit(body.max_age.is_some(), matches!(body.birth_month, Some(Some(_))))?;
+    let month = accounts::local_month(&state.db).await?;
+    let birth_month = match &body.birth_month {
+        Some(Some(born)) => Some(Some(accounts::check_birth_month(born, &month)?)),
+        Some(None) => Some(None),
+        // A fixed limit (or none) replaces one that follows a birthday.
+        None => body.max_age.is_some().then_some(None),
+    };
+    let max_age = match &birth_month {
+        Some(Some(born)) => Some(accounts::birthday_limit(born, &month)),
+        _ => body.max_age,
+    };
     if body.pin.is_some() && id == admin.id {
         // As the password: from Account, which asks for the password. A PIN
         // switches a profile to this one without its two-step code.
@@ -204,53 +350,81 @@ pub async fn update_user(
     if let Some(Some(pin)) = body.pin.as_ref().map(|p| p.as_deref().filter(|p| !p.is_empty())) {
         accounts::validate_pin(pin)?;
     }
+    let show_labels = body.show_labels.as_deref().map(accounts::check_label_rules).transpose()?;
+    let hide_labels = body.hide_labels.as_deref().map(accounts::check_label_rules).transpose()?;
+    if show_labels.is_some() || hide_labels.is_some() {
+        // A list left out stays as it is, and is checked against the other.
+        let show = match &show_labels {
+            Some(show) => show.clone(),
+            None => accounts::label_rules(&state.db, id, "show").await?,
+        };
+        let hide = match &hide_labels {
+            Some(hide) => hide.clone(),
+            None => accounts::label_rules(&state.db, id, "hide").await?,
+        };
+        accounts::check_rules_apart(&show, &hide)?;
+    }
 
     // What the user may see changes: their devices are told to fetch it again.
-    let sees_otherwise =
-        body.is_admin.is_some() || body.all_libraries.is_some() || body.library_ids.is_some() || body.max_age.is_some();
-    if let Some(password) = body.password {
-        let hash = hash_password(password).await?;
+    let sees_otherwise = body.is_admin.is_some()
+        || body.all_libraries.is_some()
+        || body.library_ids.is_some()
+        || max_age.is_some()
+        || show_labels.is_some()
+        || hide_labels.is_some();
+    // Hashed before the writer is taken: Argon2 takes a while, and holding
+    // the writer holds up every other write (see `crate::db`).
+    let password_hash = match body.password {
+        Some(password) => Some(hash_password(password).await?),
+        None => None,
+    };
+    let pin_hash = match body.pin {
+        Some(Some(pin)) if !pin.is_empty() => Some(Some(hash_password(pin).await?)),
+        Some(_) => Some(None),
+        None => None,
+    };
+
+    // One transaction: an update lands whole or not at all, an app's on
+    // another account only while it isn't an administrator's, and one that
+    // takes a role or an account away only while another administrator is
+    // left.
+    let mut tx = state.db.write.begin().await?;
+    not_another_administrator(&mut tx, &admin, id).await?;
+    if body.is_admin == Some(false) || body.disabled == Some(true) {
+        not_the_last_administrator(&mut tx, id).await?;
+    }
+    if let Some(hash) = password_hash {
         sqlx::query("UPDATE users SET password_hash = ?, managed = 0 WHERE id = ?")
             .bind(hash)
             .bind(id)
-            .execute(&state.db.write)
+            .execute(&mut *tx)
             .await?;
         // Sign the user out everywhere else, and every app using the account
         // or allowed by it (an administrator's own included), with the
         // sign-ins of apps in progress: codes not exchanged yet, and TVs
         // allowed that haven't asked for their answer yet. Their tokens for
-        // other apps end too.
+        // other apps end too. The caches forget them once this commits.
         if id != admin.id {
-            sqlx::query("DELETE FROM sessions WHERE user_id = ?").bind(id).execute(&state.db.write).await?;
+            sqlx::query("DELETE FROM sessions WHERE user_id = ?").bind(id).execute(&mut *tx).await?;
         }
         state.oauth.forget_user(id);
-        state.auth.end_apps(id).await?;
-        state.auth.end_compatibility_tokens(id).await?;
+        crate::auth::grants::delete_for_within(&mut tx, id).await?;
+        crate::auth::compatibility::delete_for_within(&mut tx, id).await?;
     }
     if let Some(name) = body.display_name {
         let name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
-        sqlx::query("UPDATE users SET display_name = ? WHERE id = ?")
-            .bind(name)
-            .bind(id)
-            .execute(&state.db.write)
-            .await?;
+        sqlx::query("UPDATE users SET display_name = ? WHERE id = ?").bind(name).bind(id).execute(&mut *tx).await?;
     }
+    // From an app, only `false` on an account that isn't an administrator's
+    // gets here (see the checks above): an app gives and takes no one's role.
     if let Some(is_admin) = body.is_admin {
-        sqlx::query("UPDATE users SET is_admin = ? WHERE id = ?")
-            .bind(is_admin)
-            .bind(id)
-            .execute(&state.db.write)
-            .await?;
+        sqlx::query("UPDATE users SET is_admin = ? WHERE id = ?").bind(is_admin).bind(id).execute(&mut *tx).await?;
     }
     if let Some(home) = body.home {
-        sqlx::query("UPDATE users SET home = ? WHERE id = ?").bind(home).bind(id).execute(&state.db.write).await?;
+        sqlx::query("UPDATE users SET home = ? WHERE id = ?").bind(home).bind(id).execute(&mut *tx).await?;
     }
     if let Some(disabled) = body.disabled {
-        sqlx::query("UPDATE users SET disabled = ? WHERE id = ?")
-            .bind(disabled)
-            .bind(id)
-            .execute(&state.db.write)
-            .await?;
+        sqlx::query("UPDATE users SET disabled = ? WHERE id = ?").bind(disabled).bind(id).execute(&mut *tx).await?;
         // Apps it was signing in (a code not exchanged yet, a TV allowed
         // that hasn't asked for its answer yet) get nothing, rather than
         // signed in should the account be enabled again.
@@ -259,47 +433,50 @@ pub async fn update_user(
         }
     }
     if let Some(all) = body.all_libraries {
-        sqlx::query("UPDATE users SET all_libraries = ? WHERE id = ?")
-            .bind(all)
-            .bind(id)
-            .execute(&state.db.write)
-            .await?;
+        sqlx::query("UPDATE users SET all_libraries = ? WHERE id = ?").bind(all).bind(id).execute(&mut *tx).await?;
     }
     if let Some(ids) = &body.library_ids {
-        accounts::set_libraries(&state.db, id, ids).await?;
+        accounts::set_libraries_within(&mut tx, id, ids).await?;
     }
-    if let Some(max_age) = body.max_age {
-        sqlx::query("UPDATE users SET max_age = ? WHERE id = ?")
-            .bind(max_age)
-            .bind(id)
-            .execute(&state.db.write)
-            .await?;
+    if let Some(labels) = &show_labels {
+        accounts::set_label_rules(&mut tx, id, "show", labels).await?;
     }
-    if let Some(pin) = body.pin {
-        let hash = match pin.filter(|p| !p.is_empty()) {
-            Some(pin) => Some(hash_password(pin).await?),
-            None => None,
-        };
+    if let Some(labels) = &hide_labels {
+        accounts::set_label_rules(&mut tx, id, "hide", labels).await?;
+    }
+    if let Some(born) = &birth_month {
+        sqlx::query("UPDATE users SET birth_month = ? WHERE id = ?").bind(born).bind(id).execute(&mut *tx).await?;
+    }
+    if let Some(max_age) = max_age {
+        sqlx::query("UPDATE users SET max_age = ? WHERE id = ?").bind(max_age).bind(id).execute(&mut *tx).await?;
+    }
+    if let Some(system) = max_age_system {
+        sqlx::query("UPDATE users SET max_age_system = ? WHERE id = ?").bind(system).bind(id).execute(&mut *tx).await?;
+    }
+    if let Some(hash) = pin_hash {
         sqlx::query("UPDATE users SET pin_hash = ?, pin_failures = 0 WHERE id = ?")
             .bind(hash)
             .bind(id)
-            .execute(&state.db.write)
+            .execute(&mut *tx)
             .await?;
     }
     if let Some(access) = body.request_access {
         sqlx::query("UPDATE users SET request_access = ? WHERE id = ?")
             .bind(access.as_str())
             .bind(id)
-            .execute(&state.db.write)
+            .execute(&mut *tx)
             .await?;
-    } else if current.max_age.is_none() && matches!(body.max_age, Some(Some(_))) {
+    } else if current.max_age.is_none() && matches!(max_age, Some(Some(_))) {
         // An age limit added: the account no longer asks until an
         // administrator lets it, as those made with one.
         sqlx::query("UPDATE users SET request_access = 'off' WHERE id = ? AND request_access = 'ask'")
             .bind(id)
-            .execute(&state.db.write)
+            .execute(&mut *tx)
             .await?;
     }
+    tx.commit().await?;
+    // Its sessions, and every app and compatibility token acting as it or
+    // allowed by it: what a new password ended, and what a new role changes.
     state.auth.forget_user(id);
     if sees_otherwise {
         state.events.send(ServerEvent::OwnLibrariesChanged { user_id: id });
@@ -309,7 +486,7 @@ pub async fn update_user(
     if body.request_access.is_some() || sees_otherwise {
         state.events.send(ServerEvent::RequestsSettingsChanged { user_id: Some(id) });
     }
-    Ok(Json(accounts::user(&state.db, id).await?.ok_or_else(|| AppError::not_found("user not found"))?))
+    Ok(Json(admin_view(&state, id).await?))
 }
 
 pub async fn delete_user(
@@ -323,6 +500,10 @@ pub async fn delete_user(
     let avatar: Option<Option<String>> =
         sqlx::query_scalar("SELECT avatar FROM users WHERE id = ?").bind(id).fetch_optional(&state.db.read).await?;
     let mut tx = state.db.write.begin().await?;
+    not_another_administrator(&mut tx, &admin, id).await?;
+    // Whoever deletes is an administrator, unless another took their role
+    // meanwhile.
+    not_the_last_administrator(&mut tx, id).await?;
     // Requests others follow stay, with a new maker.
     let told = requests::hand_down(&mut tx, id).await?;
     let result = sqlx::query("DELETE FROM users WHERE id = ?").bind(id).execute(&mut *tx).await?;
@@ -419,10 +600,67 @@ pub async fn sign_out_device(
 
 pub async fn user_devices(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<Vec<DeviceDto>>> {
+    not_ones_own_from_an_app(&admin, id, "see your own devices in Pley's web app")?;
     Ok(Json(devices_of(&state, id, None).await?))
+}
+
+/// What makes an administrator, and other administrators' accounts, stay
+/// with Pley's web app: an app that manages the server makes no account
+/// one, and changes nothing of another administrator's account (their role,
+/// password, PIN, two-step sign-in, devices and apps, name, libraries,
+/// whether it is disabled, the account itself). Either would let whoever
+/// holds the app's token take an administrator's place in the web app,
+/// where the server's keys and passwords are (a PIN set while the role is
+/// away, then the role given back), or lock the other administrators out.
+pub(super) const ADMINS_MADE_IN_THE_WEB_APP: &str = "an administrator is made in Pley's web app";
+pub(super) const OTHER_ADMINS_IN_THE_WEB_APP: &str = "another administrator's account is changed in Pley's web app";
+
+/// Refuses an app that manages the server on another administrator's
+/// account (see [`OTHER_ADMINS_IN_THE_WEB_APP`]); anyone else goes on.
+/// Called first in the write transaction that then changes the account:
+/// SQLite's transactions are serializable, and the server's one write
+/// connection runs no other write until this one ends, so the role read
+/// here is the one every write after it lands on. An account made an
+/// administrator after a handler's first look is refused here, not changed.
+pub(super) async fn not_another_administrator(
+    conn: &mut sqlx::SqliteConnection,
+    by: &AuthUser,
+    id: i64,
+) -> ApiResult<()> {
+    if by.app.is_none() || id == by.id {
+        return Ok(());
+    }
+    let is_admin: Option<bool> =
+        sqlx::query_scalar("SELECT is_admin FROM users WHERE id = ?").bind(id).fetch_optional(&mut *conn).await?;
+    if is_admin == Some(true) { Err(AppError::forbidden(OTHER_ADMINS_IN_THE_WEB_APP)) } else { Ok(()) }
+}
+
+/// Refuses what would leave Pley without an enabled administrator: account
+/// `id`, one now, made not one, disabled or deleted while no other is left.
+/// Called in the write transaction that then makes the change, as
+/// [`not_another_administrator`] is, for the same reason: two
+/// administrators taking each other's role at once each count the other as
+/// they start, and the second to be written finds that it would leave none.
+async fn not_the_last_administrator(conn: &mut sqlx::SqliteConnection, id: i64) -> ApiResult<()> {
+    let (is_admin, others): (bool, i64) = sqlx::query_as(
+        "SELECT COALESCE((SELECT is_admin FROM users WHERE id = ?), 0),
+                (SELECT COUNT(*) FROM users WHERE is_admin = 1 AND disabled = 0 AND id != ?)",
+    )
+    .bind(id)
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if is_admin && others == 0 { Err(AppError::bad_request("Pley needs at least one administrator")) } else { Ok(()) }
+}
+
+/// One's own name, devices and apps stay with Pley's web app (Account), as
+/// for every app, and so does one's own administrator role: one that
+/// manages the server reaches them on others' accounts only.
+pub(super) fn not_ones_own_from_an_app(admin: &AuthUser, id: i64, words: &'static str) -> ApiResult<()> {
+    if admin.app.is_some() && id == admin.id { Err(AppError::bad_request(words)) } else { Ok(()) }
 }
 
 /// Sign a user out on every device and in every app, apps they were signing
@@ -436,8 +674,12 @@ pub async fn sign_out_everywhere(
     if id == admin.id {
         return Err(AppError::bad_request("sign yourself out from your account page instead"));
     }
+    let mut tx = state.db.write.begin().await?;
+    not_another_administrator(&mut tx, &admin, id).await?;
     state.oauth.forget_user(id);
-    state.auth.sign_out_everywhere(id, None).await?;
+    crate::auth::sign_out_within(&mut tx, id, None).await?;
+    tx.commit().await?;
+    state.auth.forget_user(id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -457,6 +699,9 @@ pub struct ProfilePatch {
     subtitle_language: Option<Option<String>>,
     #[serde(default)]
     subtitle_mode: Option<SubtitleMode>,
+    /// One of `crate::i18n::LANGUAGES`; `null`: the server's.
+    #[serde(default, deserialize_with = "nullable")]
+    language: Option<Option<String>>,
 }
 
 pub async fn update_me(
@@ -498,6 +743,9 @@ pub async fn update_me(
             .execute(&state.db.write)
             .await?;
     }
+    if let Some(language) = body.language {
+        save_language(&state, user.id, language).await?;
+    }
     Ok(Json(accounts::user(&state.db, user.id).await?.ok_or(AppError::Unauthorized)?))
 }
 
@@ -524,6 +772,39 @@ pub struct TrackDefaults {
     /// `off`, `forced` (the default), `foreign` or `always`.
     #[serde(default)]
     subtitle_mode: Option<String>,
+}
+
+/// The language the profile sees Pley in: one of `i18n::LANGUAGES`, or
+/// `None` for the server's.
+async fn save_language(state: &AppState, user_id: i64, language: Option<String>) -> ApiResult<()> {
+    if language.as_deref().is_some_and(|code| !i18n::LANGUAGES.contains(&code)) {
+        return Err(AppError::bad_request(format!("language is one of {}, or null", i18n::LANGUAGES.join(", "))));
+    }
+    sqlx::query("UPDATE users SET language = ? WHERE id = ?")
+        .bind(language)
+        .bind(user_id)
+        .execute(&state.db.write)
+        .await?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct LanguageChoice {
+    /// `null` or left out: the server's.
+    #[serde(default)]
+    language: Option<String>,
+}
+
+/// `PUT /api/me/language`: the language the profile sees Pley in, for apps
+/// allowed `play` as for the web (which also has `PATCH /api/me`). The
+/// answer is the profile as `GET /api/auth/me` shows it.
+pub async fn set_language(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<LanguageChoice>,
+) -> ApiResult<Json<Me>> {
+    save_language(&state, user.id, body.language).await?;
+    me(State(state), user).await
 }
 
 /// `PUT /api/me/track-defaults`: the profile's audio and subtitle defaults,
@@ -599,16 +880,7 @@ pub async fn upload_avatar(State(state): State<AppState>, user: AuthUser, body: 
     let jpeg = tokio::task::spawn_blocking(move || accounts::process_avatar(&body))
         .await
         .map_err(|e| AppError::Internal(e.into()))??;
-    let dir = accounts::avatars_dir(&state.config.data_dir);
-    tokio::fs::create_dir_all(&dir).await.map_err(|e| AppError::Internal(e.into()))?;
-    let file = format!("{}-{}.jpg", user.id, now());
-    tokio::fs::write(dir.join(&file), jpeg).await.map_err(|e| AppError::Internal(e.into()))?;
-    let old: Option<String> =
-        sqlx::query_scalar("SELECT avatar FROM users WHERE id = ?").bind(user.id).fetch_one(&state.db.read).await?;
-    sqlx::query("UPDATE users SET avatar = ? WHERE id = ?").bind(&file).bind(user.id).execute(&state.db.write).await?;
-    if let Some(old) = old.filter(|o| *o != file) {
-        let _ = tokio::fs::remove_file(dir.join(old)).await;
-    }
+    accounts::set_avatar(&state.db, &state.config.data_dir, user.id, jpeg).await?;
     Ok(Json(accounts::user(&state.db, user.id).await?.ok_or(AppError::Unauthorized)?))
 }
 
@@ -624,8 +896,9 @@ pub async fn delete_avatar(State(state): State<AppState>, user: AuthUser) -> Api
 
 pub async fn avatar(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>) -> ApiResult<Response> {
     // Apps see their own profile's picture, those of its household, and
-    // those of the people named in the requests they may read.
-    if user.app.is_some() && id != user.id {
+    // those of the people named in the requests they may read; one that
+    // manages the server, everyone's, as its list of accounts shows them.
+    if user.app.is_some() && !user.administers() && id != user.id {
         let household: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM users me, users them
                             WHERE me.id = ? AND them.id = ? AND me.home AND them.home AND NOT them.disabled)",
@@ -661,6 +934,9 @@ struct InviteRow {
     all_libraries: bool,
     library_ids: String,
     max_age: Option<i64>,
+    max_age_system: Option<String>,
+    show_labels: String,
+    hide_labels: String,
     note: Option<String>,
 }
 
@@ -673,6 +949,9 @@ pub struct InviteDto {
     all_libraries: bool,
     library_ids: Vec<i64>,
     max_age: Option<i64>,
+    max_age_system: Option<String>,
+    show_labels: Vec<String>,
+    hide_labels: Vec<String>,
     note: Option<String>,
 }
 
@@ -680,18 +959,23 @@ impl From<InviteRow> for InviteDto {
     fn from(r: InviteRow) -> Self {
         InviteDto {
             library_ids: serde_json::from_str(&r.library_ids).unwrap_or_default(),
+            show_labels: serde_json::from_str(&r.show_labels).unwrap_or_default(),
+            hide_labels: serde_json::from_str(&r.hide_labels).unwrap_or_default(),
             code: r.code,
             created_at: r.created_at,
             expires_at: r.expires_at,
             uses_left: r.uses_left,
             all_libraries: r.all_libraries,
             max_age: r.max_age,
+            max_age_system: r.max_age_system,
             note: r.note,
         }
     }
 }
 
-const INVITE_COLUMNS: &str = "code, created_at, expires_at, uses_left, all_libraries, library_ids, max_age, note";
+const INVITE_COLUMNS: &str =
+    "code, created_at, expires_at, uses_left, all_libraries, library_ids, max_age, max_age_system, show_labels,
+     hide_labels, note";
 
 pub async fn list_invites(State(state): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Vec<InviteDto>>> {
     let rows: Vec<InviteRow> =
@@ -715,6 +999,12 @@ pub struct NewInvite {
     #[serde(default)]
     max_age: Option<i64>,
     #[serde(default)]
+    max_age_system: Option<String>,
+    #[serde(default)]
+    show_labels: Vec<String>,
+    #[serde(default)]
+    hide_labels: Vec<String>,
+    #[serde(default)]
     note: Option<String>,
 }
 
@@ -724,6 +1014,10 @@ pub async fn create_invite(
     Json(body): Json<NewInvite>,
 ) -> ApiResult<(StatusCode, Json<InviteDto>)> {
     check_age(body.max_age)?;
+    let max_age_system = check_system(body.max_age_system.as_deref())?;
+    let show_labels = accounts::check_label_rules(&body.show_labels)?;
+    let hide_labels = accounts::check_label_rules(&body.hide_labels)?;
+    accounts::check_rules_apart(&show_labels, &hide_labels)?;
     let days = body.expires_in_days.unwrap_or(7);
     let uses = body.uses.unwrap_or(1).clamp(1, 1000);
     let code = accounts::invite_code();
@@ -731,8 +1025,9 @@ pub async fn create_invite(
     let expires_at = (days > 0).then(|| created_at + days * 86_400);
     let note = body.note.map(|n| n.trim().chars().take(200).collect::<String>()).filter(|n| !n.is_empty());
     sqlx::query(
-        "INSERT INTO invites (code, created_by, created_at, expires_at, uses_left, all_libraries, library_ids, max_age, note)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO invites (code, created_by, created_at, expires_at, uses_left, all_libraries, library_ids, max_age,
+                              max_age_system, show_labels, hide_labels, note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&code)
     .bind(admin.id)
@@ -742,6 +1037,9 @@ pub async fn create_invite(
     .bind(body.all_libraries)
     .bind(serde_json::to_string(&body.library_ids).unwrap_or_else(|_| "[]".into()))
     .bind(body.max_age)
+    .bind(&max_age_system)
+    .bind(serde_json::to_string(&show_labels).unwrap_or_else(|_| "[]".into()))
+    .bind(serde_json::to_string(&hide_labels).unwrap_or_else(|_| "[]".into()))
     .bind(&note)
     .execute(&state.db.write)
     .await?;
@@ -753,6 +1051,9 @@ pub async fn create_invite(
         all_libraries: body.all_libraries,
         library_ids: body.library_ids,
         max_age: body.max_age,
+        max_age_system,
+        show_labels,
+        hide_labels,
         note,
     };
     Ok((StatusCode::CREATED, Json(invite)))
@@ -838,19 +1139,23 @@ pub async fn accept_invite(
     // lets them (as accounts made with one).
     let request_access = if invite.max_age.is_some() { RequestAccess::Off } else { RequestAccess::Ask };
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO users (id, username, password_hash, display_name, home, all_libraries, max_age, request_access,
-                            created_at)
-         VALUES ((SELECT last + 1 FROM user_ids), ?, ?, ?, 0, ?, ?, ?, ?) RETURNING id",
+        "INSERT INTO users (id, username, password_hash, display_name, home, all_libraries, max_age, max_age_system,
+                            request_access, created_at)
+         VALUES ((SELECT last + 1 FROM user_ids), ?, ?, ?, 0, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&username)
     .bind(hash)
     .bind(body.display_name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()))
     .bind(invite.all_libraries)
     .bind(invite.max_age)
+    .bind(&invite.max_age_system)
     .bind(request_access.as_str())
     .bind(now())
     .fetch_one(&mut *tx)
     .await?;
+    // Made with the account: it never signs in without them.
+    accounts::add_label_rules(&mut tx, id, "show", &invite.show_labels).await?;
+    accounts::add_label_rules(&mut tx, id, "hide", &invite.hide_labels).await?;
     tx.commit().await?;
     if !invite.all_libraries {
         accounts::set_libraries(&state.db, id, &invite.library_ids).await?;

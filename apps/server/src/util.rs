@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// When this server process started (unix ms): part of tags that a newer
 /// version may answer differently.
@@ -50,6 +50,40 @@ pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
 }
 
+/// How fast a count goes up, from where it was first seen, to tell about
+/// how long the rest of it takes.
+#[derive(Debug, Clone, Copy)]
+pub struct Pace {
+    since: Instant,
+    from: u64,
+}
+
+impl Pace {
+    /// A pace measured from now, with `done` done.
+    pub fn new(done: u64) -> Self {
+        Pace { since: Instant::now(), from: done }
+    }
+
+    /// A pace measured since `since`, from `done` done.
+    #[cfg(test)]
+    pub fn measured_since(since: Instant, done: u64) -> Self {
+        Pace { since, from: done }
+    }
+
+    /// About how many seconds the rest of `total` takes, with `done` done.
+    pub fn left(&self, done: u64, total: u64) -> Option<u64> {
+        time_left(self.since.elapsed().as_secs_f64(), done.saturating_sub(self.from), total.saturating_sub(done))
+    }
+}
+
+/// How long `left` more take at the pace of `done` in `elapsed_secs`,
+/// rounded to the second: none before the pace can be told.
+fn time_left(elapsed_secs: f64, done: u64, left: u64) -> Option<u64> {
+    /// The time a pace is measured over before it's trusted.
+    const MEASURED_FOR: f64 = 10.0;
+    (elapsed_secs >= MEASURED_FOR && done > 0).then(|| (left as f64 * elapsed_secs / done as f64).round() as u64)
+}
+
 pub fn system_time_secs(t: SystemTime) -> i64 {
     t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or_default()
 }
@@ -84,6 +118,26 @@ pub fn utc_secs(time: &str) -> Option<i64> {
         return None;
     }
     Some(day + h * 3600 + m * 60 + s)
+}
+
+/// An ISO 8601 time in UTC (`Z` or no zone) or with an offset
+/// (`2024-05-01T14:30:45+02:00`, `…-0500`, `…-05`) → unix seconds.
+pub fn iso_secs(time: &str) -> Option<i64> {
+    let Some(at) = time.get(10..)?.rfind(['+', '-']).map(|at| at + 10) else {
+        return utc_secs(time);
+    };
+    let (clock, zone) = time.split_at(at);
+    let digits: String = zone[1..].chars().filter(|c| *c != ':').collect();
+    if !matches!(digits.len(), 2 | 4) || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let h: i64 = digits[..2].parse().ok()?;
+    let m: i64 = if digits.len() == 4 { digits[2..].parse().ok()? } else { 0 };
+    if h > 23 || m > 59 {
+        return None;
+    }
+    let offset = (h * 3600 + m * 60) * if zone.starts_with('-') { -1 } else { 1 };
+    Some(utc_secs(clock)? - offset)
 }
 
 /// The UTC date and time of unix time `secs`: year, month, day, hour,
@@ -441,12 +495,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn time_left_is_told_from_the_pace_once_it_was_measured_long_enough() {
+        // 500 files in 50 seconds: 1,500 more take 150.
+        assert_eq!(time_left(50.0, 500, 1500), Some(150));
+        assert_eq!(time_left(5.0, 500, 1500), None, "too soon to tell");
+        assert_eq!(time_left(50.0, 0, 1500), None, "none done yet");
+        assert_eq!(time_left(50.0, 500, 0), Some(0));
+    }
+
+    #[test]
     fn utc_times_are_read() {
         assert_eq!(utc_secs("1970-01-02T00:00:01Z"), Some(86_401));
         assert_eq!(utc_secs("2024-05-01T12:30:45.1234567Z"), Some(date_secs("2024-05-01").unwrap() + 45_045));
         assert_eq!(utc(utc_secs("2024-02-29T23:59:59Z").unwrap()), [2024, 2, 29, 23, 59, 59]);
         for wrong in ["2024-05-01", "2024-05-01T12:30Z", "2024-05-01T25:00:00Z", "2024-05-01T12:30:45+02:00", ""] {
             assert_eq!(utc_secs(wrong), None, "{wrong}");
+        }
+    }
+
+    #[test]
+    fn iso_times_are_read_with_their_zone() {
+        let noon = date_secs("2024-05-01").unwrap() + 12 * 3600;
+        assert_eq!(iso_secs("2024-05-01T12:00:00Z"), Some(noon));
+        assert_eq!(iso_secs("2024-05-01T12:00:00.0000000Z"), Some(noon));
+        assert_eq!(iso_secs("2024-05-01T12:00:00"), Some(noon), "no zone is UTC");
+        assert_eq!(iso_secs("2024-05-01T14:00:00+02:00"), Some(noon));
+        assert_eq!(iso_secs("2024-05-01T07:30:00-04:30"), Some(noon));
+        assert_eq!(iso_secs("2024-05-01T07:00:00.123-0500"), Some(noon));
+        assert_eq!(iso_secs("2024-05-01T07:00:00-05"), Some(noon));
+        for wrong in ["2024-05-01", "2024-05-01T12:00:00+2", "2024-05-01T12:00:00+25:00", "2024-05-01T12:00+02:00", ""]
+        {
+            assert_eq!(iso_secs(wrong), None, "{wrong}");
         }
     }
 

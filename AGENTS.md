@@ -35,13 +35,41 @@ too, each app's workflow when that app changes.
 | Web or desktop app | `bun run check` (type check, ESLint, Vitest) |
 | Samsung app, `packages/tv` | `bun run tv:check` |
 | Native Samsung app (`apps/tizen-native`), `packages/tv/test/fixtures` | `dotnet test apps/tizen-native/test/Pley.Tv.Core.Tests`, `dotnet build apps/tizen-native/src/Pley.Tv.Tizen` (and `bun run tv:check` for a fixture) |
-| A NuGet package | `bun scripts/check-nuget-licenses.mjs` |
+| A NuGet package | `bun scripts/check-nuget-licenses.mjs` after a build (`--write` when the packages the app ships change) |
 | LG app | In `apps/webos`, a workspace of its own: `cargo clippy --workspace --all-targets`, `cargo fmt --all`, `cargo test --workspace`; for a Rust dependency there, also `scripts/check-licenses.ps1`, `cargo deny check licenses` and `cargo xtask check --licenses-only` |
 | Roku app | `bun install && bun run check` in `apps/roku` |
 | Kodi add-on | `python -m unittest discover -s tests` in `apps/kodi` |
 | Android app | `./gradlew testDebugUnitTest lintDebug` in `apps/android`; `pwsh ../../scripts/check-android.ps1` after `assembleStoreRelease` when libraries change |
 | Apple app (`apps/apple`) | `swift test --package-path apps/apple/PleyKit`, and the `xcodebuild` builds in [docs/APPLE.md](docs/APPLE.md#building-and-testing) |
 | Docker image | built and checked by CI (`.github/workflows/server.yml`) |
+
+**Languages.** The server and every app (web and desktop, Samsung, LG,
+Android, Apple, Kodi and Roku) are in English, French and Spanish. As the
+last step of a change, put every word people read in each language: no
+text written into the code. Where each keeps its words:
+
+| App | Words | How |
+|---|---|---|
+| Web and desktop | `apps/web/src/i18n/locales/<language>/<namespace>.json`, `apps/desktop/src/locales/<language>.json` | i18next: `t("key")`, `{{name}}` for values, `_one`/`_other` for counts, plus `_many` in French and Spanish; in `<Trans>`, tags named for what they mark, such as `<settings>`, since HTML's `<link>` reads as empty |
+| Server | `apps/server/locales/<language>.json` | `i18n::t(language, "key")`; `t_with` for `{{name}}` values, `t_count` for counts |
+| Samsung, web | `packages/tv/src/i18n/locales/<language>/<area>.json` | its own `t("key")` and `<Trans>`, in i18next's format |
+| Samsung, native | `apps/tizen-native/src/Pley.Tv.Core/Locales/<language>/<area>.json` | `Strings.T`, `Strings.Count`, in i18next's format |
+| LG | `apps/webos/crates/i18n/locales/<language>/<area>.json` | `pley_i18n::t!("area.key")`, checked against the English catalogs as the code builds; `t!("key", name = value)` for `{{name}}`, `count = n` for counts (in i18next's format) |
+| Android | `apps/android/**/src/main/res/values{,-fr,-es}/strings_<area>.xml` | Android resources: `stringResource`, `pluralStringResource` (one and other, plus many in French and Spanish); `UiText` for words made where nothing is drawn; the format functions' words from `formatWords` |
+| Kodi | `apps/kodi/plugin.video.pley/resources/language/resource.language.{en_gb,fr_fr,es_es}/strings.po` | Kodi's .po files, read by the add-on itself (`i18n.py`): `kodi.text("name")` by the names in `kodi.TEXT`, `kodi.count("name", n)` for counts (`kodi.COUNTS`: three ids in a row, one, many and other); `%s` for values, `{name}` where languages order them differently; the windows' XML through `layout.WORDS` |
+| Roku | `apps/roku/locales/<language>/<area>.json` | its own `t("area.key")` (`components/lib/I18n.brs`), in i18next's format; component XML sets no text, the code does |
+| Apple | `apps/apple/{Pley,tvOS,TopShelf}/Localizable.xcstrings`, and `Localizable.xcstrings` in each PleyKit module with words | String Catalogs, the English the key: SwiftUI's literals (`Text("…")`, and `Text("…", bundle: .module)` in a module), `localized("…")` for words made in code, plural variations for counts (one and other, plus many in French and Spanish); `python3 apps/apple/scripts/check-strings.py` checks them |
+
+Write English first, then French and Spanish as a native speaker would
+put them, in Pley's tone, and check that they fit where the TVs' fixed
+layouts show them. Dates and numbers go through the language shown:
+`currentLocale()` (`@/i18n`) on the web, `formatNumber`/`formatDate` in
+`packages/tv`, `Strings.Culture` in the native app, `pley_i18n::number`
+and `decimal` in the LG app, `shownLocale()` and `formatWords` on
+Android, `ShownLanguage.locale` on Apple, `kodi.number`/`kodi.decimal`
+and `words.py` in the Kodi add-on, `i18nNumber` and `Format.brs` on Roku,
+never the browser's or the device's default. The checks above test that
+every language has every key, with the same values in it.
 
 Fix what fails, including tests a change breaks elsewhere. Don't weaken or
 skip a test to make it pass; if a test is wrong, say why in the commit.
@@ -85,7 +113,12 @@ licences ([CONTRIBUTING.md](CONTRIBUTING.md)).
 - A route apps may use is listed in `APP_ROUTES` in
   `apps/server/src/auth/scopes.rs` with the scope it needs, and the count
   in `every_app_route_is_on_a_real_path` goes up with it. Administration
-  never goes to apps.
+  goes only to Pley's own apps, with the `server` scope, on an
+  administrator's account, never with a TV's code. It never reaches what
+  holds the server's keys and passwords (its settings, network, transcoder,
+  Radarr and Sonarr, backups, Live TV's sources), and no answer an app gets
+  carries a secret; nor one's own name, password, PIN, two-step sign-in,
+  devices or apps.
 - Input from outside (requests, files, IPTV providers, metadata sources) is
   bounded and checked: sizes, paths, formats. Pictures are served only as
   JPEG, PNG, WebP or GIF, never SVG or HTML from Pley's address.
@@ -108,6 +141,13 @@ untested-on-device lists, a particular person's devices, addresses or
 providers) never go in a tracked file, and neither do question numbers.
 They go in `docs/QUESTIONS.md` or `docs/*.local.md`, which git ignores.
 
+**A screenshot or recording is shown to the user before it goes public.**
+A screenshot or an animation recorded from a device (`metrics.mjs record`,
+`record-android.mjs`) shows whatever was on its screen: profile names,
+titles, artwork, a server's address. Show the user the finished picture and
+wait for their yes before attaching it to a pull request, an issue or
+anywhere else people can see.
+
 ## Writing
 
 - **Code** reads like the code around it: its naming, structure, error
@@ -116,7 +156,15 @@ They go in `docs/QUESTIONS.md` or `docs/*.local.md`, which git ignores.
   and how. Update the doc a change affects in the same commit (a new route
   goes in [docs/API.md](docs/API.md)).
 - **Changelogs**: a line under `## [Unreleased]` in each changed app's
-  `CHANGELOG.md`, saying what changed as a user sees it.
+  `CHANGELOG.md`, saying what changed as a user sees it. Keep it short and
+  plain, one sentence where it can be: what people see or can now do, not
+  how Pley does it, what it did before or why. Where a setting is and what
+  it does are said once, in the server's line, not again in each app's
+  ("When the server has video transcoding turned off, the Quality menu
+  offers only Original."). Don't open each line with the app or the
+  device ("On Android TV, …"): lines for one device alone follow the
+  others in their section, under one line that names it ("On Android
+  TV:"). Add to a line about the same thing rather than writing another.
 - **Formatting**: `cargo fmt` (max width 120) for Rust; ESLint and the
   existing style for TypeScript. The repository doesn't use Prettier: don't
   run it.
@@ -169,6 +217,26 @@ They go in `docs/QUESTIONS.md` or `docs/*.local.md`, which git ignores.
   a few lines (the screenshots' table aside), no review history, no
   "Generated with …" line. Don't repeat the diff or the docs; point to
   the doc.
+
+## Labels
+
+Every pull request and issue gets labels when it's opened (`gh pr create
+--label`, `gh issue create --label`), and one that came without them is
+labelled when it's picked up. `gh label list` has them all.
+
+- One kind: `bug`, `enhancement`, `documentation` for a change to docs
+  alone, or `release` for a release's pull request.
+- Every area it touches: `area: playback`, `area: live tv`,
+  `area: library`, `area: interface`, `area: integrations` (Plex sync,
+  the compatibility APIs, Requests), `area: languages`, `area: accounts`,
+  `area: remote` (the remote and casting), `area: install` (Docker,
+  Unraid, Synology, Windows, services), `area: build and CI` (tests,
+  builds, workflows, releasing).
+- `security` as well for hardening, or a fix to something that could be
+  abused.
+
+The apps aren't labels: the title names them. Make a new label only when
+no area fits, and say why in the pull request.
 
 ## Platform notes
 

@@ -42,12 +42,14 @@ import app.pley.android.auth.SignIn
 import app.pley.android.common.AppBuild
 import app.pley.android.designsystem.PleyColors
 import app.pley.android.designsystem.icon.PleyIcons
+import app.pley.android.designsystem.text.formatWords
 import app.pley.android.model.SubtitleMode
 import app.pley.android.model.format.formatBytes
 import app.pley.android.screens.PleyKey
+import app.pley.android.data.AdminAccess
 import app.pley.android.screens.account.MeEvent
+import app.pley.android.screens.admin.ManageServerViewModel
 import app.pley.android.screens.account.MeProfile
-import app.pley.android.screens.account.MeUiState
 import app.pley.android.screens.account.MeViewModel
 import app.pley.android.screens.account.SUBTITLE_MODES
 import app.pley.android.screens.account.TrackDefaultsUi
@@ -71,9 +73,10 @@ import app.pley.android.ui.phone.theme.LocalPhoneMetrics
  * in, with Switch profile; Discover and the person's requests, where the
  * server takes requests; the profile's audio and subtitle defaults,
  * saved on the server and read-only (to change on the web) where the server
- * doesn't let apps change them; watch history; this device's downloads,
- * settings and diagnostics; the account on the web, linking a TV, another
- * server; and Sign out, asked first.
+ * doesn't let apps change them; watch history; for an administrator,
+ * managing the server; this device's downloads, settings and diagnostics;
+ * the account on the web, linking a TV, another server; and Sign out,
+ * asked first.
  */
 @Composable
 internal fun MeScreen() {
@@ -83,6 +86,8 @@ internal fun MeScreen() {
     val downloaded by downloads.byItem.collectAsStateWithLifecycle()
     val entry: RequestsEntryViewModel = viewModel(factory = RequestsEntryViewModel.factory)
     val requests by entry.entry.collectAsStateWithLifecycle()
+    val manage: ManageServerViewModel = viewModel(factory = ManageServerViewModel.factory)
+    val adminAccess by manage.access.collectAsStateWithLifecycle()
     val navigator = LocalPhoneNavigator.current
     val shell = LocalPhoneShell.current
     val context = LocalContext.current
@@ -139,6 +144,21 @@ internal fun MeScreen() {
                     SettingsRow(stringResource(R.string.account_history), icon = PleyIcons.History, onClick = { navigator.open(PleyKey.History) })
                 }
             }
+            if (adminAccess != null && adminAccess != AdminAccess.None) {
+                item(key = "server", contentType = "group") {
+                    Group(stringResource(R.string.admin_me_group)) {
+                        val manages = adminAccess == AdminAccess.Manages
+                        SettingsRow(
+                            stringResource(R.string.admin_title),
+                            value = stringResource(if (manages) R.string.admin_me_value else R.string.admin_me_sign_in),
+                            icon = PleyIcons.Server,
+                            // Manage server says why it needs a new sign-in, and what to tick, before it signs in.
+                            onClick = { navigator.open(PleyKey.ManageServer) },
+                            modifier = Modifier.testTag(ME_MANAGE_SERVER),
+                        )
+                    }
+                }
+            }
             item(key = "device", contentType = "group") {
                 Group(stringResource(R.string.account_this_device)) {
                     if (downloads.available) {
@@ -152,7 +172,7 @@ internal fun MeScreen() {
                                     R.plurals.downloads_me_count,
                                     count,
                                     count,
-                                    formatBytes(downloaded.values.sumOf { it.sizeBytes }),
+                                    formatBytes(downloaded.values.sumOf { it.sizeBytes }, formatWords()),
                                 )
                             },
                             icon = PleyIcons.Download,
@@ -223,10 +243,12 @@ internal fun MeScreen() {
     }
 
     state.trackDefaults?.let { defaults ->
+        val words = formatWords()
+        val languages = remember(words) { TrackLanguages.all(words) }
         when (sheet) {
             TrackField.AudioLanguage -> ChoiceSheet(
                 title = stringResource(R.string.account_audio_language),
-                choices = listOf(Choice<String?>(null, stringResource(R.string.account_language_file_default))) + TrackLanguages.ALL.map { Choice<String?>(it.first, it.second) },
+                choices = listOf(Choice<String?>(null, stringResource(R.string.account_language_file_default))) + languages.map { Choice<String?>(it.first, it.second) },
                 selected = defaults.defaults.audioLanguage,
                 onPick = model::setAudioLanguage,
                 onDismiss = { sheet = null },
@@ -240,7 +262,7 @@ internal fun MeScreen() {
             )
             TrackField.SubtitleLanguage -> ChoiceSheet(
                 title = stringResource(R.string.account_subtitle_language),
-                choices = listOf(Choice<String?>(null, stringResource(R.string.account_language_same_as_audio))) + TrackLanguages.ALL.map { Choice<String?>(it.first, it.second) },
+                choices = listOf(Choice<String?>(null, stringResource(R.string.account_language_same_as_audio))) + languages.map { Choice<String?>(it.first, it.second) },
                 selected = defaults.defaults.subtitleLanguage,
                 onPick = model::setSubtitleLanguage,
                 onDismiss = { sheet = null },
@@ -314,9 +336,10 @@ private fun TrackDefaultsGroup(defaults: TrackDefaultsUi?, onOpen: (TrackField) 
             footer = if (defaults?.editable == false) null else stringResource(R.string.account_defaults_footer),
         ) {
             val d = defaults?.defaults
+            val words = formatWords()
             SettingsRow(
                 stringResource(R.string.account_audio_language),
-                value = d?.let { TrackLanguages.nameOf(it.audioLanguage) ?: stringResource(R.string.account_language_file_default) },
+                value = d?.let { TrackLanguages.nameOf(it.audioLanguage, words) ?: stringResource(R.string.account_language_file_default) },
                 icon = PleyIcons.AudioLines,
                 enabled = editable,
                 onClick = { onOpen(TrackField.AudioLanguage) },
@@ -333,7 +356,7 @@ private fun TrackDefaultsGroup(defaults: TrackDefaultsUi?, onOpen: (TrackField) 
                 RowDivider()
                 SettingsRow(
                     stringResource(R.string.account_subtitle_language),
-                    value = TrackLanguages.nameOf(d?.subtitleLanguage) ?: stringResource(R.string.account_language_same_as_audio),
+                    value = TrackLanguages.nameOf(d?.subtitleLanguage, words) ?: stringResource(R.string.account_language_same_as_audio),
                     icon = PleyIcons.Captions,
                     enabled = editable,
                     onClick = { onOpen(TrackField.SubtitleLanguage) },
@@ -383,3 +406,4 @@ internal fun versionOf(context: Context): String = AppBuild.label(context)
 private val MAX_WIDTH = 640.dp
 
 internal const val ME_PAGE = "pley.me.page"
+internal const val ME_MANAGE_SERVER = "pley.me.manage-server"

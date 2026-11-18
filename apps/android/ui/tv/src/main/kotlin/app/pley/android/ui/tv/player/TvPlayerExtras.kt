@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -61,6 +62,7 @@ import app.pley.android.designsystem.TvSafeArea
 import app.pley.android.designsystem.icon.Icon
 import app.pley.android.designsystem.icon.PleyIcon
 import app.pley.android.designsystem.icon.PleyIcons
+import app.pley.android.designsystem.text.shownLocale
 import app.pley.android.player.AudioDelays
 import app.pley.android.player.PlayerUiState
 import app.pley.android.player.sleep.SleepTexts
@@ -80,7 +82,7 @@ internal val MoonIcon = PleyIcon("moon", false, "M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9
 internal fun SyncRow(offsetMs: Long, onChange: (Long) -> Unit, modifier: Modifier = Modifier) = StepRow(
     title = stringResource(R.string.tv_player_sync),
     hint = stringResource(R.string.tv_player_sync_hint),
-    value = SubtitleSync.label(offsetMs),
+    value = SubtitleSync.label(offsetMs, shownLocale()),
     onStep = { onChange(offsetMs + it * SubtitleSync.STEP_MS) },
     onReset = { onChange(0) },
     tag = TAG_SYNC,
@@ -95,7 +97,7 @@ internal fun SyncRow(offsetMs: Long, onChange: (Long) -> Unit, modifier: Modifie
 internal fun AudioDelayRow(delayMs: Long, onChange: (Long) -> Unit, modifier: Modifier = Modifier) = StepRow(
     title = stringResource(R.string.tv_player_audio_delay),
     hint = stringResource(R.string.tv_player_sync_hint),
-    value = AudioDelays.label(delayMs),
+    value = AudioDelays.label(delayMs, shownLocale()),
     onStep = { onChange(delayMs + it * AudioDelays.STEP_MS) },
     onReset = { onChange(0) },
     tag = TAG_AUDIO_DELAY,
@@ -200,6 +202,8 @@ internal fun BoxScope.TvSleepNotice(state: State<PlayerUiState>, visible: Boolea
             Button(
                 onClick = onKeep,
                 modifier = Modifier
+                    // Set, as a pill's is: tv-material's Row would keep it at 40.
+                    .height(PleyTv.ButtonHeight)
                     .focusRequester(ui.requester(PlayerFocus.SleepNotice))
                     .onFocusChanged { if (it.isFocused) ui.focused = PlayerFocus.SleepNotice else if (ui.focused == PlayerFocus.SleepNotice) ui.focused = null }
                     .focusProperties {

@@ -90,6 +90,8 @@ import app.pley.android.screens.music.NowPlayingState
 import app.pley.android.screens.music.NowPlayingViewModel
 import app.pley.android.ui.tv.R
 import app.pley.android.ui.tv.kit.TvRoundButton
+import app.pley.android.ui.tv.kit.HeldEnds
+import app.pley.android.ui.tv.kit.heldKeyStaysIn
 import app.pley.android.ui.tv.kit.initialFocus
 import app.pley.android.ui.tv.player.MoonIcon
 import app.pley.android.ui.tv.shell.LocalTvNavigator
@@ -261,11 +263,11 @@ private fun Scrubber(now: NowPlaying, model: NowPlayingViewModel) {
 @Composable
 private fun Controls(now: NowPlaying, model: NowPlayingViewModel) {
     Row(
-        Modifier.height(64.dp + PleyTv.ButtonLabelRoom),
+        Modifier.height(PLAY + PleyTv.ButtonLabelRoom),
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        Box(Modifier.padding(top = 8.dp)) {
+        Box(Modifier.padding(top = BESIDE_PLAY)) {
             TvRoundButton(
                 stringResource(if (now.shuffle) R.string.tv_music_shuffle_off else R.string.tv_music_shuffle),
                 PleyIcons.Shuffle,
@@ -273,10 +275,10 @@ private fun Controls(now: NowPlaying, model: NowPlayingViewModel) {
                 onArt = true,
             )
         }
-        Box(Modifier.padding(top = 8.dp)) { TvRoundButton(stringResource(R.string.tv_music_previous), PleyIcons.SkipBack, onClick = model::previous, onArt = true) }
+        Box(Modifier.padding(top = BESIDE_PLAY)) { TvRoundButton(stringResource(R.string.tv_music_previous), PleyIcons.SkipBack, onClick = model::previous, onArt = true) }
         PlayPause(now, onClick = model::toggle)
-        Box(Modifier.padding(top = 8.dp)) { TvRoundButton(stringResource(R.string.tv_music_next), PleyIcons.SkipForward, onClick = model::next, onArt = true, enabled = now.hasNext) }
-        Box(Modifier.padding(top = 8.dp)) { SleepButton(model) }
+        Box(Modifier.padding(top = BESIDE_PLAY)) { TvRoundButton(stringResource(R.string.tv_music_next), PleyIcons.SkipForward, onClick = model::next, onArt = true, enabled = now.hasNext) }
+        Box(Modifier.padding(top = BESIDE_PLAY)) { SleepButton(model) }
     }
 }
 
@@ -293,7 +295,7 @@ private fun SleepButton(model: NowPlayingViewModel) {
     val label = when {
         notice -> SleepTexts.keep(resources, music = true)
         sleep.choice == SleepChoice.Off -> SleepTexts.title(resources)
-        else -> SleepTexts.title(resources) + ": " + SleepTexts.summary(resources, sleep, music = true)
+        else -> resources.getString(R.string.tv_music_sleep_running, SleepTexts.title(resources), SleepTexts.summary(resources, sleep, music = true))
     }
     TvRoundButton(
         label,
@@ -311,7 +313,7 @@ private fun SleepButton(model: NowPlayingViewModel) {
     )
 }
 
-/** Play/Pause: a 64 dp circle with a 32 dp glyph (design spec §2.7), the page's initial focus. */
+/** Play/Pause: a 56 dp circle with a 28 dp glyph (design spec §2.7), the page's initial focus. */
 @Composable
 private fun PlayPause(now: NowPlaying, onClick: () -> Unit) {
     val playing = now.playing || (now.loading && now.error == null)
@@ -319,7 +321,7 @@ private fun PlayPause(now: NowPlaying, onClick: () -> Unit) {
     IconButton(
         onClick = onClick,
         modifier = Modifier
-            .size(64.dp)
+            .size(PLAY)
             .initialFocus()
             .semantics { contentDescription = label }
             .testTag(TV_PLAY_PAUSE),
@@ -335,7 +337,7 @@ private fun PlayPause(now: NowPlaying, onClick: () -> Unit) {
         scale = IconButtonDefaults.scale(focusedScale = PleyFocus.ROUND_SCALE, pressedScale = 1f),
         glow = IconButtonDefaults.glow(Glow.None, Glow.None, Glow.None),
     ) {
-        Icon(if (playing) PleyIcons.Pause else PleyIcons.Play, contentDescription = null, size = 32.dp, tint = androidx.tv.material3.LocalContentColor.current)
+        Icon(if (playing) PleyIcons.Pause else PleyIcons.Play, contentDescription = null, size = 28.dp, tint = androidx.tv.material3.LocalContentColor.current)
     }
 }
 
@@ -364,6 +366,7 @@ private fun Queue(state: NowPlayingState, onPick: (Int) -> Unit) {
             .fillMaxSize()
             .onFocusChanged { browsing = it.hasFocus }
             .focusProperties { onEnter = { landing.enter() } }
+            .heldKeyStaysIn(HeldEnds.UpDown)
             .focusGroup()
             .testTag(TV_QUEUE),
         state = list,
@@ -408,6 +411,10 @@ private class QueueLanding {
 }
 
 private val ART = 300.dp
+
+/** Play/Pause, and how far down the buttons beside it start, so their middles are its middle. */
+private val PLAY = 56.dp
+private val BESIDE_PLAY = (PLAY - PleyTv.ButtonHeight) / 2
 
 /** Left and Right on the scrubber. */
 private const val SEEK_MS = 10_000L

@@ -40,6 +40,8 @@ public enum ServerEvent: Hashable, Sendable {
     case libraryChanged(libraryId: Int)
     /// A library was created, changed or deleted, or the order changed.
     case librariesChanged
+    /// One of the profile's sessions started, ended or changed (a pause, a
+    /// seek, another channel): remotes read the list again.
     case sessionsChanged
     /// The profile's My List changed.
     case watchlistChanged
@@ -48,8 +50,35 @@ public enum ServerEvent: Hashable, Sendable {
     case userStateChanged(itemIds: [Int], children: Bool)
     /// One of the profile's playbacks was stopped from elsewhere.
     case sessionStopped(sessionId: String, message: String?, byAdmin: Bool)
+    /// The profile's remote, on another device, sent the player of
+    /// `sessionId` a command.
+    case playerCommand(sessionId: String, command: PlayerCommand)
+    /// The profile's remote, on another device, sent the device of
+    /// `receiverId` something to play; `from` is the remote's device, as
+    /// the server names it.
+    case cast(receiverId: String, target: CastTarget, from: String?)
     case liveChannelsChanged
     case liveTunersChanged
+    /// Someone took the connection the Live TV session `sessionId` used:
+    /// its player stops at once and says `message`.
+    case liveTakenOver(sessionId: String, message: String)
+    /// A request changed (`requestId` with its title), or many did (all
+    /// `nil`): what shows it is read again.
+    case requestsChanged(requestId: Int?, kind: TitleKind?, tmdbId: Int?)
+    /// One of the profile's requests is ready to watch: the whole of it
+    /// (`complete`), or `seasons` of a show.
+    case requestAvailable(requestId: Int, title: String, kind: TitleKind, tmdbId: Int, itemId: Int?,
+                          posterUrl: String?, seasons: [Int]?, complete: Bool)
+    /// A manager approved or declined one of the profile's requests.
+    case requestDecided(requestId: Int, title: String, kind: TitleKind, tmdbId: Int, status: RequestStatus,
+                        reason: String?)
+    /// Managers: someone asked for something (`pending` until decided).
+    case requestCreated(requestId: Int, title: String, kind: TitleKind, tmdbId: Int, seasons: [Int]?,
+                        by: RequestUser?, status: RequestStatus)
+    /// Managers: a request couldn't be sent to Radarr or Sonarr.
+    case requestFailed(requestId: Int, title: String, kind: TitleKind, reason: String?)
+    /// Requests' settings changed: the summary may have.
+    case requestsSettingsChanged
     case unknown(String)
 
     private struct Wire: Decodable {
@@ -63,6 +92,30 @@ public enum ServerEvent: Hashable, Sendable {
         var sessionId: String?
         var message: String?
         var byAdmin: Bool?
+        var requestId: Int?
+        var kind: TitleKind?
+        var tmdbId: Int?
+        var title: String?
+        var itemId: Int?
+        var posterUrl: String?
+        var seasons: [Int]?
+        var complete: Bool?
+        var status: RequestStatus?
+        var reason: String?
+        var requestedBy: RequestUser?
+        var command: Control?
+        var positionMs: Int?
+        var offsetMs: Int?
+        var streamIndex: Int?
+        var quality: String?
+        var receiverId: String?
+        var playlistId: Int?
+        var channelId: Int?
+        var startMs: Int?
+        var shuffle: Bool?
+        var audioIndex: Int?
+        var subtitleIndex: Int?
+        var from: String?
     }
 
     /// The event in `data` (one `data:` line's JSON); `nil` when it isn't
@@ -90,8 +143,52 @@ public enum ServerEvent: Hashable, Sendable {
             return wire.sessionId.map {
                 .sessionStopped(sessionId: $0, message: wire.message, byAdmin: wire.byAdmin ?? false)
             }
+        case "player_command":
+            guard let id = wire.sessionId, let command = wire.command else { return .unknown(wire.type) }
+            return .playerCommand(sessionId: id, command: PlayerCommand(command, positionMs: wire.positionMs,
+                                                                         offsetMs: wire.offsetMs,
+                                                                         streamIndex: wire.streamIndex,
+                                                                         quality: wire.quality))
+        case "cast":
+            // One of a title, a playlist and a channel; without one, or a receiver, there is nothing to play.
+            let what: CastTarget.What?
+            if let id = wire.itemId {
+                what = .item(id)
+            } else if let id = wire.playlistId {
+                what = .playlist(id)
+            } else {
+                what = wire.channelId.map { CastTarget.What.channel($0) }
+            }
+            guard let receiver = wire.receiverId, let what else { return .unknown(wire.type) }
+            let target = CastTarget(what, startMs: wire.startMs, shuffle: wire.shuffle ?? false,
+                                    audioIndex: wire.audioIndex, subtitleIndex: wire.subtitleIndex)
+            return .cast(receiverId: receiver, target: target, from: wire.from)
         case "live_channels_changed": return .liveChannelsChanged
         case "live_tuners_changed": return .liveTunersChanged
+        case "live_taken_over":
+            return wire.sessionId.map { .liveTakenOver(sessionId: $0, message: wire.message ?? "") }
+        case "requests_changed":
+            return .requestsChanged(requestId: wire.requestId, kind: wire.kind, tmdbId: wire.tmdbId)
+        case "request_available":
+            guard let id = wire.requestId, let title = wire.title, let kind = wire.kind, let tmdbId = wire.tmdbId
+            else { return .unknown(wire.type) }
+            return .requestAvailable(requestId: id, title: title, kind: kind, tmdbId: tmdbId, itemId: wire.itemId,
+                                     posterUrl: wire.posterUrl, seasons: wire.seasons, complete: wire.complete ?? true)
+        case "request_decided":
+            guard let id = wire.requestId, let title = wire.title, let kind = wire.kind, let tmdbId = wire.tmdbId,
+                  let status = wire.status
+            else { return .unknown(wire.type) }
+            return .requestDecided(requestId: id, title: title, kind: kind, tmdbId: tmdbId, status: status,
+                                   reason: wire.reason)
+        case "request_created":
+            guard let id = wire.requestId, let title = wire.title, let kind = wire.kind, let tmdbId = wire.tmdbId
+            else { return .unknown(wire.type) }
+            return .requestCreated(requestId: id, title: title, kind: kind, tmdbId: tmdbId, seasons: wire.seasons,
+                                   by: wire.requestedBy, status: wire.status ?? .pending)
+        case "request_failed":
+            guard let id = wire.requestId, let title = wire.title, let kind = wire.kind else { return .unknown(wire.type) }
+            return .requestFailed(requestId: id, title: title, kind: kind, reason: wire.reason)
+        case "requests_settings_changed": return .requestsSettingsChanged
         default: return .unknown(wire.type)
         }
     }

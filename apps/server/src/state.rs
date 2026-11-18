@@ -33,6 +33,8 @@ pub struct Inner {
     pub auth: AuthService,
     pub settings: Arc<SettingsStore>,
     pub events: EventBus,
+    /// The Plex import (see [`crate::import`]).
+    pub plex_import: Arc<crate::import::Importer>,
     pub transcoder: Arc<Transcoder>,
     pub metadata: Arc<MetadataAgent>,
     /// Subtitle search and downloads (see [`crate::subtitles`]).
@@ -47,10 +49,20 @@ pub struct Inner {
     pub sessions: Arc<Sessions>,
     /// The `sessionKey`s Plex tools know the sessions by.
     pub(crate) plex_session_keys: crate::plex::SessionKeys,
+    /// The Jellyfin clients the user's remotes reach, through their socket.
+    pub(crate) jellyfin_remotes: Arc<crate::jellyfin::Remotes>,
+    /// The devices the user's remotes cast to, while their event streams
+    /// are open.
+    pub(crate) receivers: Arc<crate::api::remote::Receivers>,
+    /// The Google Cast devices on the local network, and the casts playing
+    /// on them.
+    pub(crate) nearby: Arc<crate::nearby::NearbyDevices>,
     /// When library work runs (see [`crate::schedule`]).
     pub schedule: Arc<Scheduler>,
     pub markers: Arc<MarkerService>,
     pub trickplay: Arc<TrickplayService>,
+    /// What `.strm` files name, read for players and the transcoder (see [`crate::strm`]).
+    pub strm: Arc<crate::strm::Relay>,
     /// Live TV: its sources, channels, guide and connections (see [`crate::livetv`]).
     pub live: Arc<crate::livetv::LiveTv>,
     pub two_step: crate::two_step::TwoStep,
@@ -109,7 +121,12 @@ impl AppState {
         let settings = Arc::new(SettingsStore::load(&db).await?);
         let events = EventBus::new();
         let transcoder = Transcoder::new(&config);
-        let store = Arc::new(Store::new(db.clone(), &config.metadata_dir(), &config.media_dir(), &config.cache_dir()));
+        // Library work waits while new libraries fill in (see `schedule`).
+        let hold = Arc::new(crate::schedule::LibraryHold::default());
+        let store = Arc::new(
+            Store::new(db.clone(), &config.metadata_dir(), &config.media_dir(), &config.cache_dir())
+                .with_hold(hold.clone()),
+        );
         if let Err(err) = store.migrate_legacy(&config.metadata_dir()).await {
             tracing::warn!("moving pictures into the blob store failed: {err:#}");
         }
@@ -123,8 +140,15 @@ impl AppState {
             settings.clone(),
             config.metadata_endpoints.as_ref().map(|e| e.opensubtitles.clone()),
         ));
-        let scanner =
-            Scanner::new(db.clone(), transcoder.clone(), events.clone(), metadata.clone(), store.clone(), &config);
+        let scanner = Scanner::new(
+            db.clone(),
+            transcoder.clone(),
+            events.clone(),
+            metadata.clone(),
+            store.clone(),
+            hold.clone(),
+            &config,
+        );
         // Discover's pictures, from TMDB's picture server (none in tests
         // without endpoints).
         let pictures = crate::discover::pictures::Pictures::new(
@@ -138,7 +162,7 @@ impl AppState {
         let sessions = Arc::new(Sessions::default());
         let stopping = CancellationToken::new();
         let resources = crate::resources::Monitor::new();
-        let schedule = Scheduler::new(db.clone(), settings.clone(), sessions.clone(), resources.clone());
+        let schedule = Scheduler::new(db.clone(), settings.clone(), sessions.clone(), resources.clone(), hold.clone());
         let markers = MarkerService::new(
             db.clone(),
             transcoder.clone(),
@@ -193,15 +217,20 @@ impl AppState {
                 auth,
                 sessions,
                 plex_session_keys: Default::default(),
+                jellyfin_remotes: Default::default(),
+                receivers: Default::default(),
+                nearby: Default::default(),
                 schedule,
                 markers,
                 trickplay,
+                strm: Arc::new(crate::strm::Relay::new(&config.data_dir)),
                 live,
                 two_step,
                 bandwidth,
                 identity,
                 oauth,
                 started_at: Instant::now(),
+                plex_import: Arc::new(crate::import::Importer::new(&config.plex_tv)),
                 stopping,
                 config,
                 db,
@@ -281,13 +310,35 @@ impl AppState {
         tokio::spawn(async move { watcher.reload().await });
         let state = self.clone();
         tokio::spawn(async move {
+            state.plex_import.after_restart(&state).await;
+        });
+        let state = self.clone();
+        tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(3600));
             loop {
                 tick.tick().await;
                 state.auth.purge_expired().await;
                 state.oauth.sweep();
+                // Ages go up on the first of a month: an hourly look finds
+                // it in the server's time, whatever its time zone does.
+                state.birthday_ages().await;
             }
         });
+    }
+
+    /// Age limits that follow birthdays, kept up with the profiles' ages;
+    /// their devices are told what they may see changed.
+    pub async fn birthday_ages(&self) {
+        match crate::accounts::birthday_ages(&self.db).await {
+            Ok(changed) => {
+                for id in changed {
+                    self.auth.forget_user(id);
+                    self.events.send(crate::events::ServerEvent::OwnLibrariesChanged { user_id: id });
+                    self.events.send(crate::events::ServerEvent::RequestsSettingsChanged { user_id: Some(id) });
+                }
+            }
+            Err(err) => tracing::warn!("updating age limits from birthdays failed: {err}"),
+        }
     }
 
     pub async fn shutdown(&self) {

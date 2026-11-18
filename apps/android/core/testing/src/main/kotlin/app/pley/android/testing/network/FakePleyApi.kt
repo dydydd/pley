@@ -3,6 +3,8 @@ package app.pley.android.testing.network
 import app.pley.android.model.Added
 import app.pley.android.model.Approval
 import app.pley.android.model.Asked
+import app.pley.android.model.CastRequest
+import app.pley.android.model.CollectionCategories
 import app.pley.android.model.CollectionDetail
 import app.pley.android.model.Decline
 import app.pley.android.model.DiscoverDetail
@@ -11,6 +13,8 @@ import app.pley.android.model.DiscoverPage
 import app.pley.android.model.ItemRequest
 import app.pley.android.model.MediaRequest
 import app.pley.android.model.NewRequest
+import app.pley.android.model.PairingCode
+import app.pley.android.model.PairingRequest
 import app.pley.android.model.RequestAction
 import app.pley.android.model.RequestList
 import app.pley.android.model.RequestOptions
@@ -55,16 +59,20 @@ import app.pley.android.model.SpeedSample
 import app.pley.android.model.SubtitleResults
 import app.pley.android.model.SubtitleTrack
 import app.pley.android.model.Me
+import app.pley.android.model.MergedCollection
 import app.pley.android.model.NewPlaylist
 import app.pley.android.model.PersonDetail
 import app.pley.android.model.PlaybackInfo
 import app.pley.android.model.PlaybackMode
 import app.pley.android.model.PlaybackRequest
+import app.pley.android.model.PlayerCommandRequest
+import app.pley.android.model.PlayingSession
 import app.pley.android.model.PlaylistDetail
 import app.pley.android.model.PlaylistList
 import app.pley.android.model.PlaylistPatch
 import app.pley.android.model.ProgressReport
 import app.pley.android.model.RatingRequest
+import app.pley.android.model.RemoteDevice
 import app.pley.android.model.SearchResults
 import app.pley.android.model.ServerInfo
 import app.pley.android.model.SessionStatus
@@ -83,7 +91,7 @@ import kotlinx.coroutines.CompletableDeferred
  * [PleyApi] without a network, answering from the JSON fixtures (the
  * household of [Fixtures]: Arrival 101, Severance 201 with season 202 and
  * episodes 203 to 205, the track 303, collections 801 and 803, playlists
- * 901 and 902). Every call is recorded in [calls]; [answer] and [fail]
+ * 901 and 902, and the devices the remote lists). Every call is recorded in [calls]; [answer] and [fail]
  * change what a method gives, [hold] keeps calls waiting until released.
  * Addresses are built as [HttpPleyApi] builds them, on [issuer].
  */
@@ -150,6 +158,9 @@ class FakePleyApi(val issuer: String = "http://127.0.0.1:7539") : PleyApi {
 
     override suspend fun me(): Me = respond("me") { fixture("me/app_token.json") }
 
+    override suspend fun setLanguage(language: String?): Me =
+        respond("setLanguage", language) { fixture<Me>("me/app_token.json").copy(language = language) }
+
     override fun avatarUrl(userId: Long, version: String?): String = urls.avatarUrl(userId, version)
 
     override fun url(path: String, width: Int?): String = urls.url(path, width)
@@ -197,6 +208,12 @@ class FakePleyApi(val issuer: String = "http://127.0.0.1:7539") : PleyApi {
     override suspend fun collection(id: Long): CollectionDetail = respond("collection", id) {
         fixture(if (id == 803L) "collections/smart_detail.json" else "collections/detail.json")
     }
+
+    override suspend fun collectionCategories(): CollectionCategories =
+        respond("collectionCategories") { fixture("collections/categories.json") }
+
+    override suspend fun mergedCollection(ids: List<Long>): MergedCollection =
+        respond("mergedCollection", ids.joinToString(",")) { fixture("collections/merged.json") }
 
     override fun collectionImageUrl(id: Long, kind: ImageKind, width: Int?, version: String?): String =
         urls.collectionImageUrl(id, kind, width, version)
@@ -283,6 +300,21 @@ class FakePleyApi(val issuer: String = "http://127.0.0.1:7539") : PleyApi {
     }
 
     override suspend fun stopPlayback(sessionId: String) = respond("stopPlayback", sessionId) { }
+
+    override suspend fun playingSessions(): List<PlayingSession> = respond("playingSessions") { fixture("sessions/list.json") }
+
+    override suspend fun sendCommand(sessionId: String, command: PlayerCommandRequest) = respond("sendCommand", sessionId, command) { }
+
+    override suspend fun stopSession(sessionId: String) = respond("stopSession", sessionId) { }
+
+    override suspend fun remoteDevices(): List<RemoteDevice> = respond("remoteDevices") { fixture("remote/devices.json") }
+
+    override suspend fun cast(receiverId: String, request: CastRequest) = respond("cast", receiverId, request) { }
+
+    /** An Apple TV's code, of 4 digits. */
+    override suspend fun showPairingCode(receiverId: String): PairingCode = respond("showPairingCode", receiverId) { PairingCode(digits = 4) }
+
+    override suspend fun pair(receiverId: String, code: String) = respond("pair", receiverId, code) { }
 
     /** The server's own network: nothing known, no speed test. */
     override suspend fun playbackNetwork(clientId: String): PlaybackNetwork = respond("playbackNetwork", clientId) { PlaybackNetwork(local = true) }
@@ -371,6 +403,8 @@ class FakePleyApi(val issuer: String = "http://127.0.0.1:7539") : PleyApi {
     }
 
     override suspend fun livePlan(sessionId: String): LivePlan? = respond("livePlan", sessionId) { fixture<LivePlan>("live/plan.json") }
+
+    override fun liveStreamUrl(channelId: Long, clientId: String): String = urls.liveStreamUrl(channelId, clientId)
 
     override suspend fun leaveChannel(sessionId: String) = respond("leaveChannel", sessionId) { }
 

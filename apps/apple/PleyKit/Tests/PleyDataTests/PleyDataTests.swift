@@ -408,9 +408,12 @@ private func waitFor(_ condition: () async -> Bool) async -> Bool {
         var stopped: [String] = []
         var changes: [ServerChange] = []
         events.onSessionStopped = { id, _, _ in stopped.append(id) }
+        var takenOver: [String] = []
+        events.onLiveTakenOver = { id, _ in takenOver.append(id) }
         events.onChange = { changes.append($0) }
         events.heard(.event(.sessionStopped(sessionId: "s1", message: "bedtime", byAdmin: true)))
-        #expect(stopped == ["s1"])
+        events.heard(.event(.liveTakenOver(sessionId: "s2", message: "Someone else needed the connection.")))
+        #expect(stopped == ["s1"] && takenOver == ["s2"])
         events.heard(.connected)
         try await Task.sleep(for: .milliseconds(80))
         #expect(changes.isEmpty)
@@ -418,6 +421,28 @@ private func waitFor(_ condition: () async -> Bool) async -> Bool {
         events.heard(.event(.sessionsChanged))
         try await Task.sleep(for: .milliseconds(80))
         #expect(changes.count == 1 && changes[0].everything && changes[0].names(12345))
+    }
+
+    @Test func aRemotesCommandAndTheSessionsChangingAreToldAtOnce() async throws {
+        let events = ServerEvents(window: 0.01)
+        var commands: [String] = []
+        var sessionsChanged = 0
+        var changes: [ServerChange] = []
+        events.onPlayerCommand = { id, command in commands.append("\(id) \(command.command)") }
+        events.onSessionsChanged = { sessionsChanged += 1 }
+        events.onChange = { changes.append($0) }
+        events.heard(.event(.playerCommand(sessionId: "s1", command: .skip(byMs: 30_000))))
+        events.heard(.event(.sessionsChanged))
+        #expect(commands == ["s1 skip"])
+        #expect(sessionsChanged == 1)
+        // The first connection misses nothing; one made again may have.
+        events.heard(.connected)
+        #expect(sessionsChanged == 1)
+        events.heard(.connected)
+        #expect(sessionsChanged == 2)
+        try await Task.sleep(for: .milliseconds(80))
+        // Neither is a change for the screens' rows but the reconnection.
+        #expect(changes.count == 1 && changes[0].everything)
     }
 }
 

@@ -1,11 +1,12 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import type { Hub } from "@/api/types";
 import { cn } from "@/lib/cn";
 import { smoothScroll, useMediaQuery } from "@/lib/hooks";
 import { aspectFor, CardSkeleton, MediaCard, type CardAspect } from "./cards";
-import { libraryUrl } from "@/lib/urls";
+import { collectionsUrl, libraryUrl } from "@/lib/urls";
 
 /** Smallest card width per shape: [mobile, desktop]. Cards grow from there to fill the row. */
 const MIN_WIDTHS: Record<CardAspect, [number, number]> = {
@@ -17,12 +18,16 @@ const MIN_WIDTHS: Record<CardAspect, [number, number]> = {
 const GAPS: [number, number] = [14, 16];
 
 export function hubAspect(hub: Hub): CardAspect {
+  // Books keep their square covers in Continue Listening.
+  if (hub.key.startsWith("continue_listening")) return "square";
   if (hub.key.startsWith("continue")) return "thumb";
   const first = hub.items[0];
   return first ? aspectFor(first) : "poster";
 }
 
-function hubLink(hub: Hub): string | null {
+/** Where a row's title and See all go: its collections, else a music or audiobook library's newest. */
+export function hubLink(hub: Hub): string | null {
+  if (hub.collection_ids?.length) return collectionsUrl(hub.collection_ids);
   if (hub.library_id == null) return null;
   if (hub.key.startsWith("recently_added")) return libraryUrl(hub.library_id, "tab=library&sort=added&order=desc");
   if (hub.key.startsWith("recently_released")) return libraryUrl(hub.library_id, "tab=library&sort=release&order=desc");
@@ -74,6 +79,7 @@ function useFittedCards(aspect: CardAspect) {
 
 /** `inset`: inside a page that already has the side margin (item pages). */
 export function HubRow({ hub, inset }: { hub: Hub; inset?: boolean }) {
+  const { t } = useTranslation("components");
   const aspect = hubAspect(hub);
   const { ref: scroller, width, perPage, gap } = useFittedCards(aspect);
   const [canLeft, setCanLeft] = useState(false);
@@ -114,7 +120,7 @@ export function HubRow({ hub, inset }: { hub: Hub; inset?: boolean }) {
         <div className="flex shrink-0 items-center gap-1">
           {link ? (
             <Link to={link} className="mr-2 text-xs font-medium text-muted transition-colors hover:text-accent">
-              See all
+              {t("hubRow.seeAll")}
             </Link>
           ) : null}
           {scrollable ? (
@@ -146,11 +152,12 @@ export function HubRow({ hub, inset }: { hub: Hub; inset?: boolean }) {
 }
 
 export function ArrowButton({ side, enabled, onClick }: { side: "left" | "right"; enabled: boolean; onClick: () => void }) {
+  const { t } = useTranslation();
   const Icon = side === "left" ? ChevronLeft : ChevronRight;
   return (
     <button
       type="button"
-      aria-label={side === "left" ? "Previous" : "Next"}
+      aria-label={side === "left" ? t("actions.previous") : t("actions.next")}
       onClick={onClick}
       disabled={!enabled}
       className={cn(

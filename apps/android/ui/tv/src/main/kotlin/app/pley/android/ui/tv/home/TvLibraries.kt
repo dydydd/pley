@@ -72,6 +72,7 @@ import app.pley.android.designsystem.TvSafeArea
 import app.pley.android.designsystem.icon.Icon
 import app.pley.android.designsystem.icon.PleyIcon
 import app.pley.android.designsystem.icon.PleyIcons
+import app.pley.android.designsystem.text.asString
 import app.pley.android.model.LibraryKind
 import app.pley.android.screens.PleyKey
 import app.pley.android.screens.home.LibrariesEvent
@@ -81,9 +82,11 @@ import app.pley.android.screens.home.LibraryEntry
 import app.pley.android.ui.tv.R
 import app.pley.android.ui.tv.item.TvToastHost
 import app.pley.android.ui.tv.item.TvToastState
+import app.pley.android.ui.tv.kit.HeldEnds
 import app.pley.android.ui.tv.kit.OverlayShowing
 import app.pley.android.ui.tv.kit.TvPillButton
 import app.pley.android.ui.tv.kit.TvSidePanel
+import app.pley.android.ui.tv.kit.heldKeyStaysIn
 import app.pley.android.ui.tv.kit.menuKey
 import app.pley.android.ui.tv.kit.rememberFocusMemory
 import app.pley.android.ui.tv.kit.rememberedFocus
@@ -217,7 +220,7 @@ private fun LibrariesGrid(state: LibrariesState.Ready, vm: LibrariesViewModel, o
             contentPadding = PaddingValues(start = PleyTv.Gutter, end = TvSafeArea.Horizontal, top = 8.dp, bottom = TvSafeArea.Vertical),
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().heldKeyStaysIn(HeldEnds.UpDown),
         ) {
             itemsIndexed(state.libraries, key = { _, entry -> entry.library.id }, contentType = { _, _ -> "library" }) { index, entry ->
                 val id = entry.library.id
@@ -365,7 +368,8 @@ private fun LibraryCard(
         scale = ClickableSurfaceDefaults.scale(focusedScale = if (moving) 1f else 1.05f, pressedScale = 1f),
     ) {
         val content = LocalContentColor.current
-        val line = if (entry.scanning) "${entry.count} · ${stringResource(R.string.tv_libraries_scanning)}" else entry.count
+        val count = entry.countText.asString()
+        val line = if (entry.scanning) "$count · ${stringResource(R.string.tv_libraries_scanning)}" else count
         CardBody(
             kindIcon(entry.library.kind),
             entry.library.name,
@@ -428,7 +432,7 @@ private fun CardActions(entry: LibraryEntry, sortable: Boolean, onOpen: () -> Un
         runCatching { first.requestFocus() }
     }
     Column(Modifier.focusProperties { onExit = { cancelFocusChange() } }.focusGroup()) {
-        TvPanelTitle(entry.library.name, entry.count)
+        TvPanelTitle(entry.library.name, entry.countText.asString())
         TvPanelRow(stringResource(R.string.tv_libraries_open), onClick = onOpen, icon = PleyIcons.ArrowRight, focusRequester = first)
         if (sortable) {
             TvPanelRow(stringResource(R.string.tv_libraries_move), onClick = onMove, icon = PleyIcons.ArrowUpDown)

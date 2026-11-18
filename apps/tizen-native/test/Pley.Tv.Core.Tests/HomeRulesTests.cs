@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using Pley.Tv.Core.Api;
 using Pley.Tv.Core.Net;
 using Pley.Tv.Core.Ui;
@@ -77,9 +78,20 @@ public class HomeRulesTests
     public void See_all_opens_the_library_for_its_listed_rows_only()
     {
         Assert.Null(HomeRules.SeeAllOf(Continue));
-        Assert.Equal(new SeeAll(1, "sort=added&order=desc"), HomeRules.SeeAllOf(AddedMovies));
-        Assert.Equal(new SeeAll(2, "sort=rating&order=desc"), HomeRules.SeeAllOf(HubOf("top_rated:2", "Top Rated", 2, Overgrowth)));
+        Assert.Equal(new PageKey.Library(1, LibraryTab.Library, "sort=added&order=desc"), HomeRules.SeeAllOf(AddedMovies));
+        Assert.Equal(new PageKey.Library(2, LibraryTab.Library, "sort=rating&order=desc"), HomeRules.SeeAllOf(HubOf("top_rated:2", "Top Rated", 2, Overgrowth)));
         Assert.Null(HomeRules.SeeAllOf(HubOf("continue_watching:2", "Continue Watching", 2, Glasshouse)));
+    }
+
+    [Fact]
+    public void See_all_opens_the_collection_a_row_shows_or_the_merged_page()
+    {
+        // Ahead of the library's listing, as the web's HubRow and the Android app's collectionOf.
+        Assert.Equal(new PageKey.Collection(7), HomeRules.SeeAllOf(AddedMovies with { CollectionIds = new long[] { 7 } }));
+        var merged = HomeRules.SeeAllOf(HubOf("collection:alien", "Alien", null, Overgrowth) with { CollectionIds = new long[] { 7, 9 } });
+        Assert.Equal(new PageKey.MergedCollection(new long[] { 7, 9 }), merged);
+        Assert.NotEqual(new PageKey.MergedCollection(new long[] { 9, 7 }), merged);
+        Assert.Null(HomeRules.CollectionOf(AddedMovies));
     }
 
     [Fact]
@@ -109,6 +121,41 @@ public class HomeRulesTests
         Assert.Equal(new HomeState.Empty(false), HomeRules.StateOf(Array.Empty<Hub>(), null, Libraries, false, ""));
         Assert.Equal(new HomeState.Empty(true), HomeRules.StateOf(Array.Empty<Hub>(), null, Libraries, true, ""));
         Assert.Equal(new HomeState.Empty(true), HomeRules.StateOf(Array.Empty<Hub>(), null, new[] { Movies with { Scanning = true } }, false, ""));
+    }
+
+    public static IEnumerable<object[]> FeaturedCases() =>
+        Enumerable.Range(0, Fixtures.Load("featured").GetProperty("cases").GetArrayLength()).Select(i => new object[] { i });
+
+    /// <summary>The hero features what the Samsung web app's does (packages/tv/test/fixtures/featured.json), as Android and the web pick it.</summary>
+    [Theory]
+    [MemberData(nameof(FeaturedCases))]
+    public void The_hero_features_the_newest_movies_and_shows(int i)
+    {
+        var c = Fixtures.Load("featured").GetProperty("cases")[i];
+        var hubs = JsonSerializer.Deserialize<List<Hub>>(c.GetProperty("hubs").GetRawText(), ApiJson.Options)!;
+        var count = c.TryGetProperty("count", out var n) ? n.GetInt32() : HomeRules.FeaturedCount;
+        var picked = HomeRules.FeaturedOf(HomeRules.Rows(hubs, null), count);
+        var expected = c.GetProperty("featured").EnumerateArray().Select(f => (f.GetProperty("id").GetInt64(), f.GetProperty("fromList").GetBoolean()));
+        Assert.Equal(expected, picked.Select(p => (p.Item.Id, p.FromList)));
+    }
+
+    [Fact]
+    public void The_hero_says_why_a_title_is_featured_and_whether_it_is_on_My_List()
+    {
+        var film = LowOrbit with { BackdropUrl = "/api/items/111/images/backdrop" };
+        Assert.Equal("New in Movies", HomeRules.FeaturedLabel(new FeaturedPick(film, false), Libraries));
+        Assert.Equal("New", HomeRules.FeaturedLabel(new FeaturedPick(film, false), null));
+        Assert.Equal("On your list", HomeRules.FeaturedLabel(new FeaturedPick(film, true), Libraries));
+
+        var ready = (HomeState.Ready)HomeRules.StateOf(new[] { HubOf("recently_added:1", "Recently Added in Movies", 1, film) }, null, Libraries, false, Origin);
+        var featured = Assert.Single(ready.Featured);
+        Assert.Equal("New in Movies", featured.Label);
+        Assert.True(featured.Info.Listable);
+        Assert.False(featured.Info.InList);
+        var detail = new ItemDetail { Id = film.Id, LibraryId = 1, Kind = "movie", Title = film.Title, InWatchlist = true };
+        Assert.True(HomeRules.InfoOf(film, detail).InList);
+        // Without a backdrop, nothing is featured: the hero is the newest video, as before.
+        Assert.Empty(((HomeState.Ready)HomeRules.StateOf(HomeHubs, null, Libraries, false, Origin)).Featured);
     }
 
     [Fact]

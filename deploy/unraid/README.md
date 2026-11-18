@@ -25,8 +25,11 @@ give it your GPU for hardware transcoding.
    again, choose **WebUI**, and create the administrator account with that
    code.
 
-4. **Add your libraries.** In Pley, go to **Settings → Libraries → Add**
-   and pick a folder under `/media`, such as `/media/Movies`.
+4. **Add your libraries.** After the account, setup asks about your
+   server, then whether to bring over a Plex server or add your libraries
+   ([First start](../../docs/CONFIGURATION.md#first-start); later, they're
+   in **Settings → Libraries → Add**). Libraries are folders under
+   `/media`, such as `/media/Movies`.
    [Naming your media](../docker/media/README.md) shows how Pley expects
    files to be named.
 
@@ -105,7 +108,7 @@ you pick one; *Automatic* takes the GPU's.
   8096): on *Bridge*, add a Port and a Variable to the container, as
   [Ports and firewalls](../../docs/COMPATIBILITY.md#ports-and-firewalls)
   says; on **br0** or **Host**, choose it in **Settings → Network**. On
-  Pley's port, the default for Plex's, nothing needs adding.
+  Pley's port, the default for both, nothing needs adding.
 - **Apps finding Pley by themselves** needs the container on your network:
   set *Network Type* to **br0** (Pley gets an address of its own) or
   **Host**. On the default *Bridge*, type the server's address in the apps.

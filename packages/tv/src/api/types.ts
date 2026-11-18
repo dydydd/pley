@@ -24,6 +24,8 @@ export interface User {
   audio_language: string | null;
   subtitle_language: string | null;
   subtitle_mode: SubtitleMode;
+  /** The language Pley is in for the account ("en", "fr", "es"); `null` for the server's. Absent from servers before it. */
+  language?: string | null;
   /** An app's token: what it was allowed ("library play"). */
   scope?: string;
 }
@@ -213,6 +215,21 @@ export interface Hub {
   title: string;
   library_id: Id | null;
   items: ItemSummary[];
+  /** The collections the row shows: one, or on Home several of one title in different libraries; none (or missing, from an older server) for Continue Watching and My List. */
+  collection_ids?: Id[];
+}
+
+/** A collection's category as the collection names it; `key` is Pley's own ("highlights", "other", "franchises"), `null` an administrator's. */
+export interface CategoryRef {
+  id: Id;
+  key: string | null;
+  title: string;
+}
+
+/** A category of collections, shared by every library, in the order administrators chose (`GET /api/collection-categories`). */
+export interface CollectionCategory extends CategoryRef {
+  from_label?: string | null;
+  position?: number;
 }
 
 export interface Collection {
@@ -223,6 +240,15 @@ export interface Collection {
   item_count: number;
   poster_url: string;
   backdrop_url: string;
+  /** Its category: the server's Other (`key` "other") when it has none; missing from a server older than categories. */
+  category?: CategoryRef;
+}
+
+/** A Home row of several libraries' collections of one title (`GET /api/collections/merged`), every title in the row's order. */
+export interface MergedCollection {
+  title: string;
+  collections: { id: Id; library_id: Id }[];
+  items: ItemSummary[];
 }
 
 export interface Playlist {
@@ -304,6 +330,8 @@ export interface PlaybackInfo {
   reasons?: string[];
   reason: string | null;
   auto_quality?: string | null;
+  /** The server converts no video: the Quality menu offers the original alone, and Automatic stays there. Absent otherwise. */
+  original_only?: boolean;
   /** What the screen gets of HDR video, by name: "Dolby Vision P8.1", "HDR10 (Dolby Vision base layer)", "SDR (tone-mapped)"… */
   video_range?: string | null;
   /** The stream comes in several sizes the TV's player moves between by itself: Automatic leaves the session be. */
@@ -407,10 +435,30 @@ export interface PlaybackRequest {
   keep_previous?: boolean;
   /** The TV's own player can't send the Authorization header: its URLs carry a key (docs/API.md, "Keyed URLs"). */
   keyed_urls?: boolean;
+  /** The remote's commands this player obeys (docs/API.md, "Remote control"); left out: none, only Stop. */
+  controls?: Control[];
+  /** Always "tv" from here: remotes tell the TVs among the user's devices by it. */
+  device_kind?: DeviceKind;
   caps: ClientCaps;
 }
 
+/** A command of the user's remote, on another of their devices (docs/API.md, "Remote control"). */
+export type Control = "play" | "pause" | "seek" | "skip" | "next" | "previous" | "audio" | "subtitles" | "quality";
+
+/** What kind of device a player plays on, as remotes show it. */
+export type DeviceKind = "tv" | "phone" | "tablet" | "computer" | "browser" | "other";
+
 export type PlaybackState = "playing" | "paused" | "stopped";
+
+/**
+ * The tracks a video plays now, by stream index: its audio (`null` when it has none) and subtitles (`-1`: none);
+ * and its Quality menu's pick, by id (`"auto"`, `"original"`, `"8m"`…).
+ */
+export interface PlayingTracks {
+  audio: number | null;
+  subtitle: number;
+  quality?: string;
+}
 
 /**
  * The server's events. Request events reach a sign-in with `requests`
@@ -426,6 +474,41 @@ export type ServerEvent =
   /** Watch state changed here or on another device: the item, then its parent and grandparent; `children`: everything under the first too. */
   | { type: "user_state_changed"; item_ids: Id[]; children?: boolean }
   | { type: "session_stopped"; session_id: string; message: string | null; by_admin: boolean }
+  /**
+   * The user's remote, on another device, for the player of `session_id`: `position_ms` for `seek`, `offset_ms` for
+   * `skip`, `stream_index` for `audio` and `subtitles` (`-1`: subtitles off), `quality` for `quality` (one of the
+   * Quality menu's ids), else null (left out by an older server).
+   */
+  | {
+      type: "player_command";
+      session_id: string;
+      command: Control;
+      position_ms: number | null;
+      offset_ms: number | null;
+      stream_index?: number | null;
+      quality?: string | null;
+    }
+  /**
+   * The user's remote sent their device of `receiver_id` something to play: one of `item_id`, `playlist_id` and
+   * `channel_id`, a title from `start_ms`, a playlist, album or artist shuffled; a movie or an episode with the
+   * tracks picked on the remote's page, `audio_index` and `subtitle_index` (`-1`: none), when it sent them;
+   * `from` names the remote's device (docs/API.md, "Casting"). From another profile of the household, `profile_id`
+   * is the remote's, which the TV switches to with `switch_ticket` before it plays.
+   */
+  | {
+      type: "cast";
+      receiver_id: string;
+      item_id: Id | null;
+      playlist_id: Id | null;
+      channel_id: Id | null;
+      start_ms: number | null;
+      shuffle: boolean;
+      audio_index?: number | null;
+      subtitle_index?: number | null;
+      from: string | null;
+      profile_id?: Id | null;
+      switch_ticket?: string | null;
+    }
   | { type: "scan_started" | "scan_progress" | "scan_finished"; library_id: Id }
   /** Live TV's sources, channels or guide changed: ask again. */
   | { type: "live_channels_changed" }

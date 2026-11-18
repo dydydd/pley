@@ -8,8 +8,10 @@ import { RequestsSettings } from "./RequestsSettings";
 
 const SETTINGS = {
   server_name: "Den",
+  language: "",
   tmdb_api_key: "t0k",
   metadata_language: "en-US",
+  country: "",
   tv_metadata: "auto",
   tvdb_api_key: "",
   tvdb_pin: "",
@@ -17,6 +19,8 @@ const SETTINGS = {
   hwaccel: "auto",
   hardware_decoding: true,
   tonemapping: "auto",
+  transcode_video: true,
+  max_video_transcodes: 4,
   max_transcodes: 4,
   transcode_preset: "veryfast",
   throttle_transcodes: true,

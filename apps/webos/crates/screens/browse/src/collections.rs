@@ -1,23 +1,27 @@
 //! Collections (`TvCollectionsScreen.kt`) and a collection's page (`TvCollectionScreen.kt`; the TV
-//! app's `collections.tsx`).
+//! app's `collections.tsx`), which also opens a Home row of several libraries' same-titled
+//! collections together (the merged page).
 //!
 //! The rail's Collections page shows "Collections" at (96, 27) and a row of poster tiles per movie
 //! or show library that has collections, their headers from y 80. A collection's page shows its
 //! backdrop (else its poster) and a 436 dp hero (text column 96–560 from y 58: what it is, its
 //! title, its facts, its summary, then Play and Shuffle at its foot), then its titles as a grid of
 //! seven columns whose focused row's wells settle at y 58; the backdrop darkens toward Bg 92 % as
-//! the grid comes up.
+//! the grid comes up. Its category, unless Other, is a badge beside "Collection". The merged page
+//! is the same page: its facts count its movies and shows, and a button after Shuffle for each
+//! library opens that library's own collection.
 
 use std::rc::Rc;
 
 use pley_base::{Icon, ImageRequest, Point, Rect, TextOpts};
-use pley_core::format::pluralize;
 use pley_core::http::sentence;
 use pley_core::model::{
     CollectionDetail, CollectionList, CollectionSort, CollectionSummary, ItemKind, ItemSummary, Library, LibraryKind,
+    MergedCollection, MergedPart,
 };
 use pley_core::store::snapshot_keys;
 use pley_core::{ApiError, Promise};
+use pley_i18n::t;
 use pley_kit::{
     Backdrop, BackdropArt, BackdropScrim, BackdropState, Badge, BadgeStyle, BarItem, Button, ColumnState, GridState,
     PosterGrid, RoundButton, Row, RowColumn, RowState, Section, Tile, TileKind, backdrop_px, button_bar,
@@ -47,6 +51,10 @@ const BUTTONS_Y_EMPTY: f32 = BUTTONS_Y - 20.0;
 const SAY_FOR: f64 = 4.0;
 /// The darkening over the backdrop once the page has moved.
 const DIM: f32 = 0.92;
+/// The least room beside the buttons a problem is said in; with less, it goes above them.
+const SAID_MIN_W: f32 = 240.0;
+/// A library's button on the merged page cuts its name at this width.
+const LIBRARY_LABEL_MAX: f32 = 150.0;
 
 /// A collection as a poster tile shows it: its title, its size and its picture.
 pub struct CollectionTile {
@@ -143,14 +151,15 @@ impl CollectionsScreen {
 
 impl Screen for CollectionsScreen {
     fn ui(&mut self, ui: &mut Ui, cx: &mut AppCx) {
-        page_title(ui, "Collections", theme::CANVAS_W - theme::GUTTER - theme::SAFE_X);
+        page_title(ui, t!("library.collections.title"), theme::CANVAS_W - theme::GUTTER - theme::SAFE_X);
         self.has_focus = false;
         let Some(libraries) = cx.state.libraries() else {
             // The libraries couldn't be had, with nothing saved: say so, with Retry.
             if let Some(error) = cx.state.account_error() {
                 let problem = error.problem();
-                let title = failed_title(error, "Couldn't load collections");
-                let r = column_message(ui, ui.id("state"), ROWS_Y, title, &problem, Some("Retry"));
+                let title = failed_title(error, t!("library.collections.failed"));
+                let r =
+                    column_message(ui, ui.id("state"), ROWS_Y, title, &problem, Some(t!("library.collections.retry")));
                 self.has_focus = true;
                 if r.is_some_and(|r| r.activated) {
                     cx.state.load_account();
@@ -186,16 +195,17 @@ impl Screen for CollectionsScreen {
                 .collect::<Option<Vec<_>>>();
             if let Some(error) = failure.and_then(|errors| errors.first().copied()) {
                 let problem = error.problem();
-                let title = failed_title(error, "Couldn't load collections");
-                let r = column_message(ui, ui.id("state"), ROWS_Y, title, &problem, Some("Retry"));
+                let title = failed_title(error, t!("library.collections.failed"));
+                let r =
+                    column_message(ui, ui.id("state"), ROWS_Y, title, &problem, Some(t!("library.collections.retry")));
                 self.has_focus = true;
                 if r.is_some_and(|r| r.activated) {
                     self.shelves.iter_mut().for_each(|s| s.list.invalidate());
                 }
                 return;
             }
-            let body = "Movies of the same TMDB collection are grouped here once two of them are in a library.";
-            column_message(ui, ui.id("state"), ROWS_Y, "No collections yet", body, None);
+            let (title, body) = (t!("library.collections.noneTitle"), t!("library.collections.noneBody"));
+            column_message(ui, ui.id("state"), ROWS_Y, title, body, None);
             if !std::mem::replace(&mut self.sent_to_rail, true) {
                 cx.to_rail();
             }
@@ -257,13 +267,105 @@ impl Screen for CollectionsScreen {
     }
 }
 
-/// A collection's page.
+/// What a collection's page shows: one collection, or several libraries' same-titled ones.
+enum Source {
+    One(Resource<CollectionDetail>),
+    Merged(Resource<MergedCollection>),
+}
+
+impl Source {
+    /// Collects what came; whether the page has something new to show.
+    fn update(&mut self, cx: &mut AppCx) -> bool {
+        match self {
+            Source::One(r) => r.update(cx),
+            Source::Merged(r) => r.update(cx),
+        }
+    }
+
+    /// What there is to show, made into one shape.
+    fn shown(&self) -> Option<Shown> {
+        match self {
+            Source::One(r) => r.value().map(|d| Shown { detail: d.clone(), parts: Vec::new() }),
+            Source::Merged(r) => r.value().map(Shown::merged),
+        }
+    }
+
+    /// Nothing yet: `Loading`; failed with nothing to show: the error.
+    fn state(&self) -> Load<'_, ()> {
+        let (loading, error, value) = match self {
+            Source::One(r) => (matches!(r.state(), Load::Loading), r.error(), r.value().is_some()),
+            Source::Merged(r) => (matches!(r.state(), Load::Loading), r.error(), r.value().is_some()),
+        };
+        match (loading, error) {
+            (true, _) => Load::Loading,
+            (false, Some(error)) if !value => Load::Failed { error, stale: None },
+            _ => Load::Ready { value: &(), fresh: true },
+        }
+    }
+
+    fn has_value(&self) -> bool {
+        match self {
+            Source::One(r) => r.value().is_some(),
+            Source::Merged(r) => r.value().is_some(),
+        }
+    }
+
+    fn has_error(&self) -> bool {
+        match self {
+            Source::One(r) => r.error().is_some(),
+            Source::Merged(r) => r.error().is_some(),
+        }
+    }
+
+    fn invalidate(&mut self) {
+        match self {
+            Source::One(r) => r.invalidate(),
+            Source::Merged(r) => r.invalidate(),
+        }
+    }
+
+    fn revalidate(&mut self, now: f64) {
+        match self {
+            Source::One(r) => r.revalidate(now),
+            Source::Merged(r) => r.revalidate(now),
+        }
+    }
+}
+
+/// The page's collection: a merged one as a collection of its titles, with its libraries' own.
+struct Shown {
+    detail: CollectionDetail,
+    /// The merged page's collections, one per library; empty for one collection.
+    parts: Vec<MergedPart>,
+}
+
+impl Shown {
+    fn merged(m: &MergedCollection) -> Shown {
+        // Its backdrop is its first title's that has one.
+        let backdrop = m.items.iter().find_map(|i| i.backdrop_url.clone());
+        let collection = CollectionSummary {
+            id: m.collections.first().map_or(0, |p| p.id),
+            title: m.title.clone(),
+            item_count: m.items.len() as i64,
+            backdrop_url: backdrop,
+            ..CollectionSummary::default()
+        };
+        Shown { detail: CollectionDetail { collection, items: m.items.clone() }, parts: m.collections.clone() }
+    }
+
+    fn is_merged(&self) -> bool {
+        !self.parts.is_empty()
+    }
+}
+
+/// A collection's page, or the merged page of several.
 pub struct CollectionScreen {
+    /// The collection, or the first of the merged ones (it names the backdrop).
     id: i64,
-    detail: Resource<CollectionDetail>,
+    source: Source,
     cells: Vec<Cell>,
     /// The collection shown, shared with the frame that draws it.
-    shown: Option<Rc<CollectionDetail>>,
+    shown: Option<Rc<Shown>>,
     backdrop: BackdropState,
     art: Option<BackdropArt>,
     grid: GridState,
@@ -282,9 +384,22 @@ pub struct CollectionScreen {
 impl CollectionScreen {
     /// The page of collection `id`.
     pub fn new(id: i64) -> CollectionScreen {
+        let source = Source::One(Resource::new(Some(snapshot_keys::collection(id)), move |api| api.collection(id)));
+        CollectionScreen::with(id, source)
+    }
+
+    /// The page of several libraries' same-titled collections, `ids`, as one (a Home row's).
+    pub fn merged(ids: Vec<i64>) -> CollectionScreen {
+        let key = snapshot_keys::merged_collection(&ids);
+        let first = ids.first().copied().unwrap_or_default();
+        let source = Source::Merged(Resource::new(Some(key), move |api| api.merged_collection(&ids)));
+        CollectionScreen::with(first, source)
+    }
+
+    fn with(id: i64, source: Source) -> CollectionScreen {
         CollectionScreen {
             id,
-            detail: Resource::new(Some(snapshot_keys::collection(id)), move |api| api.collection(id)),
+            source,
             cells: Vec::new(),
             shown: None,
             backdrop: BackdropState::default(),
@@ -300,21 +415,40 @@ impl CollectionScreen {
         }
     }
 
+    /// The merged page's facts: "6 movies  ·  2 shows".
+    fn merged_facts(&mut self, detail: &CollectionDetail) {
+        let movies = detail.items.iter().filter(|i| i.kind == ItemKind::Movie).count();
+        let shows = detail.items.iter().filter(|i| i.kind == ItemKind::Show).count();
+        let mut facts = Vec::new();
+        if movies > 0 {
+            facts.push(t!("library.count.movies", count = movies));
+        }
+        if shows > 0 {
+            facts.push(t!("library.count.shows", count = shows));
+        }
+        if facts.is_empty() {
+            facts.push(t!("library.count.titles", count = detail.items.len()));
+        }
+        self.facts = facts.join("  ·  ");
+        self.facts_library = true;
+        self.facts_due = false;
+    }
+
     /// "4 movies  ·  Movies  ·  By release date" (or the smart filter's words): its size, its
     /// library and how it is ordered.
     fn work_out_facts(&mut self, detail: &CollectionDetail, library: Option<&Library>) {
         let notes = match &detail.smart_filter {
             Some(f) => describe_smart_filter(f).join("  ·  "),
             None => match detail.sort {
-                CollectionSort::Release => "By release date".into(),
-                CollectionSort::Title => "By title".into(),
-                CollectionSort::Custom => "Custom order".into(),
+                CollectionSort::Release => t!("library.collections.byRelease").into(),
+                CollectionSort::Title => t!("library.collections.byTitle").into(),
+                CollectionSort::Custom => t!("library.collections.customOrder").into(),
                 CollectionSort::Unknown => String::new(),
             },
         };
         let count = match library {
             Some(l) => collection_count(detail.item_count, Some(l.kind)),
-            None => pluralize(detail.item_count, "title", None),
+            None => t!("library.count.titles", count = detail.item_count),
         };
         let facts: Vec<&str> = [count.as_str(), library.map_or("", |l| l.name.as_str()), notes.as_str()]
             .into_iter()
@@ -330,24 +464,31 @@ impl CollectionScreen {
     }
 
     /// Plays the collection: movies from the first (or a random one) with the collection as the
-    /// queue; a collection of shows plays the first (or a random) show's next episode.
+    /// queue; a collection of shows plays the first (or a random) show's next episode. The merged
+    /// page's queue is all of its collections, so Next goes on through every library's movies.
     fn play(&mut self, cx: &mut AppCx, shuffle: bool) {
-        let Some(detail) = self.detail.value() else { return };
-        let items = &detail.items;
-        if items.is_empty() {
+        let Some(shown) = self.shown.clone() else { return };
+        let items = &shown.detail.items;
+        let now = cx.now;
+        let Some(pick) = play_pick(items, shown.is_merged(), shuffle.then_some(|len| random_index(now, len))) else {
             return;
-        }
-        let pick = if shuffle { random_index(cx.now, items.len()) } else { 0 };
+        };
         let item = &items[pick];
+        let queue = if shown.is_merged() {
+            PlayQueue::Collections(shown.parts.iter().map(|p| p.id).collect())
+        } else {
+            PlayQueue::Collection(self.id)
+        };
         if item.kind != ItemKind::Show {
-            cx.play(PlayRequest { queue: Some(PlayQueue::Collection(self.id)), ..PlayRequest::item(item.id) });
+            cx.play(PlayRequest { queue: Some(queue), ..PlayRequest::item(item.id) });
             return;
         }
         let show = item.id;
         self.on_deck = Some(cx.spawn(move |api| api.on_deck(show)));
     }
 
-    fn hero(&mut self, ui: &mut Ui, cx: &mut AppCx, detail: &CollectionDetail, lift: f32) {
+    fn hero(&mut self, ui: &mut Ui, cx: &mut AppCx, shown: &Shown, lift: f32) {
+        let detail = &shown.detail;
         let x = theme::GUTTER;
         let mut y = CONTENT_Y - lift;
         // What it is: the layers icon, "Collection", and its TMDB and Smart badges.
@@ -355,13 +496,18 @@ impl CollectionScreen {
         ui.icon(Rect::new(x, y, 18.0, 18.0), Icon::Layers, theme::MUTED);
         let mut bx = x + 18.0 + 8.0;
         let label_y = y + (row_h - theme::LABEL.line_height) / 2.0;
-        bx += ui.text(Point::new(bx, label_y), "Collection", &theme::LABEL, &TextOpts::default(), theme::MUTED).w + 8.0;
+        let label = t!("library.collections.label");
+        bx += ui.text(Point::new(bx, label_y), label, &theme::LABEL, &TextOpts::default(), theme::MUTED).w + 8.0;
         let badge_y = y + (row_h - pley_kit::badge::BADGE_HEIGHT) / 2.0;
         if detail.automatic {
             bx += Badge::new("TMDB", BadgeStyle::Outline).show(ui, Point::new(bx, badge_y)).w + 8.0;
         }
         if detail.smart_filter.is_some() {
-            Badge::new("Smart", BadgeStyle::Outline).show(ui, Point::new(bx, badge_y));
+            bx += Badge::new(t!("library.collections.smart"), BadgeStyle::Outline).show(ui, Point::new(bx, badge_y)).w
+                + 8.0;
+        }
+        if let Some(category) = detail.named_category() {
+            Badge::new(&category.title, BadgeStyle::Outline).show(ui, Point::new(bx, badge_y));
         }
         y += row_h + 10.0;
         y += ui.text(Point::new(x, y), &detail.title, &theme::HERO_TITLE, &TextOpts::wrap(TEXT_W, 2), theme::FG).h;
@@ -373,28 +519,59 @@ impl CollectionScreen {
         }
         let empty = detail.items.is_empty();
         let by = (if empty { BUTTONS_Y_EMPTY } else { BUTTONS_Y }) - lift;
-        let play = Button::pill("Play").icon(Icon::Play).enabled(!empty);
-        let shuffle = RoundButton::new(Icon::Shuffle, "Shuffle").enabled(detail.items.len() >= 2);
+        let play = Button::pill(t!("library.collections.play")).icon(Icon::Play).enabled(!empty);
+        let shuffle =
+            RoundButton::new(Icon::Shuffle, t!("library.collections.shuffle")).enabled(detail.items.len() >= 2);
         let bar_id = ui.id("buttons");
         let initial = if empty { bar_id.with("shuffle") } else { bar_id.with("play") };
         ui.initial_focus(initial);
-        let answers = button_bar(
-            ui,
-            bar_id,
-            Point::new(x, by),
-            &[("play", BarItem::Button(play)), ("shuffle", BarItem::Round(shuffle))],
-        );
+        // The merged page's libraries, each opening its own collection (those this TV doesn't
+        // know by name left out).
+        let libraries = cx.state.libraries().unwrap_or_default();
+        let named: Vec<(String, i64, &str)> = shown
+            .parts
+            .iter()
+            .filter_map(|p| {
+                libraries.iter().find(|l| l.id == p.library_id).map(|l| (p.id.to_string(), p.id, l.name.as_str()))
+            })
+            .collect();
+        let mut items = vec![("play", BarItem::Button(play)), ("shuffle", BarItem::Round(shuffle))];
+        for (key, _, name) in &named {
+            let b = Button::pill(name).icon(Icon::Layers).max_label_width(LIBRARY_LABEL_MAX);
+            items.push((key.as_str(), BarItem::Button(b)));
+        }
+        let answers = button_bar(ui, bar_id, Point::new(x, by), &items);
+        let bar_w: f32 = items
+            .iter()
+            .map(|(_, item)| match item {
+                BarItem::Button(b) => b.size(ui).w,
+                BarItem::Round(r) => r.size().w,
+            })
+            .sum::<f32>()
+            + theme::BUTTON_GAP * (items.len() - 1) as f32;
+        let open = answers.iter().skip(2).zip(&named).find(|(r, _)| r.activated).map(|(_, (_, id, _))| *id);
         if answers[0].activated {
             self.play(cx, false);
         }
         if answers[1].activated {
             self.play(cx, true);
         }
+        if let Some(id) = open {
+            cx.push(Route::Collection { id });
+        }
         if let Some((text, until)) = &self.said {
             if cx.now < *until {
-                let sx = x + play.size(ui).w + theme::BUTTON_GAP + 40.0 + 12.0;
-                let opts = TextOpts::line(theme::CANVAS_W - theme::SAFE_X - sx);
-                ui.text(Point::new(sx, by + 14.0 - 2.0), text, &theme::LABEL, &opts, theme::DANGER_TEXT);
+                // After the whole bar (the merged page's libraries included), or above it where the
+                // bar leaves too little room on its line.
+                let after = x + bar_w + 12.0;
+                let right = theme::CANVAS_W - theme::SAFE_X;
+                let at = if right - after >= SAID_MIN_W {
+                    Point::new(after, by + 14.0 - 2.0)
+                } else {
+                    Point::new(x, by - theme::LABEL.line_height - 12.0)
+                };
+                let opts = TextOpts::line(right - at.x);
+                ui.text(at, text, &theme::LABEL, &opts, theme::DANGER_TEXT);
                 ui.repaint_after(until - cx.now);
             } else {
                 self.said = None;
@@ -403,9 +580,21 @@ impl CollectionScreen {
         if empty {
             let ey = by + theme::BUTTON_HEIGHT + 36.0;
             let opts = TextOpts::wrap(TEXT_W, 2);
-            ui.text(Point::new(x, ey), "Nothing in this collection yet.", &theme::BODY, &opts, theme::MUTED);
+            ui.text(Point::new(x, ey), t!("library.collections.empty"), &theme::BODY, &opts, theme::MUTED);
         }
     }
+}
+
+/// The title Play (or Shuffle, with `roll` picking in `0..len`) starts from. The merged page plays
+/// its movies whenever it has any, as the web's does, and a show only when it has no movie.
+fn play_pick(items: &[ItemSummary], merged: bool, roll: Option<impl Fn(usize) -> usize>) -> Option<usize> {
+    let movies: Vec<usize> = (0..items.len()).filter(|&i| items[i].kind == ItemKind::Movie).collect();
+    let from: Vec<usize> = if merged && !movies.is_empty() { movies } else { (0..items.len()).collect() };
+    let at = match roll {
+        Some(roll) => roll(from.len()).min(from.len().saturating_sub(1)),
+        None => 0,
+    };
+    from.get(at).copied()
 }
 
 /// A pick in `0..len` from the clock, for Shuffle.
@@ -419,9 +608,10 @@ pub fn random_index(now: f64, len: usize) -> usize {
 
 impl Screen for CollectionScreen {
     fn ui(&mut self, ui: &mut Ui, cx: &mut AppCx) {
-        if self.detail.update(cx)
-            && let Some(detail) = self.detail.value()
+        if self.source.update(cx)
+            && let Some(shown) = self.source.shown()
         {
+            let detail = &shown.detail;
             let px = ui.image_px(TileKind::LibraryGrid.size().w);
             self.cells = match cx.api() {
                 Some(api) => detail
@@ -437,7 +627,7 @@ impl Screen for CollectionScreen {
                 _ => Vec::new(),
             };
             self.art = Some(BackdropArt::new(self.id as u64, art, detail.title.clone()));
-            self.shown = Some(Rc::new(detail.clone()));
+            self.shown = Some(Rc::new(shown));
             self.facts_due = true;
         }
         if let Some(p) = &mut self.on_deck
@@ -446,12 +636,12 @@ impl Screen for CollectionScreen {
             self.on_deck = None;
             match answer {
                 Ok(Some(episode)) => cx.play(PlayRequest::item(episode.id)),
-                Ok(None) => self.say("Nothing to play: this show has no episodes yet".into(), cx.now),
+                Ok(None) => self.say(t!("library.collections.noEpisodes").into(), cx.now),
                 Err(e) if e.cancelled() => {}
                 Err(e) => self.say(sentence(&e.to_string()), cx.now),
             }
         }
-        match self.detail.state() {
+        match self.source.state() {
             Load::Loading => {
                 skeleton_blocks(
                     ui,
@@ -467,21 +657,25 @@ impl Screen for CollectionScreen {
             }
             Load::Failed { error, stale: None } => {
                 let problem = error.problem();
-                let title = failed_title(error, "Couldn't load this collection");
-                let r = column_message(ui, ui.id("state"), CONTENT_Y, title, &problem, Some("Retry"));
+                let title = failed_title(error, t!("library.collections.failedOne"));
+                let retry = Some(t!("library.collections.retry"));
+                let r = column_message(ui, ui.id("state"), CONTENT_Y, title, &problem, retry);
                 if r.is_some_and(|r| r.activated) {
-                    self.detail.invalidate();
+                    self.source.invalidate();
                 }
                 return;
             }
             Load::Ready { .. } | Load::Failed { stale: Some(_), .. } => {}
         }
-        let Some(detail) = self.shown.clone() else { return };
+        let Some(shown) = self.shown.clone() else { return };
+        let detail = &shown.detail;
         // The facts name the library, which may come after the collection.
-        if self.facts_due || (!self.facts_library && cx.state.libraries().is_some()) {
+        if shown.is_merged() && self.facts_due {
+            self.merged_facts(detail);
+        } else if !shown.is_merged() && (self.facts_due || (!self.facts_library && cx.state.libraries().is_some())) {
             let library = cx.state.libraries().and_then(|ls| ls.iter().find(|l| l.id == detail.library_id));
             let library = library.cloned();
-            self.work_out_facts(&detail, library.as_ref());
+            self.work_out_facts(detail, library.as_ref());
         }
 
         // The page moves up once focus is in the grid: the hero out of the way, the focused row at 58.
@@ -495,7 +689,7 @@ impl Screen for CollectionScreen {
             ui.fill(full, theme::BG.alpha(DIM * (moved / HERO_H).min(1.0)), 0.0);
         }
         // Drawn even once off screen: Up from the grid's first row comes back to its buttons.
-        self.hero(ui, cx, &detail, moved);
+        self.hero(ui, cx, &shown, moved);
         let cells = &self.cells;
         let offset = FIRST_ROW_Y - CONTENT_Y - lift;
         let grid = PosterGrid::new(TileKind::LibraryGrid, CONTENT_Y - theme::GRID_CONTENT_TOP);
@@ -517,8 +711,8 @@ impl Screen for CollectionScreen {
 
     fn event(&mut self, event: &AppEvent, cx: &mut AppCx) {
         match event {
-            AppEvent::Changed => self.detail.invalidate(),
-            AppEvent::Shown => self.detail.revalidate(cx.now),
+            AppEvent::Changed => self.source.invalidate(),
+            AppEvent::Shown => self.source.revalidate(cx.now),
             _ => {}
         }
     }
@@ -528,7 +722,7 @@ impl Screen for CollectionScreen {
     }
 
     fn takes_focus(&self) -> bool {
-        self.detail.value().is_some() || self.detail.error().is_some()
+        self.source.has_value() || self.source.has_error()
     }
 }
 
@@ -538,6 +732,25 @@ const LIFT: Motion = pley_kit::PAGE_SCROLL;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn item(id: i64, kind: ItemKind) -> ItemSummary {
+        ItemSummary { id, kind, ..ItemSummary::default() }
+    }
+
+    #[test]
+    fn the_merged_page_plays_its_movies_before_any_show() {
+        let items =
+            [item(1, ItemKind::Show), item(2, ItemKind::Movie), item(3, ItemKind::Show), item(4, ItemKind::Movie)];
+        let none: Option<fn(usize) -> usize> = None;
+        assert_eq!(play_pick(&items, true, none), Some(1), "Play: the first movie");
+        assert_eq!(play_pick(&items, true, Some(|_| 1)), Some(3), "Shuffle: among the movies");
+        assert_eq!(play_pick(&items, true, Some(|len| len * 9)), Some(3), "a roll past the end stays in");
+        // One collection keeps its order; a merged page of shows plays a show.
+        assert_eq!(play_pick(&items, false, none), Some(0));
+        let shows = [item(1, ItemKind::Show), item(3, ItemKind::Show)];
+        assert_eq!(play_pick(&shows, true, Some(|_| 1)), Some(1));
+        assert_eq!(play_pick(&[], true, none), None);
+    }
 
     #[test]
     fn shuffle_picks_within_the_list() {

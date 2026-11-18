@@ -5,17 +5,20 @@ mod activity;
 mod admin;
 pub(crate) mod auth;
 mod browse;
+mod categories;
 pub(crate) mod collections;
 mod compatibility_tokens;
 pub(crate) mod editing;
 mod history;
+mod import;
 pub(crate) mod items;
 mod libraries;
-mod livetv;
+pub(crate) mod livetv;
 mod oauth;
 pub(crate) mod people;
 pub(crate) mod playback;
 mod playlists;
+pub(crate) mod remote;
 mod requests;
 mod subtitles;
 mod two_step;
@@ -36,6 +39,8 @@ use tower_http::trace::TraceLayer;
 use crate::error::AppError;
 use crate::state::AppState;
 
+pub(crate) use libraries::{add_files_first as add_library_files_first, validate_paths as validate_library_paths};
+
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(|| async { axum::Json(serde_json::json!({ "status": "ok" })) }))
@@ -54,6 +59,7 @@ pub fn router(state: AppState) -> Router {
         .route("/me", patch(accounts::update_me))
         .route("/me/pin", put(accounts::set_my_pin))
         .route("/me/track-defaults", put(accounts::set_track_defaults))
+        .route("/me/language", put(accounts::set_language))
         .route("/me/libraries/order", put(libraries::set_my_order).delete(libraries::forget_my_order))
         .route(
             "/me/avatar",
@@ -74,6 +80,15 @@ pub fn router(state: AppState) -> Router {
         .route("/oauth/device/verify", post(oauth::verify_user_code).layer(DefaultBodyLimit::max(FORM_MAX)))
         .route("/oauth/device/qr", get(oauth::device_qr))
         .route("/oauth/profiles", get(oauth::profiles))
+        .route("/import/plex", get(import::progress).delete(import::forget))
+        .route("/import/plex/pin", get(import::sign_in_status).post(import::start_sign_in))
+        .route("/import/plex/token", post(import::use_token))
+        .route("/import/plex/servers", get(import::servers))
+        .route("/import/plex/server", post(import::choose_server))
+        .route("/import/plex/plan", get(import::plan))
+        .route("/import/plex/folder", post(import::check_folder))
+        .route("/import/plex/users/{id}/picture", get(import::user_picture))
+        .route("/import/plex/start", post(import::start))
         .route("/libraries", get(libraries::list).post(libraries::create))
         .route("/libraries/scan", post(libraries::scan_all))
         .route("/libraries/order", put(libraries::reorder))
@@ -88,6 +103,14 @@ pub fn router(state: AppState) -> Router {
         .route("/collections/{id}/items/{item_id}", delete(collections::remove_item))
         .route("/collections/{id}/order", put(collections::reorder))
         .route("/collections/{id}/images/{kind}", get(collections::image))
+        .route("/collections/merged", get(collections::merged))
+        .route("/libraries/{id}/collections/defaults", post(collections::restore_defaults))
+        .route("/libraries/{id}/rows/order", put(collections::order_recommended))
+        .route("/collection-categories", get(categories::list).post(categories::create))
+        .route("/collection-categories/order", put(categories::reorder))
+        .route("/collection-categories/{id}", patch(categories::rename).delete(categories::delete))
+        .route("/home/rows", get(collections::home_rows))
+        .route("/home/rows/order", put(collections::order_home))
         .route("/playlists", get(playlists::list).post(playlists::create))
         .route("/playlists/{id}", get(playlists::get).patch(playlists::rename).delete(playlists::delete))
         .route("/playlists/{id}/items", post(playlists::add))
@@ -156,6 +179,7 @@ pub fn router(state: AppState) -> Router {
         .route("/playback/{session}/{file}", get(playback::hls_file))
         .route("/media/{key}/{file}", get(playback::keyed_media))
         .route("/files/{id}/stream", get(playback::stream_file))
+        .route("/strm/{key}/{name}", get(crate::strm::relay))
         .route("/conversions", post(playback::convert))
         .route("/live", get(livetv::summary))
         .route("/live/channels", get(livetv::channels))
@@ -188,7 +212,12 @@ pub fn router(state: AppState) -> Router {
         .route("/files/{id}/trickplay", get(playback::trickplay))
         .route("/files/{id}/trickplay/{sheet}", get(playback::trickplay_sheet))
         .route("/files/{id}/chapters/{image}", get(playback::chapter_image))
+        .route("/sessions", get(remote::list))
         .route("/sessions/{id}", delete(playback::stop_session))
+        .route("/sessions/{id}/command", post(remote::command))
+        .route("/remote/devices", get(remote::devices))
+        .route("/remote/devices/{id}/cast", post(remote::cast))
+        .route("/remote/devices/{id}/pairing", post(remote::pair))
         .route("/activity", get(activity::activity))
         .route("/events", get(activity::events))
         .route("/users", get(accounts::list_users).post(accounts::create_user))
@@ -201,6 +230,8 @@ pub fn router(state: AppState) -> Router {
         .route("/invites", get(accounts::list_invites).post(accounts::create_invite))
         .route("/invites/{code}", get(accounts::check_invite).delete(accounts::delete_invite))
         .route("/invites/{code}/accept", post(accounts::accept_invite))
+        .route("/ratings/systems", get(accounts::rating_systems))
+        .route("/labels", get(editing::labels))
         .route("/system", get(admin::system))
         .route("/system/resources", get(admin::resources))
         .route("/system/library-work", get(admin::library_work))
@@ -213,6 +244,8 @@ pub fn router(state: AppState) -> Router {
         .route("/settings/test", post(admin::test_service))
         .route("/settings/arr", post(admin::arr_options))
         .route("/network", get(admin::get_network).put(admin::put_network))
+        .route("/network/airplay", get(admin::airplay_pairings))
+        .route("/network/airplay/{id}", delete(admin::unpair_airplay))
         .route("/fs", post(admin::browse_fs))
         .fallback(|| async { AppError::not_found("no such endpoint") })
         .layer(SetResponseHeaderLayer::if_not_present(header::CACHE_CONTROL, HeaderValue::from_static("no-store")));
@@ -328,16 +361,27 @@ fn cors_path(path: &str) -> bool {
     path.starts_with("/api/") && !path.starts_with("/api/oauth/requests") && path != "/api/oauth/device/verify"
 }
 
+/// Keyed media addresses (docs/API.md, "Keyed URLs"): the key in the path is
+/// all they take, never a cookie or a token.
+fn keyed_path(path: &str) -> bool {
+    path.starts_with("/api/media/") || path.starts_with("/api/live/media/")
+}
+
 /// CORS for pley's packaged TV apps (docs/API.md, "CORS for TV apps"). Their web
 /// runtimes enforce it, so their API calls, which carry the app's token in
 /// `Authorization` and never a cookie, are answered with
 /// `Access-Control-Allow-Origin: *` and their preflights let that header
 /// through. A wildcard never lets a page read an answer made with cookies,
 /// and only the TV apps' origins get it at all.
+///
+/// Keyed media addresses answer CORS to every origin: a player outside
+/// Pley fetches them from a page of its own (a Cast receiver's, served
+/// from Google), and what they open is what their key opens, whoever asks.
 async fn tv_app_cors(request: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let allowed = request.headers().get(header::ORIGIN).is_some_and(|o| tv_app_origin(o.as_bytes()))
-        && cors_path(request.uri().path());
+    let path = request.uri().path();
+    let allowed = request.headers().get(header::ORIGIN).is_some_and(|o| tv_app_origin(o.as_bytes())) && cors_path(path)
+        || request.headers().contains_key(header::ORIGIN) && keyed_path(path);
     if !allowed {
         return next.run(request).await;
     }
@@ -399,7 +443,7 @@ pub(crate) fn wants_summaries(query: &HashMap<String, String>) -> bool {
 /// Authorization header are never logged.
 pub(crate) fn loggable_uri(uri: &axum::http::Uri) -> String {
     // A keyed media address carries its session's key in the path.
-    let keyed = ["/api/media/", "/api/live/media/"]
+    let keyed = ["/api/media/", "/api/live/media/", "/api/strm/"]
         .into_iter()
         .find_map(|prefix| uri.path().strip_prefix(prefix).map(|rest| (prefix, rest)));
     let path = match keyed {
@@ -501,6 +545,7 @@ mod tests {
         // A keyed media address's key is in its path.
         assert_eq!(loggable_uri(&"/api/media/pley_mk_abc/12.ts".parse().unwrap()), "/api/media/…/12.ts");
         assert_eq!(loggable_uri(&"/api/media/pley_mk_abc".parse().unwrap()), "/api/media/…");
+        assert_eq!(loggable_uri(&"/api/strm/0a1b2c/media.mkv".parse().unwrap()), "/api/strm/…/media.mkv");
         assert_eq!(loggable_uri(&"/api/live/media/pley_mk_abc/s12.ts".parse().unwrap()), "/api/live/media/…/s12.ts");
     }
 
@@ -512,5 +557,7 @@ mod tests {
         assert!(cors_path("/.well-known/oauth-authorization-server"));
         assert!(!cors_path("/api/oauth/requests") && !cors_path("/api/oauth/requests/7/continue"));
         assert!(!cors_path("/api/oauth/device/verify") && !cors_path("/link") && !cors_path("/"));
+        assert!(keyed_path("/api/media/pley_mk_a/index.m3u8") && keyed_path("/api/live/media/pley_mk_a/0.ts"));
+        assert!(!keyed_path("/api/files/1/subtitles/2.vtt") && !keyed_path("/api/playback/a/index.m3u8"));
     }
 }
