@@ -279,6 +279,79 @@ class MusicPlaybackTest {
     }
 
     @Test
+    fun aTrackThatCantBePlayedSaysSoThenTheNextOnePlaysByItself() = runTest {
+        val music = music()
+        api.fail("startPlayback", RuntimeException("the server can't open the file"))
+        music.play(album)
+        runCurrent()
+        assertEquals(MusicError.Unplayable, music.nowPlaying.value?.error)
+        assertEquals(MusicPlayback.SKIP_AFTER_S, music.nowPlaying.value?.nextIn)
+        advanceTimeBy(2_000)
+        runCurrent()
+        assertEquals(MusicPlayback.SKIP_AFTER_S - 2, music.nowPlaying.value?.nextIn)
+        assertEquals(listOf(1L), starts().map { it.itemId })
+
+        // The server can open the next one (reset forgets the calls before with the failure).
+        api.reset()
+        advanceTimeBy(3_000)
+        runCurrent()
+        val now = music.nowPlaying.value!!
+        assertEquals(2L, now.itemId)
+        assertNull(now.error)
+        assertNull(now.nextIn)
+        assertEquals(listOf(2L), starts().map { it.itemId })
+    }
+
+    @Test
+    fun pausedTheTrackThatCantBePlayedWaitsAndPlayTriesItAgain() = runTest {
+        val music = music()
+        api.fail("startPlayback", RuntimeException("the server can't open the file"))
+        music.play(album)
+        runCurrent()
+        music.pause()
+        assertNull(music.nowPlaying.value?.nextIn)
+        advanceTimeBy(10_000)
+        runCurrent()
+        assertEquals(1L, music.nowPlaying.value?.itemId)
+        assertEquals(MusicError.Unplayable, music.nowPlaying.value?.error)
+
+        assertEquals(listOf(1L), starts().map { it.itemId })
+
+        api.reset()
+        music.play()
+        settle()
+        assertEquals(listOf(1L), starts().map { it.itemId })
+        assertNull(music.nowPlaying.value?.error)
+    }
+
+    @Test
+    fun noTrackPlaysByItselfOutOfTheServersReachAtTheQueuesEndOrRoundAQueueNoneOfPlays() = runTest {
+        val music = music()
+        // Out of reach, the next track would fail the same way.
+        api.fail("startPlayback", OfflineException(IOException("refused")))
+        music.play(album)
+        runCurrent()
+        assertEquals(MusicError.Offline, music.nowPlaying.value?.error)
+        assertNull(music.nowPlaying.value?.nextIn)
+
+        // The queue's last track: nothing comes after it.
+        api.fail("startPlayback", RuntimeException("the server can't open the file"))
+        music.play(album, startIndex = 2)
+        runCurrent()
+        assertEquals(MusicError.Unplayable, music.nowPlaying.value?.error)
+        assertNull(music.nowPlaying.value?.nextIn)
+
+        // A queue that repeats, none of whose tracks plays: each is tried once, then it stops there.
+        music.setRepeat(MusicRepeat.All)
+        music.play(album)
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals(listOf(1L, 2L, 3L), starts().takeLast(3).map { it.itemId })
+        assertEquals(3L, music.nowPlaying.value?.itemId)
+        assertNull(music.nowPlaying.value?.nextIn)
+    }
+
+    @Test
     fun anExpiredSessionIsStartedAgainWhereItWasThreeTimesAtMost() = runTest {
         val music = music()
         music.play(album)

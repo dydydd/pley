@@ -51,6 +51,8 @@ describes how they are made.
   title on a phone on its side and on tablets, with Play in view.
 - The rail beside the page on a phone on its side or a tablet shows its
   tabs' icons alone, in a column centred on its height.
+- A track that can't be played says so for 5 seconds, then the next one
+  plays by itself, in Android Auto too; Play tries it again.
 
 ### Fixed
 

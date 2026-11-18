@@ -37,4 +37,9 @@
     <string name="music_error_signed_out">Reconnectez-vous pour lire.</string>
     <string name="music_error_stopped">Le serveur a arrêté la lecture.</string>
     <string name="music_error_unplayable">Impossible de lire ce titre.</string>
+    <plurals name="music_error_unplayable_next">
+        <item quantity="one">Impossible de lire ce titre. Le suivant démarre dans %1$d seconde.</item>
+        <item quantity="many">Impossible de lire ce titre. Le suivant démarre dans %1$d secondes.</item>
+        <item quantity="other">Impossible de lire ce titre. Le suivant démarre dans %1$d secondes.</item>
+    </plurals>
 </resources>

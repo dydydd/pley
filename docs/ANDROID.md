@@ -1071,7 +1071,12 @@ of what plays and of the tracks either side are kept, so a track comes
 with its cover, and the tracks of an album change nothing but the title.
 A track that can't play says why on the car's screen (the server out of
 reach, the session ended by the server, a file it can't play), and Play
-tries it again.
+tries it again. One the server can't play, while the music plays on,
+counts down 5 seconds there, on the phone and on the TV, and the next
+track plays by itself, as a driver can't look for Next; Pause stops it.
+It doesn't when the server is out of reach (the next track would fail
+the same way), at the queue's end, or once every track of the queue has
+failed in a row.
 
 "Hey Google, play … on Pley" plays the music playlist named so (by the
 name the Assistant heard, or said with a word for a playlist, as in "my

@@ -57,6 +57,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
@@ -180,10 +181,12 @@ internal fun TvNowPlayingScreen() {
 private fun Status(now: NowPlaying, model: NowPlayingViewModel) {
     val sleep by model.sleep.collectAsStateWithLifecycle()
     val pausingIn = sleep.secondsLeft
+    val nextIn = now.nextIn
     val text = when {
         now.error == MusicError.Offline -> stringResource(R.string.tv_music_error_offline)
         now.error == MusicError.SignedOut -> stringResource(R.string.tv_music_error_signed_out)
         now.error == MusicError.Stopped -> stringResource(R.string.tv_music_error_stopped)
+        now.error != null && nextIn != null -> pluralStringResource(R.plurals.tv_music_error_unplayable_next, nextIn, nextIn)
         now.error != null -> stringResource(R.string.tv_music_error_unplayable)
         now.loading -> stringResource(R.string.tv_music_loading)
         pausingIn != null -> SleepTexts.notice(LocalResources.current, pausingIn)

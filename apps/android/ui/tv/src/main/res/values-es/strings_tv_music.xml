@@ -35,4 +35,9 @@
     <string name="tv_music_error_signed_out">Vuelve a iniciar sesión para reproducir.</string>
     <string name="tv_music_error_stopped">El servidor detuvo la reproducción.</string>
     <string name="tv_music_error_unplayable">Esta pista no se puede reproducir.</string>
+    <plurals name="tv_music_error_unplayable_next">
+        <item quantity="one">Esta pista no se puede reproducir. La siguiente empieza en %1$d segundo.</item>
+        <item quantity="many">Esta pista no se puede reproducir. La siguiente empieza en %1$d segundos.</item>
+        <item quantity="other">Esta pista no se puede reproducir. La siguiente empieza en %1$d segundos.</item>
+    </plurals>
 </resources>

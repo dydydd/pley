@@ -185,7 +185,7 @@ class MusicService : MediaLibraryService() {
         val describe: (ItemSummary) -> MediaItem = if (library != null) { track -> library.queueItem(track) } else QueuePlayer::plainItem
         // The player outlives the service: its words come through the app, not this service.
         val app = applicationContext
-        val player = QueuePlayer(output.player, playback, describe) { wordsOf(app, it) }
+        val player = QueuePlayer(output.player, playback, describe) { error, nextIn -> wordsOf(app, error, nextIn) }
         made = output to player
         return player
     }
@@ -664,15 +664,19 @@ class MusicService : MediaLibraryService() {
         /** The longest search a car or the Assistant sends that is used. */
         const val MAX_QUERY = 200
 
-        /** Why a track doesn't play, as a car says it, in the language shown. */
-        fun wordsOf(context: Context, error: MusicError): String = AppLanguage.resources(context).getString(
-            when (error) {
-                MusicError.SignedOut -> R.string.music_library_signed_out
-                MusicError.Offline -> R.string.music_library_offline
-                MusicError.Unplayable -> R.string.music_library_unplayable
-                MusicError.Stopped -> R.string.music_library_stopped
-            },
-        )
+        /** Why a track doesn't play, as a car says it, in the language shown; and when the next plays, [nextIn] s from now. */
+        fun wordsOf(context: Context, error: MusicError, nextIn: Int? = null): String {
+            val words = AppLanguage.resources(context)
+            if (error == MusicError.Unplayable && nextIn != null) return words.getQuantityString(R.plurals.music_library_unplayable_next, nextIn, nextIn)
+            return words.getString(
+                when (error) {
+                    MusicError.SignedOut -> R.string.music_library_signed_out
+                    MusicError.Offline -> R.string.music_library_offline
+                    MusicError.Unplayable -> R.string.music_library_unplayable
+                    MusicError.Stopped -> R.string.music_library_stopped
+                },
+            )
+        }
     }
 }
 

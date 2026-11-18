@@ -6,6 +6,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
@@ -315,10 +316,12 @@ private fun StatusLine(now: NowPlaying, keepRoom: Boolean = true) {
             value = true
         }
     }
+    val nextIn = now.nextIn
     val text = when {
         now.error == MusicError.Offline -> stringResource(R.string.music_error_offline)
         now.error == MusicError.SignedOut -> stringResource(R.string.music_error_signed_out)
         now.error == MusicError.Stopped -> stringResource(R.string.music_error_stopped)
+        now.error != null && nextIn != null -> pluralStringResource(R.plurals.music_error_unplayable_next, nextIn, nextIn)
         now.error != null -> stringResource(R.string.music_error_unplayable)
         now.loading && slow -> stringResource(R.string.music_loading)
         else -> null

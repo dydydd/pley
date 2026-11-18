@@ -43,7 +43,7 @@ internal class QueuePlayer(
     player: Player,
     private val playback: MusicPlayback,
     private val describe: (track: ItemSummary) -> MediaItem = { plainItem(it) },
-    private val words: (MusicError) -> String = { it.name },
+    private val words: (MusicError, nextIn: Int?) -> String = { error, _ -> error.name },
 ) : ForwardingSimpleBasePlayer(player) {
     /** Shows [playback]'s queue as it is now. */
     fun queueChanged() = invalidateState()
@@ -90,7 +90,7 @@ internal class QueuePlayer(
             // reach as the track was asked for), where the session would say nothing plays and nothing is wrong.
             state.setPlaybackState(Player.STATE_IDLE)
                 .setIsLoading(false)
-                .setPlayerError(PlaybackException(words(failed), null, errorCodeOf(failed)))
+                .setPlayerError(PlaybackException(words(failed, now.nextIn), null, errorCodeOf(failed)))
                 .setPlayWhenReady(false, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
             if (!loaded) state.atTheStart()
             return state.build()

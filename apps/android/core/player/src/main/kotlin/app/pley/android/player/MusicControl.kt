@@ -50,6 +50,11 @@ data class NowPlaying(
      * shows the position reads it again when this changes, paused too.
      */
     val seeks: Int = 0,
+    /**
+     * A track that can't be played, while the music plays on: the seconds
+     * before the next one plays by itself; `null` when none will.
+     */
+    val nextIn: Int? = null,
 ) {
     /** Whether Next has a track to go to: the one after, or with [repeat] the first again. */
     val hasNext: Boolean get() = index + 1 < count || repeat != MusicRepeat.Off

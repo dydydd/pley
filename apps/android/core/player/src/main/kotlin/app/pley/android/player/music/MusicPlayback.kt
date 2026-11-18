@@ -139,6 +139,13 @@ class MusicPlayback(
     private var yielded = false
     private var error: MusicError? = null
 
+    /** Counting down to the next track after one that can't be played ([NowPlaying.nextIn]). */
+    private var skipJob: Job? = null
+    private var nextIn: Int? = null
+
+    /** Tracks that couldn't be played one after another, skipped by themselves: a queue none of plays stops. */
+    private var failedInARow = 0
+
     /** Paused for [PAUSED_HOLD_MS]: the event stream is let go in the background until it plays again. */
     private var rested = false
     private var resting: Job? = null
@@ -246,6 +253,7 @@ class MusicPlayback(
     /** Plays [tracks] from the one at [startIndex], [startMs] into it (what was playing, brought back where it was). */
     fun play(tracks: List<ItemSummary>, startIndex: Int = 0, shuffle: Boolean = false, startMs: Long = 0) {
         if (tracks.isEmpty()) return
+        failedInARow = 0
         queue.start(tracks, startIndex, shuffle)
         startTrack(startMs.coerceAtLeast(0))
     }
@@ -265,6 +273,11 @@ class MusicPlayback(
     }
 
     fun pause() {
+        // Paused on a track that can't be played: the next one waits too.
+        if (skipJob != null) {
+            cancelSkip()
+            publish()
+        }
         if (starting) startPlays = false
         out?.pause()
         // The output may have been paused already (the track before): Play/Pause shows the track coming waits.
@@ -294,10 +307,12 @@ class MusicPlayback(
     }
 
     fun next() {
+        failedInARow = 0
         if (queue.next()) startTrack(0)
     }
 
     fun previous() {
+        failedInARow = 0
         val o = out
         // Pressed again while the track before is still asked for, it goes one more back: that one hasn't played.
         when (queue.previous(lastPosition())) {
@@ -324,6 +339,7 @@ class MusicPlayback(
     }
 
     fun jumpTo(index: Int) {
+        failedInARow = 0
         if (queue.jumpTo(index)) startTrack(0)
     }
 
@@ -346,6 +362,7 @@ class MusicPlayback(
      */
     fun pauseForVideo() {
         if (queue.isEmpty) return
+        cancelSkip()
         loadJob?.cancel()
         yielded = true
         stopTicker()
@@ -358,6 +375,7 @@ class MusicPlayback(
 
     /** Ends the session, stops the output and forgets the queue. */
     fun stop() {
+        cancelSkip()
         loadJob?.cancel()
         stopTicker()
         timer.cancel()
@@ -398,6 +416,7 @@ class MusicPlayback(
             recreates = 0
         }
         val wantPlay = play ?: (!sameTrack || error != null || (out?.playWhenReady ?: true))
+        cancelSkip()
         loadJob?.cancel()
         stopTicker()
         endSession()
@@ -430,7 +449,8 @@ class MusicPlayback(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                fail(errorOf(e))
+                // Whether it was to play, as Play/Pause said while it was asked for.
+                fail(errorOf(e), wanted = startPlays)
                 return@launch
             }
             session = started
@@ -473,12 +493,39 @@ class MusicPlayback(
         s.end(lastPosition())
     }
 
-    private fun fail(why: MusicError) {
+    /** The track fails for good, [wanted] or not playing, as Play/Pause said until now. */
+    private fun fail(why: MusicError, wanted: Boolean = wantsPlay) {
         loading = false
         playing = false
         error = why
         stopTicker()
+        // A track the server can't play, while the music plays: the next one plays by itself after a moment to read why,
+        // as a driver can't look for Next. Not when the server is out of reach (the next track would fail the same way),
+        // not at the queue's end, and not round a queue none of whose tracks plays.
+        if (why == MusicError.Unplayable && wanted && queue.hasNext && failedInARow + 1 < queue.size) skipSoon()
         publish()
+    }
+
+    /** Counts [SKIP_AFTER_S] seconds down, then plays the next track; Play, Pause, Next or any other track stops it. */
+    private fun skipSoon() {
+        cancelSkip()
+        skipJob = scope.launch {
+            for (left in SKIP_AFTER_S downTo 1) {
+                nextIn = left
+                publish()
+                delay(1_000)
+            }
+            skipJob = null
+            nextIn = null
+            failedInARow++
+            if (queue.next()) startTrack(0) else publish()
+        }
+    }
+
+    private fun cancelSkip() {
+        skipJob?.cancel()
+        skipJob = null
+        nextIn = null
     }
 
     /**
@@ -514,6 +561,7 @@ class MusicPlayback(
             if (playing) {
                 loading = false
                 recreates = 0
+                failedInARow = 0
             }
             publish()
         }
@@ -642,6 +690,7 @@ class MusicPlayback(
                 repeat = queue.repeat,
                 wantsPlay = wantsPlay,
                 seeks = seeks,
+                nextIn = nextIn,
             )
         }
     }
@@ -694,6 +743,9 @@ class MusicPlayback(
         const val PAUSED_HOLD_MS = 90_000L
 
         /** New sessions asked in a row for one track before it counts as failed. */
+        /** How long a track that can't be played says so before the next one plays. */
+        const val SKIP_AFTER_S = 5
+
         const val MAX_RECREATES = 3
 
         /** The longest a new track waits for the last one's reports to go out. */

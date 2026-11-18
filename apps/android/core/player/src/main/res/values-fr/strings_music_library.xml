@@ -42,5 +42,10 @@
     <string name="music_library_failed">Une erreur s’est produite. Réessayez.</string>
     <!-- Why the track doesn't play, on the car's Now Playing. -->
     <string name="music_library_unplayable">Impossible de lire ce titre</string>
+    <plurals name="music_library_unplayable_next">
+        <item quantity="one">Impossible de lire ce titre. Le suivant démarre dans %1$d seconde</item>
+        <item quantity="many">Impossible de lire ce titre. Le suivant démarre dans %1$d secondes</item>
+        <item quantity="other">Impossible de lire ce titre. Le suivant démarre dans %1$d secondes</item>
+    </plurals>
     <string name="music_library_stopped">Le serveur a arrêté la lecture</string>
 </resources>

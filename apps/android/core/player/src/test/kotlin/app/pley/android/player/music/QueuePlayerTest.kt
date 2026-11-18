@@ -53,7 +53,7 @@ class QueuePlayerTest {
     )
     private val engine = ExoPlayer.Builder(ApplicationProvider.getApplicationContext()).build()
     private val album = (1..3L).map { track(it) }
-    private val player = QueuePlayer(engine, playback, words = { "Pley: $it" })
+    private val player = QueuePlayer(engine, playback, words = { error, nextIn -> "Pley: $error" + (nextIn?.let { " (next in $it)" } ?: "") })
 
     @After
     fun tearDown() {
@@ -237,6 +237,16 @@ class QueuePlayerTest {
         player.queueChanged()
         idle()
         assertNull(player.playerError)
+    }
+
+    @Test
+    fun aTrackThatCantBePlayedTellsTheCarWhenTheNextOnePlays() {
+        api.fail("startPlayback", RuntimeException("the server can't open the file"))
+        playback.play(album)
+        idle()
+        player.queueChanged()
+        idle()
+        assertEquals("Pley: Unplayable (next in ${MusicPlayback.SKIP_AFTER_S})", player.playerError?.message)
     }
 
     @Test

@@ -42,5 +42,10 @@
     <string name="music_library_failed">Algo salió mal. Inténtalo de nuevo.</string>
     <!-- Why the track doesn't play, on the car's Now Playing. -->
     <string name="music_library_unplayable">Esta pista no se puede reproducir</string>
+    <plurals name="music_library_unplayable_next">
+        <item quantity="one">Esta pista no se puede reproducir. La siguiente empieza en %1$d segundo</item>
+        <item quantity="many">Esta pista no se puede reproducir. La siguiente empieza en %1$d segundos</item>
+        <item quantity="other">Esta pista no se puede reproducir. La siguiente empieza en %1$d segundos</item>
+    </plurals>
     <string name="music_library_stopped">El servidor detuvo la reproducción</string>
 </resources>
