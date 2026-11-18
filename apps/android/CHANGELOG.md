@@ -8,8 +8,6 @@ describes how they are made.
 
 ## [Unreleased]
 
-## [0.1.15] - 2026-11-18
-
 ### Added
 
 - Pley plays music in Android Auto: Recent (what you played last, then
@@ -43,17 +41,9 @@ describes how they are made.
   that played last), and the car's Play plays it; Play on a headset or
   on the steering wheel over Bluetooth brings the music back too once
   the app has left memory.
-- Play on… lists Google Cast and AirPlay devices for Live TV channels too.
-- A library's Collections are grouped by category, and can be narrowed
-  to one category; a collection's page shows its category.
-- A row's See all opens the collection it shows, and a Home row of
-  collections of the same title in several libraries opens them together.
 
 ### Changed
 
-- The home banner's More info button reads Más info in Spanish.
-- Recommended no longer ends with a row of every collection: it shows
-  the rows administrators chose.
 - An artist's, album's or playlist's page puts the cover beside the
   title on a phone on its side and on tablets, with Play in view.
 - The rail beside the page on a phone on its side or a tablet shows its
@@ -106,6 +96,22 @@ describes how they are made.
   typed lists the albums played and added last.
 - Music's notification, with its Shuffle and Repeat buttons, comes back
   when Android starts the music again by itself after ending the app.
+
+## [0.1.15] - 2026-11-18
+
+### Added
+
+- Play on… lists Google Cast and AirPlay devices for Live TV channels too.
+- A library's Collections are grouped by category, and can be narrowed
+  to one category; a collection's page shows its category.
+- A row's See all opens the collection it shows, and a Home row of
+  collections of the same title in several libraries opens them together.
+
+### Changed
+
+- The home banner's More info button reads Más info in Spanish.
+- Recommended no longer ends with a row of every collection: it shows
+  the rows administrators chose.
 
 ## [0.1.14] - 2026-11-16
 
