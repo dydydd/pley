@@ -7,7 +7,7 @@ using Xunit;
 
 namespace Pley.Tv.Core.Tests;
 
-/// <summary>The sample rates the TV takes, as the web TV app answers them too (packages/tv/test/fixtures/audio-rate.json).</summary>
+/// <summary>The sample rates the TV takes, as the web TV app answers them too (packages/tv/test/fixtures/audio-rate.json); TrueHD goes to a receiver.</summary>
 public class AudioRateTests
 {
     public static IEnumerable<object[]> PlaysCases =>
@@ -24,7 +24,7 @@ public class AudioRateTests
         var audio = new MediaStream { Index = 1, Kind = "audio", Codec = a.GetProperty("codec").GetString()!, Default = true, SampleRate = Number(a.GetProperty("sample_rate")) };
         var caps = new ClientCaps
         {
-            AudioCodecs = new[] { "aac", "ac3", "eac3" }, AudioDecode = new[] { "aac", "ac3", "eac3" },
+            AudioCodecs = new[] { "aac", "ac3", "eac3" }, AudioDecode = new[] { "aac", "ac3", "eac3" }, AudioPassthrough = new[] { "truehd" },
             AudioMaxSampleRate = Number(a.GetProperty("most")),
         };
         Assert.Equal(c.GetProperty("out").GetBoolean(), PlaybackPlan.AudioPlaysHere(audio, caps));

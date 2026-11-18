@@ -25,7 +25,8 @@ describes how they are made.
 - A player can say the highest audio sample rate it decodes
   (`audio_max_sample_rate`): a track above it is converted, at 48 kHz, and
   playback details say why ("AAC at 96 kHz is above this device's 48
-  kHz."). Samsung's TVs garble AAC at 96 kHz played as it is.
+  kHz."). Samsung's TVs garble AAC at 96 kHz played as it is. Audio passed
+  through to a receiver is left as it is.
 
 ## [0.1.13] - 2026-11-18
 

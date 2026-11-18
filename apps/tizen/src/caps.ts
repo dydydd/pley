@@ -14,7 +14,7 @@ import type { TizenFacts } from "./facts";
 
 /**
  * The highest audio sample rate the TV decodes: Samsung's media
- * specifications list 8 to 48 kHz for every codec, and AAC 5.1 at 96 kHz
+ * specifications list 8 to 48 kHz, and AAC 5.1 at 96 kHz
  * played as it is comes out garbled, its player saying nothing.
  */
 export const MOST_SAMPLE_RATE = 48000;

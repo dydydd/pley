@@ -86,8 +86,9 @@ pub struct Caps {
     pub audio_channels: Option<u32>,
     /// The highest sample rate the player decodes audio at, in Hz (48000 on
     /// Samsung's TVs, whose player garbles AAC at 96 kHz without an error).
-    /// A track above it is converted, which resamples it to 48 kHz; left
-    /// out, rates aren't checked.
+    /// A track above it is converted, which resamples it to 48 kHz, so a
+    /// lower limit counts as 48 kHz; one passed through to a receiver isn't
+    /// checked. Left out, rates aren't checked.
     #[serde(default)]
     pub audio_max_sample_rate: Option<u32>,
     /// Subtitle codecs the player shows itself, pictures (PGS…) included.
@@ -218,11 +219,18 @@ impl Caps {
         [&self.audio_decode, &self.audio_passthrough].into_iter().flatten().any(|list| listed(list, c))
     }
 
-    /// The version 2 player decodes audio at this sample rate: not above its
-    /// `audio_max_sample_rate`. A rate or a limit not known is taken.
-    fn decodes_rate(&self, rate: Option<i64>) -> bool {
-        match (self.audio_max_sample_rate.filter(|_| self.is_v2()), rate) {
-            (Some(most), Some(rate)) => rate <= i64::from(most),
+    /// The highest sample rate the version 2 player decodes, when it says:
+    /// 48 kHz at least, the rate converted audio has.
+    fn most_sample_rate(&self) -> Option<i64> {
+        self.audio_max_sample_rate.filter(|_| self.is_v2()).map(|most| i64::from(most.max(48_000)))
+    }
+
+    /// The player takes a track of this codec at this sample rate: not above
+    /// the highest it decodes, or passed through to a receiver. A rate or a
+    /// limit not known is taken.
+    fn plays_rate(&self, codec: &str, rate: Option<i64>) -> bool {
+        match (self.most_sample_rate(), rate) {
+            (Some(most), Some(rate)) => rate <= most || crate::streams::AudioOut::passes_through(self, codec),
             _ => true,
         }
     }
@@ -298,8 +306,8 @@ impl crate::streams::AudioOut for Caps {
     fn passes_through(&self, codec: &str) -> bool {
         self.is_v2() && self.audio_passthrough.as_deref().is_some_and(|list| listed(list, codec))
     }
-    fn takes_rate(&self, rate: Option<i64>) -> bool {
-        self.decodes_rate(rate)
+    fn takes_rate(&self, codec: &str, rate: Option<i64>) -> bool {
+        self.plays_rate(codec, rate)
     }
     fn switches_tracks(&self) -> bool {
         self.is_v2() && self.audio_track_switching == Some(true)
@@ -1569,14 +1577,13 @@ pub fn decide(file: &FileRow, info: Option<&MediaInfo>, streams: &[MediaStream],
     };
     let audio_ok = match audio {
         None => true,
-        Some(a) if caps.plays_audio(&a.codec) && caps.decodes_rate(a.sample_rate) => true,
+        Some(a) if caps.plays_audio(&a.codec) && caps.plays_rate(&a.codec, a.sample_rate) => true,
         Some(a) if caps.plays_audio(&a.codec) => {
-            let (rate, most) = (a.sample_rate.unwrap_or(0), i64::from(caps.audio_max_sample_rate.unwrap_or(0)));
             reasons.push(format!(
                 "{} at {} is above this device's {}.",
                 codec_label(&a.codec),
-                kilohertz(rate),
-                kilohertz(most)
+                kilohertz(a.sample_rate.unwrap_or_default()),
+                kilohertz(caps.most_sample_rate().unwrap_or_default())
             ));
             false
         }
@@ -1715,7 +1722,7 @@ pub fn decide(file: &FileRow, info: Option<&MediaInfo>, streams: &[MediaStream],
     let audio_req = audio.map(|a| {
         // As the choice of the track counted on (streams::fit): a rate above
         // the player's is converted, which resamples it.
-        let copy = crate::streams::AudioOut::stream_copies(caps, &a.codec) && caps.decodes_rate(a.sample_rate);
+        let copy = crate::streams::AudioOut::stream_copies(caps, &a.codec) && caps.plays_rate(&a.codec, a.sample_rate);
         let (codec, channels) = converted_audio(caps, a);
         AudioRequest {
             stream_index: Some(a.index),
@@ -3740,6 +3747,23 @@ mod tests {
         i.streams[1].sample_rate = Some(48_000);
         assert_eq!(decide(&f, Some(&i), &i.streams, &req).method, Method::Direct);
         assert_eq!(kilohertz(88_200), "88.2 kHz");
+        // Converting makes 48 kHz: a lower limit counts as 48 kHz.
+        req.caps.audio_max_sample_rate = Some(44_100);
+        assert_eq!(decide(&f, Some(&i), &i.streams, &req).method, Method::Direct);
+
+        // A receiver decodes what is passed through to it, at any rate.
+        req.caps.audio_passthrough = Some(vec!["truehd".into()]);
+        let mut truehd = info("hevc", &["truehd"], DynamicRange::Sdr);
+        truehd.streams[1].sample_rate = Some(192_000);
+        assert_eq!(decide(&f, Some(&truehd), &truehd.streams, &req).method, Method::Direct);
+
+        // Of a language's tracks, one at a rate the player takes.
+        let mut two = info("hevc", &["aac", "aac"], DynamicRange::Sdr);
+        for (s, rate) in two.streams[1..3].iter_mut().zip([96_000, 48_000]) {
+            (s.sample_rate, s.language) = (Some(rate), Some("eng".into()));
+        }
+        let defaults = crate::streams::Defaults::default();
+        assert_eq!(crate::streams::resolve(None, &defaults, &two.streams, Some(&req.caps)).audio, Some(2));
     }
 
     /// A version 2 web app's report (the TVs' too): Matroska, H.264 and

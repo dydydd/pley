@@ -54,8 +54,8 @@ public static class TizenCaps
     public static readonly IReadOnlyList<string> DecodedAudio = new[] { "aac", "ac3", "eac3", "mp3", "mp2", "flac", "vorbis", "pcm_s16le", "pcm_s24le" };
 
     /// <summary>
-    /// The highest audio sample rate the TV decodes: Samsung's media specifications list 8 to 48 kHz
-    /// for every codec, and AAC 5.1 at 96 kHz played as it is comes out garbled, its player saying nothing.
+    /// The highest audio sample rate the TV decodes: Samsung's media specifications list 8 to 48 kHz,
+    /// and AAC 5.1 at 96 kHz played as it is comes out garbled, its player saying nothing.
     /// </summary>
     public const int MostSampleRate = 48_000;
 

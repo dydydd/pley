@@ -83,7 +83,7 @@ describe("Samsung capabilities, rules", () => {
     expect(tizenCaps(tv({ outputMode: null })).caps.audio_passthrough).toEqual([]);
   });
 
-  it("says the TV decodes audio up to 48 kHz, as Samsung's media specifications list for every codec", () => {
+  it("says the TV decodes audio up to 48 kHz, as Samsung's media specifications list", () => {
     for (const facts of Object.values(SETS)) expect(tizenCaps(facts).caps.audio_max_sample_rate).toBe(48000);
   });
 

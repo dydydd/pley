@@ -143,21 +143,18 @@ public static class PlaybackPlan
     public static string TextSubtitlesPath(long fileId, int index) => $"/api/files/{fileId}/subtitles/{index}.vtt";
 
     /// <summary>
-    /// Whether the TV takes <paramref name="stream"/>'s sample rate: no higher than the report's
-    /// <c>audio_max_sample_rate</c>, as the server judges it. A rate or a limit not known is taken.
+    /// Whether this TV decodes <paramref name="stream"/>'s audio or sends it as it is to the receiver. As the
+    /// server judges it, decoded audio above the report's <c>audio_max_sample_rate</c> doesn't play here; a
+    /// rate not known does.
     /// </summary>
-    public static bool RatePlaysHere(MediaStream? stream, ClientCaps? caps) =>
-        stream?.SampleRate is not int rate || caps?.AudioMaxSampleRate is not int most || rate <= most;
-
-    /// <summary>Whether this TV decodes <paramref name="stream"/>'s audio or sends it as it is to the receiver.</summary>
     public static bool AudioPlaysHere(MediaStream? stream, ClientCaps? caps)
     {
         if (stream == null || caps == null) return true;
-        if (!RatePlaysHere(stream, caps)) return false;
-        var codec = stream.Codec.ToLowerInvariant();
-        return caps.AudioCodecs.Concat(caps.AudioDecode).Concat(caps.AudioPassthrough).Any(c => string.Equals(c, codec, StringComparison.OrdinalIgnoreCase));
+        bool Has(IEnumerable<string> list) => list.Any(c => string.Equals(c, stream.Codec, StringComparison.OrdinalIgnoreCase));
+        if (Has(caps.AudioPassthrough)) return true;
+        return Has(caps.AudioCodecs.Concat(caps.AudioDecode))
+            && (stream.SampleRate is not int rate || caps.AudioMaxSampleRate is not int most || rate <= most);
     }
-
 
     /// <summary>Whether this TV opens <paramref name="file"/>'s container as it is.</summary>
     public static bool ContainerPlaysHere(MediaFile? file, ClientCaps? caps)

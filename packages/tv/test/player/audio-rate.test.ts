@@ -3,9 +3,9 @@ import type { ClientCaps, MediaStream } from "../../src/api/types";
 import { audioPlaysHere } from "../../src/player/plan";
 import fixture from "../fixtures/audio-rate.json";
 
-/** The sample rates the TV takes, as the native app answers them too (AudioRateTests). */
+/** The sample rates the TV takes, as the native app answers them too (AudioRateTests); TrueHD goes to a receiver. */
 const caps = (most: number | null) =>
-  ({ audio_codecs: ["aac", "ac3", "eac3"], audio_decode: ["aac", "ac3", "eac3"], audio_passthrough: [], ...(most == null ? {} : { audio_max_sample_rate: most }) }) as unknown as ClientCaps;
+  ({ audio_codecs: ["aac", "ac3", "eac3"], audio_decode: ["aac", "ac3", "eac3"], audio_passthrough: ["truehd"], ...(most == null ? {} : { audio_max_sample_rate: most }) }) as unknown as ClientCaps;
 const audio = (codec: string, rate: number | null): MediaStream =>
   ({ index: 1, kind: "audio", codec, language: null, title: null, default: true, forced: false, sample_rate: rate ?? undefined }) as MediaStream;
 
