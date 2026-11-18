@@ -1091,15 +1091,23 @@ Night Drive playlist", in English, French and Spanish), else the closest
 artist (shuffled), album or track; "play music on Pley" plays on what
 was playing, else the album added last. A request that finds nothing
 says so on the car's screen for a moment ("Pley found no music for …"),
-and what was playing plays on.
+and what was playing plays on. The Assistant asks for what it heard to be
+ready before it speaks, then for it to play: Pley makes it ready without
+a sound, and starts it once, when asked to play.
 
 Music picks up where it was after Android has ended the app (one paused
 a while, say): the queue, the place in it and what repeats are kept on
 the device with the profile's saved things, for that profile alone and
-until it signs out or the music is stopped, and Play on the car's
-steering wheel, in Android Auto or in the phone's media controls plays
-it again from there. A long queue keeps the 500 tracks around the one
-that played. Signed
+until it signs out or the music is stopped. As a car connects, what
+played last waits in its Now Playing, paused where it was (the music, or
+the radio's channel when that played last), so the car has something to
+play, and its Play plays it, pressed or sent by a car set to start media
+by itself; Pley never starts the sound itself. Play on a headset, on the
+car's steering wheel over Bluetooth or in the phone's media controls
+brings it back the same way once the app has left memory. Stop from the
+car or the Assistant ("Hey Google, stop") pauses, so the queue is there
+for the next drive; music stopped from its notification is forgotten. A
+long queue keeps the 500 tracks around the one that played. Signed
 out, the car says to open Pley on the phone and sign in when it is safe,
 with a button that opens it. The car reads the covers from the app, as the server's
 pictures need the profile's token: the app grants Android Auto, and the
@@ -1123,7 +1131,9 @@ on Pley" plays a channel named exactly, else the music found, else the
 closest channel. The music pauses while the radio plays, and music played
 again (from the car or the phone) stops the radio. Pause lets the
 channel's connection go, as does another app's sound taking over or the
-phone leaving the car; Play tunes it again. The app reads the channel's
+phone leaving the car; Play tunes it again. The channel played last is
+kept on the device until music plays again: it is what waits, not tuned,
+when a car next connects, and Play tunes it. The app reads the channel's
 stream as the server sends it, picture and all, and plays only its
 sound.
 

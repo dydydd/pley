@@ -77,6 +77,41 @@ class LiveRadioTest {
     }
 
     @Test
+    fun aChannelMadeReadyWaitsAndPlayTunesIt() {
+        // The channel played when a car was last connected, or one the Assistant asks to have ready before it speaks.
+        radio.cue(channels, 1)
+        settle()
+        assertEquals(emptyList<String>(), live.sent)
+        val player = radio.player
+        assertTrue(radio.active)
+        assertEquals(1, player.currentMediaItemIndex)
+        assertEquals("channel:2", player.currentMediaItem?.mediaId)
+        assertFalse(player.playWhenReady)
+        assertEquals(Player.STATE_READY, player.playbackState)
+        assertTrue(player.isCurrentMediaItemLive)
+
+        player.play()
+        settle()
+        assertEquals("watch 2 android-1", live.sent.last())
+        assertTrue(player.playWhenReady)
+        assertEquals(Player.STATE_BUFFERING, player.playbackState)
+    }
+
+    @Test
+    fun aChannelMadeReadyWhileAnotherPlaysLetsThatOneGoAndPlayTunesTheNewOne() {
+        val player = playing()
+        radio.cue(channels, 2)
+        settle()
+        assertTrue(live.sent.last().startsWith("leave "))
+        assertFalse(player.playWhenReady)
+        assertEquals("channel:5", player.currentMediaItem?.mediaId)
+
+        player.play()
+        settle()
+        assertEquals("watch 5 android-1", live.sent.last())
+    }
+
+    @Test
     fun pauseLetsTheChannelGoAndPlayTunesItAgain() {
         val player = playing()
         player.pause()

@@ -25,7 +25,9 @@ data class SavedMusic(
  * a while, and the Play of a car's steering wheel, of Android Auto or of
  * the phone's media controls then found nothing to play. The queue is
  * written when it changes and the place in it as it moves ([keep]); a
- * queue stopped is forgotten, as it is for whoever stopped it.
+ * queue stopped is forgotten, as it is for whoever stopped it. A Live TV
+ * channel played as radio in a car is kept too ([keepRadio]), until music
+ * plays again: the last of the two is what a car is shown.
  *
  * It is kept with the profile's saved things ([read] and [write] are the
  * active profile's snapshots), so another profile never gets it and
@@ -44,6 +46,9 @@ class MusicResume(
 
     /** Whether what was kept has been forgotten in this run, and nothing kept since. */
     private var forgotten = false
+
+    /** The radio's channel as last kept or read ([keepRadio]); unknown until then. */
+    private var radio: String? = UNREAD
 
     /** What waits to be written, the latest of each key, in order. */
     private val pending = LinkedHashMap<String, ByteArray>()
@@ -73,6 +78,31 @@ class MusicResume(
             put(QUEUE, PleyJson.encodeToString(TRACKS, window).encodeToByteArray())
         }
         put(PLACE, "${queue.index - from} ${positionMs.coerceAtLeast(0)} ${queue.repeat.name}".encodeToByteArray())
+    }
+
+    /**
+     * Keeps which channel the car's radio plays ([mediaId], as the car's
+     * library names it), so it is what waits for Play when a car next
+     * connects; `null` once music plays again.
+     */
+    fun keepRadio(mediaId: String?) {
+        if (mediaId == radio) return
+        radio = mediaId
+        put(RADIO, (mediaId ?: "").encodeToByteArray())
+    }
+
+    /** The channel kept by [keepRadio], or `null`: music played last, or nothing did. */
+    suspend fun savedRadio(): String? {
+        writer?.join()
+        val kept = try {
+            read(RADIO)?.decodeToString()?.takeIf { it.isNotEmpty() && it.length <= MAX_RADIO_ID }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+        radio = kept
+        return kept
     }
 
     /** Forgets what was kept: the music was stopped. */
@@ -132,6 +162,13 @@ class MusicResume(
         /** The snapshots' keys: the queue's tracks, and "index position repeat". */
         const val QUEUE = "music:queue"
         const val PLACE = "music:place"
+
+        /** The snapshot's key for the radio's channel, and the longest id read back. */
+        const val RADIO = "music:radio"
+        private const val MAX_RADIO_ID = 200
+
+        /** Not a channel's id: nothing was kept or read in this run yet, so the first [keepRadio] writes. */
+        private const val UNREAD = "unread"
 
         private val TRACKS = ListSerializer(ItemSummary.serializer())
     }

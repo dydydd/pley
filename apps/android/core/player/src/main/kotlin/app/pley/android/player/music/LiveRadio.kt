@@ -48,6 +48,9 @@ class LiveRadio(
     private var channels: List<LiveChannel> = emptyList()
     private var index = 0
 
+    /** The channel was picked and not tuned yet ([cue]): what the playback says is of the one before. */
+    private var waits = false
+
     val player = RadioPlayer()
 
     /** A channel is picked: tuned, or kept to tune again on Play. */
@@ -58,7 +61,23 @@ class LiveRadio(
         if (list.isEmpty()) return
         channels = list
         index = at.coerceIn(list.indices)
+        waits = false
         playback().tune(channels[index].id)
+        player.changed()
+    }
+
+    /**
+     * Makes [list]'s channel at [at] the radio's without tuning it: it
+     * waits, and Play tunes it. The channel played when the car was last
+     * connected, or one a car or the Assistant asked to have ready before
+     * it asks to play. A channel playing meanwhile is let go.
+     */
+    fun cue(list: List<LiveChannel>, at: Int) {
+        if (list.isEmpty()) return
+        channels = list
+        index = at.coerceIn(list.indices)
+        waits = true
+        playback?.stop()
         player.changed()
     }
 
@@ -67,9 +86,10 @@ class LiveRadio(
         playback?.stop()
     }
 
-    /** Tunes the channel let go again, from the live edge. */
+    /** Tunes the channel let go again, from the live edge; one that waits ([cue]), for the first time. */
     fun resume() {
-        val made = playback ?: return play(channels, index)
+        val made = playback
+        if (made == null || waits) return play(channels, index)
         if (made.state.value.phase is LivePhase.Failed) made.retry() else made.resume()
     }
 
@@ -81,6 +101,7 @@ class LiveRadio(
         playback = null
         channels = emptyList()
         index = 0
+        waits = false
         player.changed()
     }
 
@@ -94,6 +115,7 @@ class LiveRadio(
     private fun step(by: Int) {
         if (channels.size < 2) return
         index = Math.floorMod(index + by, channels.size)
+        waits = false
         playback().tune(channels[index].id)
         player.changed()
     }
@@ -105,7 +127,8 @@ class LiveRadio(
         following = scope.launch { made.state.collect { player.changed() } }
     }
 
-    private val liveState: LiveState get() = playback?.state?.value ?: LiveState()
+    /** What the playback does; nothing yet for a channel that waits. */
+    private val liveState: LiveState get() = if (waits) LiveState() else playback?.state?.value ?: LiveState()
 
     /** The session's player: the radio's channels and what the playback is doing. */
     inner class RadioPlayer : SimpleBasePlayer(Looper.getMainLooper()) {
@@ -154,6 +177,7 @@ class LiveRadio(
                 Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> step(-1)
                 Player.COMMAND_SEEK_TO_MEDIA_ITEM -> if (mediaItemIndex in channels.indices && mediaItemIndex != index) {
                     index = mediaItemIndex
+                    waits = false
                     playback().tune(channels[index].id)
                     changed()
                 }

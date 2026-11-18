@@ -50,6 +50,27 @@ class MusicResumeTest {
     }
 
     @Test
+    fun theRadiosChannelIsKeptUntilMusicPlaysAgainAndWrittenOnlyWhenItChanges() = runTest {
+        val first = resume()
+        assertEquals(null, first.savedRadio())
+        first.keepRadio("channel:7@favourites")
+        first.keepRadio("channel:7@favourites")
+        runCurrent()
+        assertEquals(1, written.count { it == MusicResume.RADIO })
+        // Another process reads it back; the music kept beside it stays.
+        first.keep(MusicQueueState(album, index = 1), positionMs = 0)
+        runCurrent()
+        val second = resume()
+        assertEquals("channel:7@favourites", second.savedRadio())
+        assertEquals(1, second.saved()!!.index)
+
+        second.keepRadio(null)
+        runCurrent()
+        assertEquals(null, resume().savedRadio())
+        assertEquals(1, resume().saved()!!.index)
+    }
+
+    @Test
     fun thePlaceIsWrittenAsItMovesAndTheQueueOnlyWhenItChanges() = runTest {
         val resume = resume()
         resume.keep(MusicQueueState(album, index = 0), positionMs = 0)

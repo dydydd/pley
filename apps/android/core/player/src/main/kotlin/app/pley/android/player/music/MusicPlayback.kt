@@ -82,6 +82,8 @@ class MusicEnvironment(
  *   track (the next one waits, paused);
  * - a video or a channel ends the music's session ([pauseForVideo]): the
  *   queue and the place stay, and Play starts a new session there;
+ * - a queue can wait without playing ([cue]): what was playing when the app
+ *   was last in memory, or what a car asked to have ready; Play starts it;
  * - the remote, on another of the profile's devices, plays and pauses,
  *   seeks, skips, and goes to the next or previous track ([obey]); the
  *   event stream stays open while music is under way, the screen off too,
@@ -137,6 +139,9 @@ class MusicPlayback(
 
     /** A video or a channel took over ([pauseForVideo]): the session went, the place stays. */
     private var yielded = false
+
+    /** Where a queue that waits for Play starts ([cue]); `null` once its track has been asked for. */
+    private var waitingAt: Long? = null
     private var error: MusicError? = null
 
     /** Counting down to the next track after one that can't be played ([NowPlaying.nextIn]). */
@@ -242,6 +247,8 @@ class MusicPlayback(
     val active: Boolean get() = !queue.isEmpty
 
     fun position(): MusicPosition {
+        // A queue that waits, where it starts: no output is made for it until it plays.
+        waitingAt?.let { return MusicPosition(it, queue.current?.durationMs ?: 0, 0) }
         val o = out ?: return MusicPosition()
         // Between tracks: the start of the one coming, not where the last one was.
         if (!held) return MusicPosition(0, queue.current?.durationMs ?: 0, 0)
@@ -256,6 +263,38 @@ class MusicPlayback(
         failedInARow = 0
         queue.start(tracks, startIndex, shuffle)
         startTrack(startMs.coerceAtLeast(0))
+    }
+
+    /**
+     * Makes [tracks] the queue without playing it: the track at
+     * [startIndex] waits, [startMs] into it, and Play starts it there. It
+     * is what was playing when the app was last in memory, shown again for
+     * Play to bring back, or what a car or the Assistant asked to have
+     * ready before it asks to play. Nothing is asked of the server
+     * meanwhile. The same queue cued again, still waiting, stays as it is.
+     */
+    fun cue(tracks: List<ItemSummary>, startIndex: Int = 0, shuffle: Boolean = false, startMs: Long = 0) {
+        if (tracks.isEmpty()) return
+        val at = startIndex.coerceIn(tracks.indices)
+        if (waitingAt != null && !shuffle && !queue.shuffle && queue.index == at && queue.state.tracks.map { it.id } == tracks.map { it.id }) return
+        failedInARow = 0
+        cancelSkip()
+        loadJob?.cancel()
+        stopTicker()
+        endSession()
+        out?.stop()
+        queue.start(tracks, at, shuffle)
+        held = false
+        fallback = null
+        recreates = 0
+        playing = false
+        loading = false
+        ended = false
+        error = null
+        // As after a video: no session, the place kept, and Play starts the track there.
+        yielded = true
+        waitingAt = startMs.coerceAtLeast(0)
+        publish()
     }
 
     /** Plays, or after the queue's end, a failure or a video, starts the current track again. */
@@ -327,6 +366,12 @@ class MusicPlayback(
     }
 
     fun seekTo(positionMs: Long) {
+        // A queue that waits starts where it was sought to.
+        if (waitingAt != null) {
+            waitingAt = positionMs.coerceIn(0, (queue.current?.durationMs?.takeIf { it > 0 } ?: Long.MAX_VALUE))
+            sought()
+            return
+        }
         if (ended || session == null) return
         out?.seekTo(positionMs.coerceAtLeast(0))
         sought()
@@ -391,6 +436,7 @@ class MusicPlayback(
         loading = false
         ended = false
         yielded = false
+        waitingAt = null
         error = null
         now.value = null
         order.value = MusicQueueState()
@@ -416,6 +462,7 @@ class MusicPlayback(
             recreates = 0
         }
         val wantPlay = play ?: (!sameTrack || error != null || (out?.playWhenReady ?: true))
+        waitingAt = null
         cancelSkip()
         loadJob?.cancel()
         stopTicker()
@@ -476,8 +523,8 @@ class MusicPlayback(
         ClientCaps()
     }
 
-    /** Where the queue's track is; its start while the output still holds the track before it. */
-    private fun lastPosition(): Long = if (held) out?.positionMs?.coerceAtLeast(0) ?: 0 else 0
+    /** Where the queue's track is; its start while the output still holds the track before it, or where it waits ([cue]). */
+    private fun lastPosition(): Long = if (held) out?.positionMs?.coerceAtLeast(0) ?: 0 else waitingAt ?: 0
 
     /** How long the track has left, for the sleep timer; `null` while it isn't playing. */
     private fun trackLeftMs(): Long? {

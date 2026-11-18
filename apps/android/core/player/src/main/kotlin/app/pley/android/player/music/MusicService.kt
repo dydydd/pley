@@ -14,6 +14,7 @@ import androidx.core.content.IntentCompat
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSourceBitmapLoader
 import androidx.media3.session.CacheBitmapLoader
@@ -59,6 +60,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Music in the background (Android 17 plays background audio only from a
@@ -93,6 +95,9 @@ class MusicService : MediaLibraryService() {
 
     /** What follows the session made last (its queue, the sign-in): ended with it. */
     private var following: Job? = null
+
+    /** What played last being read back ([bringBack]): the latest only. */
+    private var bringingBack: Job? = null
     private val owner: PlayerGraphOwner? get() = application as? PlayerGraphOwner
 
     // The notification's words, Media3's included, and the car's, in the language shown.
@@ -139,6 +144,10 @@ class MusicService : MediaLibraryService() {
             .build()
         session = made
         player = queue
+        // Known to the service from now, not only once a controller binds: Android starting the service again by itself
+        // (after ending the app's process) binds nothing, and the session then had no notification and no Shuffle or
+        // Repeat for whoever found it.
+        addSession(made)
         // The phone's own media controls show the covers the session names, read from the app as the car's are.
         grantArt(SYSTEM_UI)
         following = scope.launch {
@@ -172,12 +181,50 @@ class MusicService : MediaLibraryService() {
             // Music playing again (from the phone, the car's own controls) takes the session back from the radio.
             launch {
                 playback.nowPlaying.map { it?.playing == true }.distinctUntilChanged().collect { playing ->
-                    if (playing) showMusic(made, playback, graph?.musicLibrary?.library)
+                    if (playing) {
+                        showMusic(made, playback, graph?.musicLibrary?.library)
+                        // Music is what played last now: the radio's channel isn't what a car is shown next.
+                        MusicHub.resume?.keepRadio(null)
+                    }
                 }
             }
         }
         playback.onStopped = { stopped(made, playback, graph?.musicLibrary?.library) }
+        bringBack(made, playback, graph?.musicLibrary)
         return made
+    }
+
+    /**
+     * What played last waits in the session, paused where it was, when
+     * nothing plays: the music kept on the device ([MusicResume]) after
+     * Android ended the app, or the radio's channel when that was what a
+     * car played last. A car connecting is then shown it, with Play ready
+     * (a session with nothing in it shows a car nothing to play), and the
+     * car's own Play, pressed or sent as it starts, plays it. Nothing is
+     * played here: only a car or a person starts the sound.
+     */
+    private fun bringBack(made: MediaLibrarySession, playback: MusicPlayback, graph: MusicLibraryGraph?) {
+        val resume = MusicHub.resume ?: return
+        bringingBack?.cancel()
+        bringingBack = scope.launch {
+            // Music that plays, or will, is what plays; so is a channel already picked.
+            fun busy() = session !== made || radio?.active == true || playback.nowPlaying.value?.wantsPlay == true
+            if (busy()) return@launch
+            val channel = resume.savedRadio()?.let { MusicId.parse(it) as? MusicId.Channel }
+            // The channel's list is the server's to give: out of reach, or slow, the music kept is what waits.
+            val lineup = if (channel != null && graph != null) {
+                withTimeoutOrNull(BRING_BACK_WAIT_MS) { runCatching { graph.live?.lineup(channel) }.getOrNull() }
+            } else {
+                null
+            }
+            if (busy()) return@launch
+            if (lineup != null && channel != null && graph != null && runCatching { playRadio(made, playback, graph, lineup, channel) }.isSuccess) return@launch
+            if (playback.active) return@launch
+            val saved = resume.saved() ?: return@launch
+            if (busy() || playback.active) return@launch
+            playback.setRepeat(saved.repeat)
+            playback.cue(saved.tracks, saved.index, startMs = saved.positionMs)
+        }
     }
 
     /**
@@ -217,18 +264,28 @@ class MusicService : MediaLibraryService() {
     }
 
     /**
-     * The radio plays [lineup]'s channel in the session, in place of the
+     * The radio has [lineup]'s channel in the session, in place of the
      * music, which pauses and lets its session go as for a video. The
-     * channels, as the session lists them.
+     * channel waits: the session's Play, which follows a request to play,
+     * tunes it, and a request only to have it ready (the Assistant's, sent
+     * before it speaks) leaves it waiting. [picked] is kept as what a car
+     * is shown next time. The channels, as the session lists them.
      */
-    private fun playRadio(made: MediaLibrarySession, playback: MusicPlayback, graph: MusicLibraryGraph, lineup: Pair<List<LiveChannel>, Int>): MediaSession.MediaItemsWithStartPosition {
+    private fun playRadio(
+        made: MediaLibrarySession,
+        playback: MusicPlayback,
+        graph: MusicLibraryGraph,
+        lineup: Pair<List<LiveChannel>, Int>,
+        picked: MusicId.Channel,
+    ): MediaSession.MediaItemsWithStartPosition {
         val live = radio ?: graph.radio()?.also {
             radio = it
             MusicHub.radio = it
         } ?: throw UnsupportedOperationException("No Live TV")
         playback.pauseForVideo()
         val (channels, at) = lineup
-        live.play(channels, at)
+        live.cue(channels, at)
+        MusicHub.resume?.keepRadio(picked.text)
         made.player = live.player
         // Shuffle and Repeat are the music's: the radio has neither.
         made.setMediaButtonPreferences(emptyList())
@@ -256,6 +313,8 @@ class MusicService : MediaLibraryService() {
         playback.onStopped = null
         following?.cancel()
         following = null
+        bringingBack?.cancel()
+        bringingBack = null
         session = null
         player = null
         made.release()
@@ -405,8 +464,25 @@ class MusicService : MediaLibraryService() {
 
         override fun onPostConnect(session: MediaSession, controller: MediaSession.ControllerInfo) {
             val library = graph ?: return
-            val tells = isCar(controller.packageName) || session.isMediaNotificationController(controller)
+            val car = isCar(controller.packageName)
+            val tells = car || session.isMediaNotificationController(controller)
             if (tells && !library.signedIn()) tellCars(session as MediaLibrarySession, signedIn = false)
+            // A car connecting to a session that outlived the last one: what played last waits for it again.
+            if (car && controller.packageName == MusicCallers.ANDROID_AUTO) bringBack(session as MediaLibrarySession, playback, library)
+        }
+
+        /**
+         * Stop from a car or the Assistant ("Hey Google, stop") pauses:
+         * stopped, the queue is forgotten and nothing is kept for the next
+         * drive, which a person who stops the music from its notification
+         * means and a driver doesn't.
+         */
+        override fun onPlayerCommandRequest(session: MediaSession, controller: MediaSession.ControllerInfo, playerCommand: Int): Int {
+            if (playerCommand == Player.COMMAND_STOP && isCar(controller.packageName)) {
+                session.player.pause()
+                return SessionResult.RESULT_INFO_SKIPPED
+            }
+            return super.onPlayerCommandRequest(session, controller, playerCommand)
         }
 
         /**
@@ -482,10 +558,12 @@ class MusicService : MediaLibraryService() {
 
         /**
          * A car picked something to play, or the Assistant heard what to
-         * play: the music starts here, and the session is told its queue. A
-         * channel, or a request naming one exactly, plays as radio; a
-         * request matching no music plays the closest channel. A request
-         * naming nothing ("play music") plays on what was playing.
+         * play: it is made ready here, and the session is told its queue;
+         * the session's Play, which Media3 sends after a request to play
+         * and not after one to prepare, starts it. A channel, or a request
+         * naming one exactly, is the radio's; a request matching no music
+         * gets the closest channel. A request naming nothing ("play
+         * music") gets what was playing.
          */
         override fun onSetMediaItems(
             mediaSession: MediaSession,
@@ -505,25 +583,24 @@ class MusicService : MediaLibraryService() {
                     val query = picked.requestMetadata.searchQuery?.take(MAX_QUERY)?.takeIf { picked.mediaId.isEmpty() }
                     val playlist = spokenPlaylist(picked)
                     val channel = when {
-                        id is MusicId.Channel -> live?.lineup(id) ?: throw UnsupportedOperationException("No such channel")
-                        query != null -> live?.let { runCatching { it.named(query) }.getOrNull() }?.let { listOf(it) to 0 }
+                        id is MusicId.Channel -> (live?.lineup(id) ?: throw UnsupportedOperationException("No such channel")) to id
+                        query != null -> live?.let { runCatching { it.named(query) }.getOrNull() }?.let { (listOf(it) to 0) to MusicId.Channel(it.id) }
                         else -> null
                     }
                     if (channel != null) {
-                        future.set(playRadio(made, playback, graph, channel))
+                        future.set(playRadio(made, playback, graph, channel.first, channel.second))
                         return@launch
                     }
                     // "Play music" with nothing named: the queue that waits plays on, or the one kept from before the
-                    // app left memory; only with neither, something new (the album added last).
+                    // app left memory; only with neither, something new (the album added last). The session's Play
+                    // that follows starts it.
                     if (query != null && query.isBlank() && playlist == null) {
                         val saved = if (playback.active) null else MusicHub.resume?.saved()
                         if (playback.active || saved != null) {
                             showMusic(made, playback, graph.library)
                             if (saved != null) {
                                 playback.setRepeat(saved.repeat)
-                                playback.play(saved.tracks, saved.index, startMs = saved.positionMs)
-                            } else {
-                                playback.play()
+                                playback.cue(saved.tracks, saved.index, startMs = saved.positionMs)
                             }
                             val queue = playback.queueState.value
                             future.set(MediaSession.MediaItemsWithStartPosition(queue.tracks.map { library().queueItem(it) }, queue.index, playback.position().positionMs))
@@ -534,7 +611,7 @@ class MusicService : MediaLibraryService() {
                     if (selection == null && query != null) {
                         val closest = live?.let { runCatching { it.closest(query) }.getOrNull() }
                         if (closest != null) {
-                            future.set(playRadio(made, playback, graph, listOf(closest) to 0))
+                            future.set(playRadio(made, playback, graph, listOf(closest) to 0, MusicId.Channel(closest.id)))
                             return@launch
                         }
                     }
@@ -549,7 +626,11 @@ class MusicService : MediaLibraryService() {
                     }
                     // The session shows the music before it is told the queue: the radio, if it played, stops.
                     showMusic(made, playback, graph.library)
-                    playback.play(selection.tracks, selection.startIndex, selection.shuffle)
+                    MusicHub.resume?.keepRadio(null)
+                    // Ready, not playing: the session's Play, which follows a request to play, starts it once. Started
+                    // here, a request only to have it ready (the Assistant's, sent before it speaks) played under its
+                    // voice, and the request to play that came after started the track a second time.
+                    playback.cue(selection.tracks, selection.startIndex, selection.shuffle)
                     val queue = playback.queueState.value
                     val items = queue.tracks.map { library().queueItem(it) }
                     future.set(MediaSession.MediaItemsWithStartPosition(items, queue.index, C.TIME_UNSET))
@@ -564,12 +645,13 @@ class MusicService : MediaLibraryService() {
         }
 
         /**
-         * Play from the system's media controls or a car with nothing
-         * loaded: the queue the music still holds, where it was. A process
-         * started afresh holds none (Android ended the app while it was
-         * paused, say): what was playing then was kept on the device
-         * ([MusicResume]) and plays again from where it was. Asked only
-         * what there is to resume, not to play it, nothing is loaded.
+         * Play from the system's media controls, a headset or a car with
+         * nothing loaded, or the system asking what it could resume: what
+         * waits in the session (the queue the music still holds, or what
+         * played last, read back as the session was made: [bringBack]),
+         * else what was kept on the device ([MusicResume]), made ready
+         * where it was. Nothing is played here: asked to play, Media3 sends
+         * the session's Play next, which starts it once.
          */
         override fun onPlaybackResumption(
             mediaSession: MediaSession,
@@ -577,15 +659,18 @@ class MusicService : MediaLibraryService() {
             isForPlayback: Boolean,
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
             val describe = { track: ItemSummary -> graph?.library?.queueItem(track) ?: QueuePlayer.plainItem(track) }
-            val queue = playback.queueState.value
-            if (queue.tracks.isNotEmpty()) {
-                return Futures.immediateFuture(MediaSession.MediaItemsWithStartPosition(queue.tracks.map(describe), queue.index, playback.position().positionMs))
-            }
-            val resume = MusicHub.resume ?: return Futures.immediateFailedFuture(UnsupportedOperationException("Nothing to resume"))
             val future = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
             scope.launch {
                 try {
-                    val saved = resume.saved()
+                    // What played last may still be on its way into the session: it is what resumes, not a second answer.
+                    withTimeoutOrNull(BRING_BACK_WAIT_MS) { bringingBack?.join() }
+                    val shown = mediaSession.player
+                    if (shown.mediaItemCount > 0) {
+                        val items = (0 until shown.mediaItemCount).map(shown::getMediaItemAt)
+                        future.set(MediaSession.MediaItemsWithStartPosition(items, shown.currentMediaItemIndex, shown.currentPosition))
+                        return@launch
+                    }
+                    val saved = MusicHub.resume?.saved()
                     // Played meanwhile from somewhere else: that is what plays.
                     if (saved == null || !playback.queueState.value.tracks.isEmpty()) {
                         future.setException(UnsupportedOperationException("Nothing to resume"))
@@ -593,7 +678,7 @@ class MusicService : MediaLibraryService() {
                     }
                     if (isForPlayback) {
                         playback.setRepeat(saved.repeat)
-                        playback.play(saved.tracks, saved.index, startMs = saved.positionMs)
+                        playback.cue(saved.tracks, saved.index, startMs = saved.positionMs)
                     }
                     future.set(MediaSession.MediaItemsWithStartPosition(saved.tracks.map(describe), saved.index, saved.positionMs))
                 } catch (e: CancellationException) {
@@ -669,6 +754,9 @@ class MusicService : MediaLibraryService() {
 
         /** The longest search a car or the Assistant sends that is used. */
         const val MAX_QUERY = 200
+
+        /** How long the radio's channel is waited for as what played last is read back ([bringBack]), and Play for that. */
+        const val BRING_BACK_WAIT_MS = 3_000L
 
         /** Why a track doesn't play, as a car says it, in the language shown; and when the next plays, [nextIn] s from now. */
         fun wordsOf(context: Context, error: MusicError, nextIn: Int? = null): String {

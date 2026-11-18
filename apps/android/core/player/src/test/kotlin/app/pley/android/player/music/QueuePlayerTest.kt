@@ -11,6 +11,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.test.core.app.ApplicationProvider
 import app.pley.android.model.ItemKind
 import app.pley.android.model.ItemSummary
+import app.pley.android.model.PlaybackRequest
 import app.pley.android.model.caps.ClientCaps
 import app.pley.android.network.OfflineException
 import app.pley.android.player.EngineSource
@@ -94,6 +95,26 @@ class QueuePlayerTest {
         idle()
         assertEquals("track:3", player.currentMediaItem?.mediaId)
         assertEquals("Track 3", player.mediaMetadata.title.toString())
+    }
+
+    @Test
+    fun aQueueThatWaitsShowsPausedOnItsTrackWhereItWillStartAndPlayStartsIt() {
+        // What played last, brought back as a car connects: the car is shown the track with Play, not nothing to play.
+        playback.cue(album, startIndex = 1, startMs = 61_000)
+        player.queueChanged()
+        idle()
+        assertEquals(3, player.mediaItemCount)
+        assertEquals("track:2", player.currentMediaItem?.mediaId)
+        assertFalse(player.playWhenReady)
+        assertFalse(player.isPlaying)
+        assertTrue(player.playbackState != Player.STATE_IDLE)
+        assertEquals(null, player.playerError)
+        assertEquals(61_000L, player.currentPosition)
+
+        player.play()
+        idle()
+        assertEquals(2L, (api.calls("startPlayback").single().args[0] as PlaybackRequest).itemId)
+        assertTrue(playback.nowPlaying.value!!.wantsPlay)
     }
 
     @Test

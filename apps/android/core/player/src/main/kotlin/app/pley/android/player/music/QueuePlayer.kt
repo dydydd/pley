@@ -34,7 +34,9 @@ import kotlin.math.abs
  * The same holds for what it may do: seeking stays on offer between
  * tracks (a seek then changes nothing), so a car's scrubber isn't taken
  * away and put back, and the queue's entries don't change as one loads,
- * so the car isn't sent the whole queue again at each skip.
+ * so the car isn't sent the whole queue again at each skip. A queue that
+ * waits for Play (brought back as a car connects, or asked to be ready)
+ * shows paused on its track, where it will start.
  * [words] says why a track doesn't play, in the language shown. Call
  * [queueChanged] when [playback]'s queue changes.
  */
@@ -109,8 +111,11 @@ internal class QueuePlayer(
         return state.build()
     }
 
-    /** The start of a track the output doesn't hold yet, nothing of it buffered: where it is and what it has buffered are the last track's. */
-    private fun State.Builder.atTheStart(): State.Builder = setContentPositionMs(0)
+    /**
+     * The start of a track the output doesn't hold yet (or where a queue that waits will start), nothing of it
+     * buffered: where the output is and what it has buffered are the last track's.
+     */
+    private fun State.Builder.atTheStart(): State.Builder = setContentPositionMs(playback.position().positionMs)
         .setContentBufferedPositionMs(PositionSupplier.ZERO)
         .setTotalBufferedDurationMs(PositionSupplier.ZERO)
 

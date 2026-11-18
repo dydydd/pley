@@ -756,6 +756,61 @@ class MusicPlaybackTest {
     }
 
     @Test
+    fun aQueueMadeReadyWaitsWhereItWasAndPlayStartsItThere() = runTest {
+        val music = music()
+        music.cue(album, startIndex = 2, startMs = 61_000)
+        settle()
+        // Nothing is asked of the server and nothing sounds: it waits, paused, where it will start.
+        assertEquals(emptyList<PlaybackRequest>(), starts())
+        assertEquals(0, output.loaded.size)
+        val waiting = music.nowPlaying.value!!
+        assertEquals(3L, waiting.itemId)
+        assertFalse(waiting.wantsPlay)
+        assertFalse(waiting.loading)
+        assertEquals(61_000L, music.position().positionMs)
+        assertTrue(music.active)
+        assertFalse(held.lastOrNull() ?: false)
+
+        // Made ready again as it waits (the Assistant asks to prepare, then to play): it stays as it is.
+        music.cue(album, startIndex = 2, startMs = 0)
+        assertEquals(61_000L, music.position().positionMs)
+
+        music.play()
+        runCurrent()
+        val request = starts().single()
+        assertEquals(3L, request.itemId)
+        assertEquals(61_000L, request.startMs)
+        assertEquals(61_000L, output.startPositions.single())
+        assertTrue(output.wants)
+    }
+
+    @Test
+    fun aQueueThatWaitsStartsWhereItIsSoughtToAndNextPlaysTheNextTrack() = runTest {
+        val music = music()
+        music.cue(album, startIndex = 0, startMs = 5_000)
+        music.seekTo(90_000)
+        assertEquals(90_000L, music.position().positionMs)
+        assertEquals(1, music.nowPlaying.value?.seeks)
+        music.play()
+        runCurrent()
+        assertEquals(90_000L, starts().single().startMs)
+
+        // Another queue made ready while this one plays takes its place, and plays nothing itself.
+        output.startPlaying()
+        music.cue(album.reversed(), startIndex = 1)
+        settle()
+        assertEquals(1, starts().size)
+        assertEquals(2L, music.nowPlaying.value?.itemId)
+        assertFalse(music.nowPlaying.value!!.wantsPlay)
+        assertEquals(0L, music.position().positionMs)
+        music.next()
+        runCurrent()
+        assertEquals(listOf(1L, 1L), starts().map { it.itemId })
+        assertEquals(null, starts().last().startMs)
+        assertTrue(output.wants)
+    }
+
+    @Test
     fun aSeekFromAnywhereIsToldSoWhateverShowsThePositionReadsItAgainPausedToo() = runTest {
         val music = music()
         music.play(album, startIndex = 1)

@@ -36,6 +36,11 @@ describes how they are made.
 - Live TV's channels play as radio in Android Auto: a Live TV tab with
   favourites, channels watched lately and groups, channel search, and
   "Hey Google, play … on Pley" by channel name.
+- As a car connects with Android Auto, what played last waits in its Now
+  Playing, paused where it was (the music, or the Live TV channel when
+  that played last), and the car's Play plays it; Play on a headset or
+  on the steering wheel over Bluetooth brings the music back too once
+  the app has left memory.
 - Play on… lists Google Cast and AirPlay devices for Live TV channels too.
 - A library's Collections are grouped by category, and can be narrowed
   to one category; a collection's page shows its category.
@@ -57,6 +62,9 @@ describes how they are made.
   placeholder, in Android Auto too.
 - Changing tabs fades from one to the next, Now Playing comes up from
   the bar of what plays, and that bar rises in as music starts.
+- "Hey Google, play … on Pley" starts the music once, after the Assistant
+  has spoken, and "Hey Google, stop" in the car pauses and keeps the
+  queue for the next drive.
 - On a small or split car screen and on a phone on its side, an artist's
   or album's page keeps Play and Shuffle side by side above the bar of
   what plays; Now Playing leaves room under the cover; and the bar under
@@ -94,6 +102,8 @@ describes how they are made.
 - A search in Android Auto overtaken by the next letter typed is still
   answered, where the car could go on waiting for it; one with nothing
   typed lists the albums played and added last.
+- Music's notification, with its Shuffle and Repeat buttons, comes back
+  when Android starts the music again by itself after ending the app.
 
 ## [0.1.14] - 2026-11-16
 
