@@ -9,6 +9,8 @@ describes how they are made.
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-11-18
+
 ### Added
 
 - Collections have categories: Highlights, Franchises, Other (for those
@@ -67,6 +69,8 @@ describes how they are made.
 
 - Plex apps play music they transcode with the Jellyfin-compatible API on
   Pley's port too.
+- Kometa's smart collections for labels with `+`, `&` or `,` in their
+  name, such as Disney+ Movies, list their movies instead of nothing.
 - Stop in Pley stops a Google Cast device every time. The connection
   closed so abruptly that the device could lose the stop, most often
   with Pley on Windows.
@@ -1125,7 +1129,8 @@ On Intel graphics:
 - First release with a version of its own (builds before it carried 0.2.0,
   the version every app shared).
 
-[Unreleased]: https://github.com/pley-media-server/pley/compare/release-2026-11-16...HEAD
+[Unreleased]: https://github.com/pley-media-server/pley/compare/release-2026-11-18...HEAD
+[0.1.13]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-18
 [0.1.12]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-16
 [0.1.11]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-14
 [0.1.10]: https://github.com/pley-media-server/pley/releases/tag/release-2026-11-12
