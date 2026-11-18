@@ -109,7 +109,13 @@ pub async fn section_collections(
 ) -> PlexResult<Node> {
     let (lib, _) = library_for(&state, &user, &id).await?;
     let search = Search::parse(&params)?;
-    let all = collections::list(&state.db, &super::collections_viewer(&user), lib.id).await?;
+    let all = collections::list_shared(
+        &state.db,
+        &super::collections_viewer(&user),
+        lib.id,
+        crate::i18n::server_language(&state.settings.get().language),
+    )
+    .await?;
     let ids: Vec<i64> = all.iter().map(|c| c.id).collect();
     let labels = labels::for_collections(&state.db, &ids).await?;
     let (rows, total) = page.apply(search.apply(all, &labels));
@@ -128,7 +134,13 @@ pub async fn section_collections(
 
 /// Labels of the collections of `lib` the user sees (filter choices).
 pub(super) async fn collection_labels(state: &AppState, user: &AuthUser, lib: &LibraryRow) -> PlexResult<Vec<String>> {
-    let all = collections::list(&state.db, &super::collections_viewer(user), lib.id).await?;
+    let all = collections::list_shared(
+        &state.db,
+        &super::collections_viewer(user),
+        lib.id,
+        crate::i18n::server_language(&state.settings.get().language),
+    )
+    .await?;
     let ids: Vec<i64> = all.iter().map(|c| c.id).collect();
     let mut found: Vec<String> = labels::for_collections(&state.db, &ids).await?.into_values().flatten().collect();
     found.sort_by_key(|l| l.to_lowercase());
@@ -141,8 +153,14 @@ pub(super) async fn collection_for(
     user: &AuthUser,
     id: i64,
 ) -> PlexResult<(CollectionDto, Vec<ItemRow>, LibraryRow, Vec<LibraryRow>)> {
-    let (collection, items) =
-        collections::get(&state.db, &super::collections_viewer(user), id).await?.ok_or(PlexError::NotFound)?;
+    let (collection, items) = collections::get(
+        &state.db,
+        &super::collections_viewer(user),
+        id,
+        crate::i18n::server_language(&state.settings.get().language),
+    )
+    .await?
+    .ok_or(PlexError::NotFound)?;
     let libraries = visible_libraries(state, user).await?;
     let lib = libraries.iter().find(|l| l.id == collection.library_id).cloned().ok_or(PlexError::NotFound)?;
     Ok((collection, items, lib, libraries))
@@ -559,46 +577,6 @@ pub async fn collection_refresh(
 ) -> PlexResult<Node> {
     collection_for(&state, &admin, collection_path(key)?).await?;
     Ok(Node::container().attr("size", 0))
-}
-
-/// `/hubs/sections/{id}/manage`: the hubs a section's collections are
-/// promoted to. Pley shows collections on no home page or recommendations,
-/// so there are none.
-pub async fn managed_hubs(
-    State(state): State<AppState>,
-    PlexUser(user): PlexUser,
-    Path(id): Path<String>,
-) -> PlexResult<Node> {
-    let (lib, _) = library_for(&state, &user, &id).await?;
-    Ok(Node::container().attr("size", 0).attr("allowSync", false).attr("librarySectionID", lib.id))
-}
-
-/// `POST /hubs/sections/{id}/manage?metadataItemId=…&promotedTo…=…`: a
-/// collection promoted nowhere stays so; promoting it answers `400`, as Pley
-/// has no hubs to promote it to.
-pub async fn promote_hub(
-    State(state): State<AppState>,
-    PlexAdmin(admin): PlexAdmin,
-    Path(id): Path<String>,
-    params: Params,
-) -> PlexResult<Node> {
-    library_for(&state, &admin, &id).await?;
-    if params.0.iter().any(|(k, v)| k.starts_with("promoted") && v.trim() != "0") {
-        return Err(PlexError::BadRequest("Pley shows collections on no home page or recommendations".into()));
-    }
-    Ok(Node::container().attr("size", 0))
-}
-
-/// `PUT /hubs/sections/{id}/manage/{identifier}[/move]` and `DELETE …`:
-/// there are no hubs to change.
-pub async fn change_hub(
-    State(state): State<AppState>,
-    PlexAdmin(admin): PlexAdmin,
-    Path(path): Path<Vec<(String, String)>>,
-) -> PlexResult<Node> {
-    let id = path.iter().find(|(name, _)| name == "id").map(|(_, id)| id.as_str()).unwrap_or_default();
-    library_for(&state, &admin, id).await?;
-    Err(PlexError::BadRequest("Pley has no hubs of collections to change".into()))
 }
 
 /// `DELETE /library/collections/{key}`

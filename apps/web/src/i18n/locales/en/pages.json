@@ -399,6 +399,9 @@
     "scanningHint": "New items will show up here as soon as they're found.",
     "emptyHint": "Your libraries are empty. Add media to the library folders and run a scan.",
     "manage": "Manage libraries",
+    "noRows": "Nothing on Home",
+    "noRowsHint": "What you're watching and what's on My List show up here. Your libraries are in the menu.",
+    "noRowsHintAdmin": "Put collections on Home from their Edit window, such as each library's Recently Added.",
     "firstScan": {
       "queued": "{{library}}: waiting to start",
       "walking": "Scanning {{library}}: finding files",
@@ -423,7 +426,8 @@
       "onMyList": "On your list",
       "moreInfo": "More info",
       "show": "Show {{title}}"
-    }
+    },
+    "arrangeRows": "Arrange Home"
   },
   "library": {
     "tabs": {
@@ -493,7 +497,8 @@
     "scan": "Scan library",
     "cantLoadRecommendations": "Couldn't load recommendations",
     "nothingToRecommend": "Nothing to recommend yet",
-    "nothingToRecommendHint": "Recommendations appear once the library has some items."
+    "nothingToRecommendHint": "Recommendations appear once the library has some items.",
+    "arrangeRows": "Arrange rows"
   },
   "person": {
     "documentTitle": "Cast & crew",

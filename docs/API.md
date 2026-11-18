@@ -73,9 +73,9 @@ details.
 - Text answers over 1 KiB are compressed when the request accepts it; media,
   images and the event stream never are.
 - A request still running after 30 minutes answers `408`.
-- The compatibility APIs, when they answer on the same port (the
-  Plex-compatible one does by default), answer only requests that are their
-  own (a path only one has, or its headers or token on a path both have).
+- The compatibility APIs, when they answer on the same port (both do by
+  default), answer only requests that are their own (a path only one has,
+  or its headers or token on a path both have).
   `/api/…` and `/.well-known/…` always belong to this API.
 
 ## Authentication
@@ -454,8 +454,9 @@ interface MediaStream {
 interface Hub {
   key: string;                      // "continue_watching" | "continue_listening" | "my_list" | "recently_added:<library_id>" | ...
   title: string;
-  library_id: Id | null;
-  items: ItemSummary[];
+  library_id: Id | null;            // null for a row of several libraries
+  collection_ids: Id[];             // the collections it shows; opening the row opens them
+  items: ItemSummary[];             // up to 30
 }
 
 interface SubtitleTrack {
@@ -529,9 +530,9 @@ interface PlaybackInfo {
 **`summaries=1`.** Lists leave out synopses (a big library's would be
 several times larger). `summaries=1` in the query of `GET /api/hubs/home`,
 `/api/libraries/{id}/items`, `/api/items/{id}/children`,
-`/api/collections/{id}`, `/api/playlists/{id}` and `/api/search` brings
-every item's `summary`, for clients whose information page shows only what
-lists carry (Kodi).
+`/api/collections/{id}`, `/api/collections/merged`, `/api/playlists/{id}`
+and `/api/search` brings every item's `summary`, for clients whose
+information page shows only what lists carry (Kodi).
 
 ---
 
@@ -1695,13 +1696,14 @@ Invitations have fixed limits only.
 | POST | `/api/libraries/scan` | `admin` | `202`: scans every library |
 | GET | `/api/libraries/{id}/items` | `library` | `{ total, items: ItemSummary[] }`: top-level items, paged |
 | GET | `/api/libraries/{id}/filters` | `library` | `{ genres: string[], years: number[], resolutions: string[], dynamic_ranges: string[] }`: what the titles the user may see can be filtered by |
-| GET | `/api/libraries/{id}/hubs` | `library` | `{ hubs: Hub[] }`: `continue_watching:{id}`, `recently_added:{id}`, `recently_released:{id}`, `top_rated:{id}`; music libraries only the second; audiobook libraries `continue_listening:{id}` and the second; empty hubs left out |
+| GET | `/api/libraries/{id}/hubs` | `library` | `{ hubs: Hub[] }`: movie and TV libraries `continue_watching:{id}`, then the collections on its Recommended tab ([Rows](#rows)); music libraries `recently_added:{id}`; audiobook libraries `continue_listening:{id}` and `recently_added:{id}`; empty hubs left out |
 
 **Order.** Libraries have one shared order, chosen by administrators (new
 libraries go last). A user may choose their own (Settings → Libraries).
-Lists of libraries, Home's rows and the compatibility APIs' sections and views follow
+Lists of libraries and the compatibility APIs' sections and views follow
 the user's order when there is one (libraries it doesn't name, and new
-ones, after it in the shared order), else the shared order. Users who may
+ones, after it in the shared order), else the shared order. Home's rows
+have an order of their own ([Rows](#rows)). Users who may
 open only some libraries see those, in that order.
 
 - `PUT /api/libraries/order`: `400` when an id is listed twice, `409` when
@@ -1947,8 +1949,9 @@ WebVTT file named `.srt` is taken as WebVTT). Its language is kept as ISO
 - **Home** hubs, empty ones left out: `continue_watching` (in progress and
   next up), then `continue_listening` (audiobooks part way through; never
   for an app's token, see [Audiobooks](#libraries)), then
-  `my_list` ("My List", its 20 newest), then
-  `recently_added:<library_id>` per library in the libraries' order.
+  `my_list` ("My List", its 20 newest), then the rows administrators put
+  on Home ([Rows](#rows)): collections, and each music and audiobook
+  library's `recently_added:<library_id>`.
 - **Search**: the closest matches first in each of `items`, `people` and
   `channels`: a name that is the whole of `q` (case, accents, apostrophes
   and punctuation aside; a title's sort title counts, so "office" is the
@@ -2067,6 +2070,13 @@ part's takes the book out of Continue Listening; other kinds answer
 
 Groups of movies or shows of one library, shared by every user.
 
+- Pley makes four in each movie and TV library, which administrators
+  change like any other: Recently Added (Recently Added Shows in a TV
+  library), Recently Released, Top Rated and Top Unwatched, smart
+  collections in the Highlights category (`builtin` says which). They are
+  named in each user's language until an administrator renames them. All
+  but Top Unwatched start as rows on the library's Recommended tab: until
+  the best rated are watched, Top Unwatched is Top Rated again.
 - *Automatic* collections mirror TMDB's movie collections: each matched
   movie is filed under its `belongs_to_collection` (with that collection's
   poster and backdrop), and collections left empty are dropped. One is
@@ -2086,6 +2096,10 @@ interface Collection {
   automatic: boolean;               // from TMDB
   sort: "release" | "title" | "custom";
   smart_filter: string | null;      // smart collections: the library filter that fills them
+  category: { id: Id; key: string | null; title: string };   // Other (key "other") when it has none
+  builtin: "recently_added" | "recently_released" | "top_rated" | "top_unwatched" | null;
+  home_position: number | null;     // a row on Home, in this place; null: not one
+  recommended_position: number | null;   // a row on its library's Recommended tab
   item_count: number;               // items this user can see
   poster_url: string;               // own artwork, else the first item's that has some
   backdrop_url: string;
@@ -2097,15 +2111,16 @@ interface Collection {
 | Method | Path | Who | What |
 |---|---|---|---|
 | GET | `/api/libraries/{id}/collections` | `library` | `{ collections: Collection[] }` by title |
-| POST | `/api/libraries/{id}/collections` | `admin` | `{ title, summary?, item_ids?: Id[], smart_filter? }` → `201` `Collection & { items: ItemSummary[] }`; `400` for music and audiobook libraries |
+| POST | `/api/libraries/{id}/collections` | `admin` | `{ title, summary?, item_ids?: Id[], smart_filter?, category_id? }` → `201` `Collection & { items: ItemSummary[] }`; `400` for music and audiobook libraries, or a `category_id` that is no category's |
 | GET | `/api/collections/{id}` | `library` | `Collection & { items: ItemSummary[] }` in the collection's order |
-| PATCH | `/api/collections/{id}` | `admin` | `{ title?, summary? (null clears), sort?, smart_filter? }` → `Collection & { items }` |
+| PATCH | `/api/collections/{id}` | `admin` | `{ title?, summary? (null clears), sort?, smart_filter?, category_id? (null, or Other's id: none), on_home?, on_recommended? }` → `Collection & { items }`. `on_home: true` puts it on Home with a collection of the same title (case aside) when there is one, else last; `on_recommended: true` last on its library's Recommended tab; `400` for a `category_id` that is no category's |
 | DELETE | `/api/collections/{id}` | `admin` | `204` (an automatic one comes back when its movies are refreshed) |
 | POST | `/api/collections/{id}/items` | `admin` | `{ item_ids: Id[] }` → `{ added: number }`. Only movies and shows of the same library; `400` if none could be added |
 | DELETE | `/api/collections/{id}/items/{item_id}` | `admin` | `204` |
 | PUT | `/api/collections/{id}/order` | `admin` | `{ item_ids: Id[] }` → `204`: these first in this order, the rest after; sets `sort` to `custom` |
 | GET | `/api/collections/{id}/images/{poster\|backdrop}` | `library` | image bytes (`w`, `v` as for items), or a `307` to the item artwork it falls back to |
 | GET | `/api/items/{id}/collections` | `library` | `{ collections: { id, title }[] }` the movie or show is in ("Part of …") |
+| POST | `/api/libraries/{id}/collections/defaults` | `admin` | `{ restored: number }`: makes again those of Pley's four the library no longer has; `400` for music and audiobook libraries |
 
 **Smart collections** hold no items. `smart_filter` is a library listing in
 the Plex-compatible API's syntax: the query string of
@@ -2114,6 +2129,70 @@ the Plex-compatible API's syntax: the query string of
 Pley can't apply is refused (`400`). The collection shows what it
 finds, in its order, as each user may see it. Its items can't be added,
 removed or reordered (`400`); change the filter instead.
+
+### Categories
+
+A library's collections are grouped by category: Pley's own, Highlights
+(`key` `highlights`, the collections Pley makes), Other (`other`, for
+collections without one) and Franchises (`franchises`, TMDB's), named in
+each user's language, and administrators' own. They are shared by every
+library, in the order administrators choose; a new server puts Other just
+before Franchises. A collection without a category is sent with Other as
+its `category`, so an app groups collections by `category` in the order
+of this list, Other included; put in Other, it has none.
+Group labels set through the compatibility APIs, such as Kometa's
+`Seasonal`, put collections under categories too, made as they are needed
+([COMPATIBILITY.md](COMPATIBILITY.md#searching-and-filtering)); a category an
+administrator chose for a collection stays.
+
+```ts
+interface Category {
+  id: Id;
+  key: "highlights" | "other" | "franchises" | null;   // null: an administrator's
+  title: string;
+  from_label: string | null;        // the group label it was made from
+  position: number;
+}
+```
+
+| Method | Path | Who | What |
+|---|---|---|---|
+| GET | `/api/collection-categories` | `library` | `{ categories: Category[] }` in order |
+| POST | `/api/collection-categories` | `admin` | `{ title }` (1 to 100 characters) → `201` `Category`, last; `409` if a category has that name, Pley's own in any language included |
+| PATCH | `/api/collection-categories/{id}` | `admin` | `{ title }` → `Category`; `400` for Pley's own, `409` as above |
+| DELETE | `/api/collection-categories/{id}` | `admin` | `204`; its collections are left without one, under Other; `400` for Pley's own |
+| PUT | `/api/collection-categories/order` | `admin` | `{ ids: Id[] }` → `204`: these first in this order, the rest after |
+
+### Rows
+
+After Continue Watching (and My List on Home), Home and each movie and TV
+library's Recommended tab show the collections administrators put there,
+in the order they chose, each a row of its 30 first titles as the user
+may see them. Each movie and TV library starts with Pley's collections
+but Top Unwatched on its Recommended tab and its Recently Added on Home;
+a music or audiobook library's Recently Added is a row on Home of its
+own.
+
+On Home, collections of the same title (case aside), in different
+libraries or in one, are one row, keyed `collections:<id>,<id>`: each of
+its titles once, in their common order when they share one (a smart
+collection's sort, or newest or by title; a film library's newest first
+and a TV library's, shows by their newest episode, are one), else one
+collection's after another's. A row of one collection is keyed
+`collection:<id>`, or `recently_added:<library_id>` (and likewise
+`recently_released:`, `top_rated:`, `top_unwatched:`) for Pley's own, as
+the rows were before they were collections. An untouched Recently Added
+is called "Recently Added in <library>" there, and is a row of its own.
+
+| Method | Path | Who | What |
+|---|---|---|---|
+| GET | `/api/collections/merged?ids=` | `library` | `{ title, collections: { id, library_id }[], items: ItemSummary[] }`: a Home row of several collections (`ids` its `collection_ids`, comma-separated; the first 50 count), all its titles in the row's order; those the user can't see are left out, `404` if none is left |
+| GET | `/api/home/rows` | `admin` | `{ rows: { key, title, collection_ids: Id[], library_ids: Id[] }[] }`: Home's rows after My List, every library's, empty or not |
+| PUT | `/api/home/rows/order` | `admin` | `{ rows: string[] }` (keys) → `204`: these first in this order, the rest after |
+| PUT | `/api/libraries/{id}/rows/order` | `admin` | `{ collection_ids: Id[] }` → `204`: the Recommended tab's order, as above |
+
+Home's order is the same for everyone; a user's own library order doesn't
+change it.
 
 ## Playlists
 
@@ -4734,7 +4813,7 @@ interface Network {
   plex_on_web: boolean;   // the Plex-compatible API answers its clients on Pley's port;
                           // never with addresses in `plex`
   jellyfin: string[];     // the Jellyfin-compatible API on addresses of its own ("0.0.0.0:8096");
-                          // [] = on Pley's port (jellyfin_on_web) or off (the default)
+                          // [] = on Pley's port (jellyfin_on_web, the default) or off
   jellyfin_on_web: boolean; // the Jellyfin-compatible API answers its apps on Pley's port;
                           // never with addresses in `jellyfin`
   discovery: boolean;     // answer Pley's apps on the networks (never on loopback addresses)
@@ -5078,7 +5157,7 @@ interface ImportProgress {
     edits: Record<string, number>;        // locked fields brought as edits, by field ("title", "content_rating")
     collections_made: number;
     collection_items: number;             // titles put in collections, new or found again
-    smart_left: number;                   // smart collections and playlists, not brought
+    smart_left: number;                   // smart collections and playlists not brought: a filter Pley can't apply, a collection of that title that isn't smart, a smart playlist
     bring: { watch_history: boolean; collections: boolean; edits: boolean };   // as chosen
     started_at: number;                   // with finished_at, how long it took; 0 in reports from before
     // How long each step that ran took, in order; the one it stopped in,
@@ -5134,14 +5213,32 @@ interface ImportProgress {
   rating with Plex's country ("nz/R") read as that country's, unless Pley has one for that field; each
   title's own page is read for them, a few at a time. Tools such as
   Kometa lock what they set, so `edits` counts them by field.
-- **Collections and playlists** (`bring.collections`). Collections that
-  aren't smart, of movie and show libraries, with their titles found in
-  Pley, their order and labels; everyone's playlists of video or music,
-  as their own. One Pley has by the same title (and library, or person
-  and kind) gets the titles it lacks; nothing is reordered or removed.
-  Pley's own TMDB collections aren't found again this way. A person's
-  `playlists` counts those made or added to. Smart ones are counted in
-  `smart_left`.
+- **Collections and playlists** (`bring.collections`). Collections of
+  movie and show libraries, with their titles found in Pley, their order
+  and labels; everyone's playlists of video or music, as their own. One
+  Pley has by the same title (and library, or person and kind) gets the
+  titles it lacks; nothing is reordered or removed. Pley's own TMDB
+  collections aren't found again this way. A person's `playlists` counts
+  those made or added to. A collection's group label puts it under a
+  category, as Kometa's do through the Plex API
+  ([COMPATIBILITY.md](COMPATIBILITY.md)).
+  - A smart collection brings its filter: Plex's query, with the tags it
+    names by Plex's id (labels, genres, people…) named, and without what
+    only shapes Plex's answer. It goes to the smart collection Pley has by
+    that title, or a new one; one Pley has by that title that isn't smart
+    is left as it is, and the smart one counted in `smart_left`. A filter
+    Pley can't apply (on episodes of shows, say, or a field Pley doesn't
+    read) isn't brought, and is counted in `smart_left` with smart
+    playlists, which aren't brought. A label filter finds the titles
+    Plex's labels were brought to.
+  - Plex's arrangement of each library's rows carries over to the
+    collections brought and to Pley's own (Recently Added, Recently
+    Released, Top Rated, Top Unwatched, where Plex has them): which are
+    on Recommended and on Home (on either of Plex's two Homes is on
+    Pley's one), and their order. Home is in Plex's order, library after
+    library, before the rows Plex didn't show; two Plex libraries brought
+    into one keep a row either shows. Plex's rows Pley doesn't have are
+    left out.
 - **Watch history** (`bring.watch_history`): watched, resume points,
   ratings and plays, merged as below.
 - **What's merged.** Labels are added to titles, never removed. A date

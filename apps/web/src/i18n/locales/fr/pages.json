@@ -401,6 +401,9 @@
     "scanningHint": "Les nouveaux éléments apparaîtront ici dès qu’ils seront trouvés.",
     "emptyHint": "Vos bibliothèques sont vides. Ajoutez des médias dans leurs dossiers et lancez une analyse.",
     "manage": "Gérer les bibliothèques",
+    "noRows": "Rien sur l’accueil",
+    "noRowsHint": "Ce que vous regardez et ce qui est dans Ma liste s’affichent ici. Vos bibliothèques sont dans le menu.",
+    "noRowsHintAdmin": "Ajoutez des collections à l’accueil depuis leur fenêtre Modifier, comme les Ajouts récents de chaque bibliothèque.",
     "firstScan": {
       "queued": "{{library}} : en attente",
       "walking": "Analyse de {{library}} : recherche des fichiers",
@@ -425,7 +428,8 @@
       "onMyList": "Dans votre liste",
       "moreInfo": "Plus d’infos",
       "show": "Afficher {{title}}"
-    }
+    },
+    "arrangeRows": "Organiser l’accueil"
   },
   "library": {
     "tabs": {
@@ -503,7 +507,8 @@
     "scan": "Analyser la bibliothèque",
     "cantLoadRecommendations": "Impossible de charger les recommandations",
     "nothingToRecommend": "Rien à recommander pour l’instant",
-    "nothingToRecommendHint": "Les recommandations apparaissent dès que la bibliothèque contient quelques éléments."
+    "nothingToRecommendHint": "Les recommandations apparaissent dès que la bibliothèque contient quelques éléments.",
+    "arrangeRows": "Organiser les rangées"
   },
   "person": {
     "documentTitle": "Distribution et équipe",

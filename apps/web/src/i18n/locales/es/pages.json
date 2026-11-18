@@ -401,6 +401,9 @@
     "scanningHint": "Los nuevos elementos aparecerán aquí en cuanto se encuentren.",
     "emptyHint": "Tus bibliotecas están vacías. Añade contenido a sus carpetas y ejecuta un análisis.",
     "manage": "Gestionar bibliotecas",
+    "noRows": "No hay nada en Inicio",
+    "noRowsHint": "Lo que estás viendo y lo que está en Mi lista aparecen aquí. Tus bibliotecas están en el menú.",
+    "noRowsHintAdmin": "Pon colecciones en Inicio desde su ventana Editar, como Añadido recientemente de cada biblioteca.",
     "firstScan": {
       "queued": "{{library}}: esperando para empezar",
       "walking": "Analizando {{library}}: buscando archivos",
@@ -425,7 +428,8 @@
       "onMyList": "En tu lista",
       "moreInfo": "Más info",
       "show": "Mostrar {{title}}"
-    }
+    },
+    "arrangeRows": "Organizar Inicio"
   },
   "library": {
     "tabs": {
@@ -503,7 +507,8 @@
     "scan": "Analizar biblioteca",
     "cantLoadRecommendations": "No se pudieron cargar las recomendaciones",
     "nothingToRecommend": "Aún no hay nada que recomendar",
-    "nothingToRecommendHint": "Las recomendaciones aparecen cuando la biblioteca tiene algunos elementos."
+    "nothingToRecommendHint": "Las recomendaciones aparecen cuando la biblioteca tiene algunos elementos.",
+    "arrangeRows": "Organizar filas"
   },
   "person": {
     "documentTitle": "Reparto y equipo",

@@ -1,7 +1,7 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router";
 import { useTranslation } from "react-i18next";
-import { Clapperboard, FolderPlus } from "lucide-react";
+import { Clapperboard, FolderPlus, Rows3 } from "lucide-react";
 import { errorMessage } from "@/api/client";
 import { useHomeHubs, useLibraries } from "@/api/hooks";
 import { useAuth } from "@/auth";
@@ -12,6 +12,7 @@ import { pickFeatured } from "@/lib/featured";
 import { useDocumentTitle } from "@/lib/hooks";
 import { HomeBanner, HomeBannerSkeleton, ROWS_OVERLAP } from "./HomeBanner";
 import { HomeProgress } from "./HomeProgress";
+import { HomeRowsModal } from "./collections/RowsModal";
 
 export function HomePage() {
   const { t } = useTranslation(["pages", "common"]);
@@ -20,6 +21,7 @@ export function HomePage() {
   const libs = useLibraries();
   const hubs = useHomeHubs();
   const featured = useMemo(() => pickFeatured(hubs.data ?? []), [hubs.data]);
+  const [arranging, setArranging] = useState(false);
 
   if (libs.data && libs.data.length === 0) {
     return (
@@ -63,18 +65,37 @@ export function HomePage() {
   }
 
   const visible = hubs.data.filter((h) => h.items.length > 0);
+  const arrange = user.is_admin ? (
+    <>
+      <Button size="sm" variant="ghost" icon={<Rows3 className="size-4" />} onClick={() => setArranging(true)}>
+        {t("home.arrangeRows")}
+      </Button>
+      <HomeRowsModal open={arranging} onClose={() => setArranging(false)} />
+    </>
+  ) : null;
   if (visible.length === 0) {
     const scanning = libs.data?.some((l) => l.scanning);
+    // Libraries with titles in them and still nothing: administrators took
+    // every row off Home.
+    const stocked = !scanning && libs.data?.some((l) => l.item_count > 0);
     return (
       <>
         <HomeProgress className="mx-4 mt-6 sm:mx-8" />
         <EmptyState
           className="min-h-[70vh]"
           icon={<Clapperboard />}
-          title={scanning ? t("home.scanning") : t("home.empty")}
-          description={scanning ? t("home.scanningHint") : t("home.emptyHint")}
+          title={scanning ? t("home.scanning") : stocked ? t("home.noRows") : t("home.empty")}
+          description={
+            scanning
+              ? t("home.scanningHint")
+              : stocked
+                ? t(user.is_admin ? "home.noRowsHintAdmin" : "home.noRowsHint")
+                : t("home.emptyHint")
+          }
           action={
-            user.is_admin && !scanning ? (
+            stocked ? (
+              arrange
+            ) : user.is_admin && !scanning ? (
               <Link to="/settings/libraries" className={buttonClass()}>
                 {t("home.manage")}
               </Link>
@@ -96,6 +117,7 @@ export function HomePage() {
         {visible.map((hub) => (
           <HubRow key={hub.key} hub={hub} />
         ))}
+        {arrange ? <div className="flex justify-center px-4 sm:px-8">{arrange}</div> : null}
       </div>
     </>
   );
