@@ -69,7 +69,9 @@ import app.pley.android.ui.phone.player.onCarScreen
 @Composable
 internal fun MiniPlayerSlot(nowPlaying: NowPlaying?, modifier: Modifier = Modifier, car: Boolean = onCarScreen()) {
     val navigator = LocalPhoneNavigator.current
-    val onNowPlaying = (navigator as? PhoneNavigation)?.stack()?.lastOrNull() == PleyKey.NowPlaying
+    val navigation = navigator as? PhoneNavigation
+    // Once Now Playing has drawn, not as soon as it is asked for; and back at once as it is closed.
+    val onNowPlaying = navigation != null && navigation.nowPlayingDrawn && navigation.stack()?.lastOrNull() == PleyKey.NowPlaying
     // What played last, drawn while the bar leaves.
     val last = remember { arrayOfNulls<NowPlaying>(1) }
     if (nowPlaying != null) last[0] = nowPlaying
@@ -77,8 +79,8 @@ internal fun MiniPlayerSlot(nowPlaying: NowPlaying?, modifier: Modifier = Modifi
     val shown = nowPlaying ?: last[0]
     val reduced = reducedMotion()
     // Music starting or stopping: the bar rises from the bottom edge as the page makes room, and sinks back, where it
-    // used to push the page up in one frame. Now Playing opening or closing swaps it at once: the page changes then,
-    // and a bar still shrinking would move the one coming in.
+    // used to push the page up in one frame. Now Playing opening or closing swaps it at once (as Now Playing first
+    // draws, still unseen under its fade): a bar still shrinking would move the page coming in.
     AnimatedVisibility(
         visible = nowPlaying != null,
         modifier = modifier,
