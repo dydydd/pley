@@ -542,13 +542,16 @@ can write one ([CONFIGURATION.md](docs/CONFIGURATION.md#strm-files)).
   this computer (or the host of a transcoder run elsewhere), and not one
   that came through a proxy. A key read in a log opens nothing from
   anywhere else.
-- An address on the internet can't lead to one of the server's network or
+- An address on the internet, named by the file or redirected to from one
+  of the network, can't lead to one of the server's network or
   computer: not by a redirect, and not by a name that resolves to a private
   address later (the resolver gives its public addresses only, to the
   connection itself). An address the file names on the network directly is
   asked: that is where a NAS or a download service is. A name given for
   one is held to the network from then on, so it can't turn into a host on
-  the internet that redirects back in. So someone who can
+  the internet that redirects back in. A name only a redirect gives is
+  taken for one on the internet however it resolves, since whoever answers
+  for it could make it resolve to the network. So someone who can
   write in a library folder can have Pley ask an address of the network
   for video or audio, as a link in a library can lead to a video anywhere
   on the disk. With a proxy configured for Pley (`HTTPS_PROXY`), the proxy
@@ -561,6 +564,8 @@ can write one ([CONFIGURATION.md](docs/CONFIGURATION.md#strm-files)).
   elsewhere since hands out anything unread. It is sent as that format's
   `Content-Type` whatever the address calls it, and never as a page
   (`X-Content-Type-Options: nosniff`).
+- An administrator can turn `.strm` files off (`strm_files`): scans then
+  leave them out, and nothing asks their addresses.
 - Nothing asks an address until someone opens or plays its item: a scan
   reads the files only. An address that fails isn't asked again for 20
   seconds by a playback, or for 10 minutes by a page opening.

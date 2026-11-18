@@ -22,11 +22,17 @@ describes how they are made.
   the internet can't lead to one of your network, and seek previews and
   intro detection aren't made for it
   ([docs/CONFIGURATION.md](../../docs/CONFIGURATION.md#strm-files)).
+  Administrators turn them off in Settings → Server.
 - A player can say the highest audio sample rate it decodes
   (`audio_max_sample_rate`): a track above it is converted, at 48 kHz, and
   playback details say why ("AAC at 96 kHz is above this device's 48
   kHz."). Samsung's TVs garble AAC at 96 kHz played as it is. Audio passed
   through to a receiver is left as it is.
+
+### Fixed
+
+- In the web app, search lists the audiobooks whose title matches. A
+  book's title gave a results page with nothing on it.
 
 ## [0.1.13] - 2026-11-18
 

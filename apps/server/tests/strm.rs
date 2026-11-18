@@ -124,6 +124,8 @@ struct Fake {
     /// What it read to probe, in order. As the transcoder, it keeps what it
     /// found by address, and answers for one it knows without reading.
     probes: Arc<Mutex<Vec<String>>>,
+    /// Whether each of those probes was a playback's (`urgent`).
+    urgency: Arc<Mutex<Vec<bool>>>,
     known: Arc<Mutex<Vec<String>>>,
     jobs: Arc<Mutex<Vec<JobRequest>>>,
     conversions: Arc<Mutex<Vec<JobRequest>>>,
@@ -190,6 +192,7 @@ async fn start_fake() -> (Fake, String) {
                     return Json(probed()).into_response();
                 }
                 fake.probes.lock().push(req.path.clone());
+                fake.urgency.lock().push(req.urgent);
                 if !req.path.starts_with("http://") {
                     return error(StatusCode::NOT_FOUND, "not_found");
                 }
@@ -405,6 +408,7 @@ async fn playing_it_finds_what_its_media_is_once_and_plays_it_through_pley() {
     let probes = w.fake.probes.lock().clone();
     assert_eq!(probes.len(), 1);
     assert!(probes[0].starts_with(&format!("{}/api/strm/", w.own)) && probes[0].ends_with(".mkv"), "{probes:?}");
+    assert_eq!(*w.fake.urgency.lock(), [true], "a playback's, which waits for it");
     assert!(!probes[0].contains(SECRET) && !probes[0].contains("film") && !probes[0].contains(&w.remote_base));
     // The address was asked as the file says to.
     let asked_with = w.remote.headers.lock().clone();
@@ -726,4 +730,82 @@ async fn a_transcoder_too_old_to_read_an_address_says_so() {
     let started = app.post("/api/playback", &admin, json!({"item_id": film, "caps": plays_mkv()})).await;
     assert_eq!(started.status, StatusCode::NOT_IMPLEMENTED, "{}", started.body);
     assert!(fake.probes.lock().is_empty());
+}
+
+#[tokio::test]
+async fn turned_off_they_leave_the_libraries_and_nothing_asks_their_addresses() {
+    let w = world().await;
+    let (app, admin) = (&w.app, w.admin.as_str());
+    assert_eq!(w.play("Film", plays_mkv()).await.status, StatusCode::OK);
+    let relayed = w.fake.probes.lock()[0].strip_prefix(&w.own).unwrap().to_owned();
+    let stream = format!("/api/files/{}/stream", app.file_of(w.movies["Film"]).await);
+    assert_eq!(app.call(Method::GET, &relayed, None, None, &[]).await.status, StatusCode::OK);
+
+    // Off, before a scan leaves the file out: nothing reads its address.
+    let off = pley::settings::SettingsPatch { strm_files: Some(false), ..Default::default() };
+    app.state.settings.update(&app.state.db, off).await.unwrap();
+    let asked = w.remote.asked.load(Ordering::SeqCst);
+    let refused = w.play("Film", plays_mkv()).await;
+    assert_eq!(refused.status, StatusCode::NOT_FOUND);
+    assert!(refused.text().contains("turned off"), "{}", refused.text());
+    assert_eq!(app.get(&stream, admin).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(app.call(Method::GET, &relayed, None, None, &[]).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(w.remote.asked.load(Ordering::SeqCst), asked);
+
+    // Turned on or off in the settings, the movie library is scanned again.
+    let on = app.put("/api/settings", admin, json!({"strm_files": true})).await;
+    assert_eq!((on.status, &on.body["strm_files"]), (StatusCode::OK, &json!(true)));
+    assert_eq!(w.play("Film", plays_mkv()).await.status, StatusCode::OK);
+    let off = app.put("/api/settings", admin, json!({"strm_files": false})).await;
+    assert_eq!((off.status, &off.body["strm_files"]), (StatusCode::OK, &json!(false)));
+    app.wait_for_scans().await;
+    assert!(
+        app.ids(w.library, admin).await.is_empty(),
+        "a library of .strm files only isn't taken for an unmounted drive"
+    );
+    app.put("/api/settings", admin, json!({"strm_files": true})).await;
+    app.wait_for_scans().await;
+    assert_eq!(app.ids(w.library, admin).await.keys().collect::<Vec<_>>(), ["Film"]);
+}
+
+#[tokio::test]
+async fn a_scan_of_every_file_reads_the_media_again() {
+    let mut w = world().await;
+    assert_eq!(w.file("Film").await["container"], json!("mkv"));
+    w.scan(true).await;
+    assert_eq!(w.kept("Film").await, (Some("strm".into()), 0, None));
+    // Read again through the address, not answered from what the
+    // transcoder probed before.
+    assert_eq!(w.file("Film").await["container"], json!("mkv"));
+    assert_eq!(w.fake.probes.lock().len(), 2);
+    assert_eq!(*w.fake.urgency.lock(), [false, false], "a page opening waits for no playback's probe");
+}
+
+#[tokio::test]
+async fn a_file_that_names_another_address_is_looked_at_again_at_once() {
+    let mut w = world_with(|movies, remote| {
+        std::fs::create_dir_all(movies.join("Page (2021)")).unwrap();
+        std::fs::write(movies.join("Page (2021)/Page (2021).strm"), format!("{remote}/page")).unwrap();
+    })
+    .await;
+    assert_eq!(w.play("Page", plays_mkv()).await.status, StatusCode::NOT_FOUND);
+    w.strm("movies/Page (2021)/Page (2021).strm", &format!("{}/dl/{SECRET}/film.mkv", w.remote_base));
+    w.scan(false).await;
+    let played = w.play("Page", plays_mkv()).await;
+    assert_eq!(played.status, StatusCode::OK, "{}", played.body);
+}
+
+#[tokio::test]
+async fn jellyfins_playback_info_leaves_out_a_version_that_gives_no_media() {
+    let w = world_with(|movies, remote| {
+        std::fs::write(movies.join("Film (2020)/Film (2020) - Broken.strm"), format!("{remote}/page")).unwrap();
+    })
+    .await;
+    assert_eq!(w.movies.keys().collect::<Vec<_>>(), ["Film"]);
+    let jf = w.app.jf_item(w.movies["Film"]);
+    let info = w.app.jf(Method::POST, &format!("/Items/{jf}/PlaybackInfo"), &w.admin, Some(json!({}))).await;
+    assert_eq!(info.status, StatusCode::OK, "{}", info.text());
+    let sources = info.body["MediaSources"].as_array().unwrap();
+    assert_eq!(sources.len(), 1, "{}", info.text());
+    assert_eq!(sources[0]["Container"], json!("mkv"));
 }

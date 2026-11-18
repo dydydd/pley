@@ -176,7 +176,9 @@ decide the match again.
 A `.strm` file is a text file that names where a video is, instead of
 being one: Kodi, Jellyfin and Emby read them, and tools that list what a
 hosting service, a cloud drive or another server holds write them. Pley
-reads them in movie and TV libraries.
+reads them in movie and TV libraries unless an administrator turns them
+off (Settings → Server → Library scanning). Turned off, they leave the
+libraries as deleted files would, and Pley asks none of their addresses.
 
 ```
 Movies/Alien (1979)/Alien (1979).strm
@@ -218,8 +220,11 @@ Shows/The Expanse/Season 01/The Expanse - S01E01.strm
   the whole video. Chapters and a subtitle track in the video work as for
   a file, read through Pley at the address.
 - **An address on the internet stays on the internet.** It can't redirect
-  to an address of your own network or of the server's computer. An
+  to an address of your own network or of the server's computer, also
+  when an address of your network sent Pley there. An
   address the file itself names on your network (a NAS, a download
-  service) is asked as it is ([SECURITY.md](../SECURITY.md#strm-files)).
+  service) is asked as it is. It may redirect to another address of your
+  network written as a number, or to a name the `.strm` files give
+  ([SECURITY.md](../SECURITY.md#strm-files)).
 - A link that stops answering leaves its item in the library: playing it
   says the address didn't answer, or has nothing there any more.
