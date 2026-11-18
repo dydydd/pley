@@ -210,6 +210,8 @@ private fun NowPlayingPage() {
                         Box(
                             Modifier
                                 .weight(1f, fill = false)
+                                // Air under the cover also where it takes all the height left: the title sat against it.
+                                .padding(bottom = ART_GAP)
                                 .sizeIn(maxWidth = artSide, maxHeight = artSide)
                                 .aspectRatio(1f)
                                 .clip(PleyShape.Card)
@@ -575,6 +577,9 @@ private const val LOADING_AFTER_MS = 700L
 
 /** The art's share of the width. */
 private const val ART_SHARE = 0.8f
+
+/** The least room between the art and the title under it. */
+private val ART_GAP = 16.dp
 
 /** The faint copy of the art behind the page. */
 private const val BACKDROP_ALPHA = 0.18f

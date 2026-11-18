@@ -108,6 +108,22 @@ class CarMusicSizesTest {
     fun tallSplit() = check("tall-split")
 
     @Test
+    @Config(qualifiers = CarScreenChecks.ULTRAWIDE)
+    fun ultrawide() = check("ultrawide")
+
+    @Test
+    @Config(qualifiers = CarScreenChecks.FULL_HD)
+    fun fullHd() = check("full-hd")
+
+    @Test
+    @Config(qualifiers = CarScreenChecks.TALL_PORTRAIT)
+    fun tallPortrait() = check("tall-portrait")
+
+    @Test
+    @Config(qualifiers = CarScreenChecks.NARROW)
+    fun narrow() = check("narrow")
+
+    @Test
     @Config(qualifiers = CarScreenChecks.SMALL)
     fun barSmallLandscape() = checkBar("small")
 

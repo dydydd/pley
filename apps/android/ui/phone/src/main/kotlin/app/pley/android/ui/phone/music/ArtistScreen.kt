@@ -33,6 +33,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -204,7 +206,9 @@ private fun ArtistContent(
  * another device takes it; [extra] goes under the lines (the artist's
  * link, the rating). From 600 dp wide the art stands beside the rest, as
  * an item's poster does: on a short, wide screen (a car's, a phone on its
- * side) Play is in view without scrolling.
+ * side) Play is in view without scrolling. Where the window is short as
+ * well ([shortWindow]), the art is smaller and what it is isn't said, so
+ * Play and Shuffle stay side by side and above the bar of what plays.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -222,10 +226,11 @@ internal fun MusicHeader(
     extra: @Composable () -> Unit = {},
 ) {
     val wide = LocalPhoneMetrics.current.widthClass != WidthClass.Compact
+    val short = wide && shortWindow()
     val cover = @Composable {
         Box(
             Modifier
-                .size(ART_SIZE)
+                .size(if (short) ART_SIZE_SHORT else ART_SIZE)
                 .clip(if (round) PleyShape.Circle else PleyShape.Card)
                 .background(PleyColors.Surface2),
         ) {
@@ -234,8 +239,10 @@ internal fun MusicHeader(
     }
     val words = @Composable { centred: Boolean ->
         val align = if (centred) TextAlign.Center else TextAlign.Start
-        Text(kind, style = MaterialTheme.typography.labelMedium, color = PleyColors.Muted)
-        Spacer(Modifier.height(4.dp))
+        if (!short) {
+            Text(kind, style = MaterialTheme.typography.labelMedium, color = PleyColors.Muted)
+            Spacer(Modifier.height(4.dp))
+        }
         Text(
             title,
             style = MaterialTheme.typography.headlineMedium,
@@ -248,7 +255,7 @@ internal fun MusicHeader(
             Spacer(Modifier.height(4.dp))
             Text(line, style = MaterialTheme.typography.bodyMedium, color = PleyColors.Muted, textAlign = align)
         }
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(if (short) 12.dp else 20.dp))
         // Shuffle goes under Play when they don't fit side by side (beside the art, a car's larger text, longer
         // words in French or Spanish); side by side, they are as tall as each other.
         FlowRow(
@@ -310,8 +317,9 @@ internal fun Summary(text: String) {
 @Composable
 internal fun MusicHeaderSkeleton(round: Boolean) {
     val skeleton = rememberSkeleton(animated = true)
-    val cover = Modifier.size(ART_SIZE).skeleton(skeleton, if (round) PleyShape.Circle else PleyShape.Card)
-    if (LocalPhoneMetrics.current.widthClass != WidthClass.Compact) {
+    val wide = LocalPhoneMetrics.current.widthClass != WidthClass.Compact
+    val cover = Modifier.size(if (wide && shortWindow()) ART_SIZE_SHORT else ART_SIZE).skeleton(skeleton, if (round) PleyShape.Circle else PleyShape.Card)
+    if (wide) {
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(cover)
             Spacer(Modifier.width(24.dp))
@@ -333,6 +341,19 @@ internal fun MusicHeaderSkeleton(round: Boolean) {
 }
 
 private val ART_SIZE = 200.dp
+
+/** The art beside the title in a short window. */
+private val ART_SIZE_SHORT = 144.dp
+
+/** Windows less tall than this are short: a phone on its side, a car's low or split screen. */
+private val SHORT_BELOW = 480.dp
+
+/** Whether the window is short ([SHORT_BELOW]), in the dp the page is drawn in (a car's are a third larger). */
+@Composable
+internal fun shortWindow(): Boolean {
+    val height = LocalWindowInfo.current.containerSize.height
+    return with(LocalDensity.current) { height.toDp() } < SHORT_BELOW
+}
 
 /** Summaries longer than this get More. */
 private const val SUMMARY_FOLD = 220

@@ -1139,24 +1139,34 @@ sheets, menus, dialogs and messages too, and the controls over the video keep
 24 dp from each other and from the screen's edges. Play sits between
 10 seconds back and 10 seconds forward, the seek bar is taller, and the
 bottom row keeps Subtitles, Audio, Fit and Next episode (Quality is in
-Settings, chapters show on the seek bar, and there is no Lock). Every
+Settings, chapters show on the seek bar, and there is no Lock), with
+their icons alone where the names don't fit the width (a narrow screen,
+longer words): a car's row doesn't scroll. Every
 page of the app is car-sized the same way, its dialogs too. The rail
 shows icons alone, centred on its height, as Android Auto's own does
-(all five tabs fit the smallest screen); tiles' captions and badges are
+(all five tabs fit the smallest screen), and so does the bar under a
+narrow portrait page, where five names of 24 sp ran into each other;
+tiles' captions and badges are
 24 sp, a title taking two lines rather than being cut; the home page's
 banner is no taller than the room above the bar of what plays; and an
 artist's, album's or playlist's cover stands beside its title, as an
-item's poster does, so Play is in view. Music's Now Playing and the bar
+item's poster does, so Play is in view; in a short window (a small or
+split car screen, a phone on its side) an artist's or album's cover is
+smaller and what it is isn't said, so Play and Shuffle stay side by side
+above the bar of what plays. Music's Now Playing and the bar
 of what plays are car-sized too; Now Playing puts the cover beside the
 title, over the scrubber and the controls, as in any short, wide window
 (a phone on its side too). These layouts hold on every screen Android Auto
 gives parked apps, as Google's Desktop Head Unit configurations test
 them: a small landscape screen (800 × 480), the wide strip of a wide
 screen (1920 × 484) and a portrait one (1042 × 1080), denser screens,
-and what a car's tall screen gives the app (1042 × 991 at
-185 dpi, and half that height when the car splits its screen); their
+what a car's tall screen gives the app (1042 × 991 at
+185 dpi, and half that height when the car splits its screen), a wide,
+low screen across the dashboard (1920 × 720), a full HD one, and tall
+and narrow portrait ones (1080 × 1920, 480 × 800); their
 tests draw each and check every control. Now Playing's cover is as large
-as the title, the scrubber and the controls under it leave room for. Whether a screen is a car's comes from
+as the title, the scrubber and the controls under it leave room for,
+with air between it and the title. Whether a screen is a car's comes from
 Android Auto (`CarConnection`, as Google tells parked apps to check):
 another screen the phone drives, such as a monitor, keeps the phone's
 sizes. A debuggable build counts the displays the developer options

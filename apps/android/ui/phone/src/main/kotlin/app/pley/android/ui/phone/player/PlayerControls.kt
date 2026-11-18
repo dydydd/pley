@@ -40,7 +40,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -233,7 +235,9 @@ private fun GlyphButton(label: String, size: Dp, onClick: () -> Unit, glyph: @Co
  * Chapters · Lock · Next episode, spread across the width as far as they
  * fit and scrolling when they don't. On a car's screen, Subtitles · Audio
  * · Fit · Next episode, kept clear of its edges: Quality is in Settings,
- * the chapters show on the seek bar, and nothing there needs a lock.
+ * the chapters show on the seek bar, and nothing there needs a lock. A
+ * car's row doesn't scroll: where its names don't fit (a narrow screen,
+ * longer words), it shows the icons alone.
  */
 @Composable
 internal fun BottomBar(state: PlayerScreenState, picture: PictureState, screenAspect: () -> Float, modifier: Modifier = Modifier) {
@@ -263,33 +267,48 @@ private fun BottomButtons(state: PlayerScreenState, picture: PictureState, scree
     Box(Modifier.fillMaxWidth().heightIn(min = BarItemHeight)) {
         AnimatedVisibility(state.answered, enter = fadeIn(PleyMotion.reveal()), exit = fadeOut(PleyMotion.reveal())) {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
-                Row(
-                    Modifier
-                        .horizontalScroll(rememberScrollState())
-                        .widthIn(min = maxWidth),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+                val width = maxWidth
+                val buttons: @Composable (named: Boolean) -> Unit = { named ->
                     if (state.subtitles.isNotEmpty()) {
-                        BarItem(PleyIcons.Captions, stringResource(R.string.player_subtitles)) { state.open(SheetPage.Subtitles) }
+                        BarItem(PleyIcons.Captions, stringResource(R.string.player_subtitles), named = named) { state.open(SheetPage.Subtitles) }
                     }
                     if (state.audio.size > 1) {
-                        BarItem(PleyIcons.AudioLines, stringResource(R.string.player_audio)) { state.open(SheetPage.Audio) }
+                        BarItem(PleyIcons.AudioLines, stringResource(R.string.player_audio), named = named) { state.open(SheetPage.Audio) }
                     }
                     if (!car && state.qualities.isNotEmpty()) {
                         BarItem(PleyIcons.Gauge, stringResource(R.string.player_quality)) { state.open(SheetPage.Quality) }
                     }
-                    FitItem(state, picture, screenAspect)
+                    FitItem(state, picture, screenAspect, named)
                     if (!car && state.chapters.size > 1) {
                         BarItem(PleyIcons.ListOrdered, stringResource(R.string.player_chapters)) { state.open(SheetPage.Chapters) }
                     }
                     if (!car) BarItem(PleyIcons.Lock, stringResource(R.string.player_lock), onClick = state::lock)
                     if (state.episode) {
-                        BarItem(PleyIcons.SkipForward, stringResource(R.string.player_next_episode)) {
+                        BarItem(PleyIcons.SkipForward, stringResource(R.string.player_next_episode), named = named) {
                             state.touched()
                             state.controller.playNext()
                         }
                     }
+                }
+                if (car) {
+                    // Measured with their names first, drawn with them only if they fit: nothing here scrolls.
+                    SubcomposeLayout(Modifier.fillMaxWidth()) { constraints ->
+                        val measure = subcompose(false) { Row(Modifier.clearAndSetSemantics { }) { buttons(true) } }
+                        val needed = measure.maxOfOrNull { it.maxIntrinsicWidth(constraints.maxHeight) } ?: 0
+                        val named = needed <= constraints.maxWidth
+                        val row = subcompose(true) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) { buttons(named) }
+                        }.map { it.measure(constraints) }
+                        layout(constraints.maxWidth, row.maxOfOrNull { it.height } ?: 0) { row.forEach { it.place(0, 0) } }
+                    }
+                } else {
+                    Row(
+                        Modifier
+                            .horizontalScroll(rememberScrollState())
+                            .widthIn(min = width),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) { buttons(true) }
                 }
             }
         }
@@ -298,7 +317,7 @@ private fun BottomButtons(state: PlayerScreenState, picture: PictureState, scree
 
 /** Fit, Fill or Zoom: the button names what it does next, as the hybrid player's did. */
 @Composable
-private fun FitItem(state: PlayerScreenState, picture: PictureState, screenAspect: () -> Float) {
+private fun FitItem(state: PlayerScreenState, picture: PictureState, screenAspect: () -> Float, named: Boolean = true) {
     // Read again when the mode or the video's shape changes.
     val next by remember(picture) { derivedStateOf { picture.nextMode(screenAspect()) } }
     val (label, hint) = when (next) {
@@ -306,18 +325,20 @@ private fun FitItem(state: PlayerScreenState, picture: PictureState, screenAspec
         FitMode.Zoom -> R.string.player_zoom to R.string.player_zoom_hint
         else -> R.string.player_fit to R.string.player_fit_hint
     }
-    BarItem(if (next == FitMode.Fit) PleyIcons.Minimize else PleyIcons.Maximize, stringResource(label), description = stringResource(hint)) {
+    BarItem(if (next == FitMode.Fit) PleyIcons.Minimize else PleyIcons.Maximize, stringResource(label), description = stringResource(hint), named = named) {
         state.touched()
         state.modeShown = picture.step(screenAspect())
     }
 }
 
-/** An icon and a labelMedium label, 48 dp tall. */
+/** An icon and a labelMedium label, 48 dp tall; not [named], the icon alone, as wide as it is tall and said by its label. */
 @Composable
-internal fun BarItem(icon: PleyIcon, label: String, description: String? = null, onClick: () -> Unit) {
+internal fun BarItem(icon: PleyIcon, label: String, description: String? = null, named: Boolean = true, onClick: () -> Unit) {
+    val said = description ?: label.takeIf { !named }
     Row(
         Modifier
             .heightIn(min = BarItemHeight)
+            .then(if (named) Modifier else Modifier.widthIn(min = BarItemHeight))
             .clip(PleyShape.Pill)
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -325,13 +346,13 @@ internal fun BarItem(icon: PleyIcon, label: String, description: String? = null,
                 role = Role.Button,
                 onClick = onClick,
             )
-            .then(if (description != null) Modifier.semantics { contentDescription = description } else Modifier)
-            .padding(horizontal = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .then(if (said != null) Modifier.semantics { contentDescription = said } else Modifier)
+            .padding(horizontal = if (named) 12.dp else 0.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, contentDescription = null, size = 20.dp)
-        Text(label, style = MaterialTheme.typography.labelMedium, color = PleyColors.Fg, maxLines = 1)
+        Icon(icon, contentDescription = null, size = if (named) 20.dp else 24.dp)
+        if (named) Text(label, style = MaterialTheme.typography.labelMedium, color = PleyColors.Fg, maxLines = 1)
     }
 }
 

@@ -55,6 +55,11 @@ describes how they are made.
   plays by itself, in Android Auto too; Play tries it again.
 - Music, films and shows without a picture show Pley's mark on their
   placeholder, in Android Auto too.
+- On a small or split car screen and on a phone on its side, an artist's
+  or album's page keeps Play and Shuffle side by side above the bar of
+  what plays; Now Playing leaves room under the cover; and the bar under
+  a narrow car page shows its tabs' icons alone, as the player's bottom
+  row does there.
 
 ### Fixed
 

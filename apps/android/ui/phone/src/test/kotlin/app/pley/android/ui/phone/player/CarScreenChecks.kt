@@ -18,7 +18,8 @@ import org.junit.Assert.assertTrue
  * control on screen, 64 dp at least in the car's own dp, and none over
  * another. The screens are the Desktop Head Unit's test configurations
  * (developer.android.com/training/cars/parked/auto): small landscape,
- * the wide landscape strip and portrait, with a denser screen besides.
+ * the wide landscape strip and portrait, with a denser screen besides,
+ * a car's tall screen whole and split, and the other shapes cars have.
  */
 internal object CarScreenChecks {
     /** [labels]' controls, found by content description or text, checked as above. */
@@ -75,4 +76,14 @@ internal object CarScreenChecks {
      */
     const val TALL = "w901dp-h857dp-land-185dpi"
     const val TALL_SPLIT = "w901dp-h428dp-land-185dpi"
+
+    /**
+     * Other shapes cars have: a wide, low screen across the dashboard (1920 × 720 at 240 dpi), a full HD one
+     * (1920 × 1080 at 320 dpi), a tall portrait one (1080 × 1920 at 240 dpi), and the narrowest portrait window
+     * (480 × 800 at 160 dpi).
+     */
+    const val ULTRAWIDE = "w1280dp-h480dp-land-hdpi"
+    const val FULL_HD = "w960dp-h540dp-land-xhdpi"
+    const val TALL_PORTRAIT = "w720dp-h1280dp-port-hdpi"
+    const val NARROW = "w480dp-h800dp-port-mdpi"
 }

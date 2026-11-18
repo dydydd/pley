@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.IntentFilter
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.SemanticsPropertiesAndroid
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
@@ -201,6 +202,28 @@ class PhoneShellTest {
     @Test
     @Config(qualifiers = CarScreenChecks.TALL_SPLIT)
     fun onATallCarScreenSplitInTwoEveryTabOfTheRailIsOnScreen() = railFitsTheCar("tall-split")
+
+    @Test
+    @Config(qualifiers = CarScreenChecks.NARROW)
+    fun underANarrowCarPageTheBarShowsItsTabsIconsAloneEachNamedAndACarsSize() {
+        show(PhoneStart(server = TestGraph.SERVER, signedIn = true), car = true)
+        showsHome()
+        val density = compose.density.density
+        val window = compose.onRoot().fetchSemanticsNode().boundsInRoot
+        val tabs = PhoneTab.entries.map { it to tab(it).fetchSemanticsNode().boundsInRoot }
+        for ((tab, bounds) in tabs) {
+            // No name drawn (five of 24 sp ran into each other): the icon says it to whoever listens.
+            tab(tab).assert(SemanticsMatcher.keyNotDefined(SemanticsProperties.Text))
+            assertTrue("$tab at $bounds, in $window", bounds.left >= 0f && bounds.right <= window.right + 0.5f && bounds.bottom <= window.bottom + 0.5f)
+            assertTrue("$tab is ${bounds.width / density} × ${bounds.height / density} dp", minOf(bounds.width, bounds.height) / density >= 63.5f)
+        }
+        for ((before, after) in tabs.zipWithNext()) {
+            assertTrue("${before.first} over ${after.first}", before.second.right <= after.second.left + 0.5f)
+        }
+        compose.onAllNodesWithContentDescription("Libraries").fetchSemanticsNodes().let { assertTrue("Libraries isn't named", it.isNotEmpty()) }
+        tab(PhoneTab.Playlists).performClick()
+        tab(PhoneTab.Playlists).assertIsSelected()
+    }
 
     @Test
     fun nothingIsAskedOfSignInOrPlaybackBeforeTheFirstFrame() {

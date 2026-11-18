@@ -100,6 +100,7 @@ import app.pley.android.ui.phone.livetv.liveTvEntries
 import app.pley.android.ui.phone.music.musicEntries
 import app.pley.android.ui.phone.onboarding.onboardingEntries
 import app.pley.android.ui.phone.player.CarSized
+import app.pley.android.ui.phone.player.LocalCarScreen
 import app.pley.android.ui.phone.player.onCarScreen
 import app.pley.android.ui.phone.playlists.playlistsEntries
 import app.pley.android.ui.phone.remote.CastTarget
@@ -351,6 +352,7 @@ private fun Tabs(navigation: PhoneNavigation, shell: PhoneShellState, entries: (
     }
     val metrics = LocalPhoneMetrics.current
     val rail = metrics.rail
+    val iconsAlone = rail || LocalCarScreen.current
     val tab = navigation.tab
     val itemColors = ShortNavigationBarItemDefaults.colors(
         selectedIconColor = PleyColors.AccentBright,
@@ -370,11 +372,12 @@ private fun Tabs(navigation: PhoneNavigation, shell: PhoneShellState, entries: (
                     icon = {
                         // The rail beside the page (a phone on its side, a tablet, a car's screen) shows icons alone,
                         // read out by name, in a column, as Android Auto's own rail has them; centred labels of
-                        // different lengths left its icons out of line. The bar under a phone's page keeps its labels.
-                        val icon = @Composable { Icon(item.icon, contentDescription = if (rail) name else null, tint = LocalContentColor.current) }
+                        // different lengths left its icons out of line. The bar under a phone's page keeps its labels;
+                        // under a car's narrow page it has icons alone too, as five labels of 24 sp ran into each other.
+                        val icon = @Composable { Icon(item.icon, contentDescription = if (iconsAlone) name else null, tint = LocalContentColor.current) }
                         if (item == PhoneTab.Me) RequestsTabIcon(shell.requests, icon) else icon()
                     },
-                    label = if (rail) null else ({ FittedLabel(name) }),
+                    label = if (iconsAlone) null else ({ FittedLabel(name) }),
                     colors = itemColors,
                     modifier = Modifier.testTag(TAB_TAG + item.name),
                 )
